@@ -364,6 +364,19 @@ test('document policies separate design soundness from executable readiness', as
     assert.match(policy, /traceability-table completeness/i, label);
     assert.match(policy, /unspecified implementation detail/i, label);
     assert.match(policy, /missing future code\/tests/i, label);
+
+    // Follow-up finding: the executable-semantic wording boundary must be the
+    // exact same sentence, byte-for-byte, in both modes — not full-only.
+    assert.match(
+      policy,
+      /wording defect blocks only when it changes an executable command, path, condition, negation, ordering rule, or acceptance result/i,
+      label,
+    );
+    assert.match(
+      policy,
+      /missing future code\/tests remain implementation_verification evidence/i,
+      label,
+    );
   }
   assert.throws(() => documentReviewPolicyText('unknown'), /document review mode/u);
 });
