@@ -281,9 +281,26 @@ Missing future implementation/tests are implementation_verification evidence
 with objective acceptance evidence, not document blockers. Document finding-only
 disagreement does not add a same-round reviewer; operational floors remain.
 
+### design-validation
+
+For an all-design-document/ADR scope, review implementation feasibility and
+design soundness: block only the shared functional-contradiction,
+infeasibility, and safety/security/compatibility/rollback-harm blockers
+above. Prose completeness and unspecified implementation detail never block.
+
+### full-readiness
+
+For mixed, ambiguous, or executable document scopes, full-readiness applies:
+additionally block a missing executable decision or an acceptance criterion
+that fails to be objectively verifiable. Prose completeness, wording polish,
+formatting, and harmless typos still never block. Mixed or ambiguous scope
+classification uses full-readiness.
+
 Artifact Gate readiness owns the final document verdict: `DOCUMENT_BLOCKED` =>
 `REQUEST_CHANGES`; `READY_FOR_IMPLEMENTATION` with deferred findings =>
-`CONCERN`; and `READY_FOR_IMPLEMENTATION` with no deferred findings => `APPROVE`.
+`CONCERN`; and `READY_FOR_IMPLEMENTATION` with no deferred findings =>
+`APPROVE`, across both modes. Readiness stays the final verdict authority; the
+implementation phase retains normal code review, not this document policy.
 
 ## Links
 

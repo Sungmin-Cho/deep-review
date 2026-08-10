@@ -466,11 +466,28 @@ with objective acceptance evidence, not document blockers. Document findings
 alone do not allocate a same-round expansion; reviewer minimum/floor and
 readiness-mismatch expansion remain active.
 
+### design-validation
+
+For an all-design-document/ADR scope, review implementation feasibility and
+design soundness: block only the shared functional-contradiction,
+infeasibility, and safety/security/compatibility/rollback-harm blockers
+above. Prose completeness and unspecified implementation detail never block.
+
+### full-readiness
+
+For mixed, ambiguous, or executable document scopes, full-readiness applies:
+additionally block a missing executable decision or an acceptance criterion
+that fails to be objectively verifiable. Prose completeness, wording polish,
+formatting, and harmless typos still never block. Mixed or ambiguous scope
+classification uses full-readiness.
+
 Artifact Gate readiness owns the final document verdict:
 `DOCUMENT_BLOCKED` => `REQUEST_CHANGES`; `READY_FOR_IMPLEMENTATION` with
 deferred findings => `CONCERN`; and `READY_FOR_IMPLEMENTATION` with no deferred
-findings => `APPROVE`. Recompute this verdict from the sealed Artifact Gate
-evidence during verification; do not add it to the readiness receipt schema.
+findings => `APPROVE`, across both modes. Recompute this verdict from the
+sealed Artifact Gate evidence during verification; do not add it to the
+readiness receipt schema. Readiness stays the final verdict authority; the
+implementation phase retains normal code review, not this document policy.
 
 For an implementation linked by a verified readiness receipt, evaluate every
 deferred finding against fresh final-implementation evidence before allowing

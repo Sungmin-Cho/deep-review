@@ -760,6 +760,12 @@ test('document instructions use practical blockers and readiness-owned final ver
     assert.match(normalized, nonBlockers);
     assert.match(normalized, deferredEvidence);
     assert.match(normalized, /DOCUMENT_BLOCKED.*REQUEST_CHANGES.*READY_FOR_IMPLEMENTATION.*APPROVE/is);
+    assert.match(normalized, /design-validation/u);
+    assert.match(normalized, /full-readiness/u);
+    assert.match(normalized, /design-validation.*implementation feasibility.*design soundness/is);
+    assert.match(normalized, /full-readiness.*missing executable decision.*objectively verif/is);
+    assert.match(normalized, /prose completeness.*(?:not|never).*block/is);
+    assert.match(normalized, /mixed.*full-readiness/is);
   }
   for (const source of korean) {
     const normalized = source.replace(/\s+/gu, ' ');
@@ -769,6 +775,10 @@ test('document instructions use practical blockers and readiness-owned final ver
     assert.match(normalized, /스타일.*가독성.*명명.*취향.*근거 없는 추측/is);
     assert.match(normalized, /구현 검증.*객관적으로/is);
     assert.match(normalized, /DOCUMENT_BLOCKED.*REQUEST_CHANGES.*READY_FOR_IMPLEMENTATION.*APPROVE/is);
+    assert.match(normalized, /design-validation.*구현 가능성.*설계 건전성/is);
+    assert.match(normalized, /full-readiness.*누락된 실행 가능 결정.*객관적으로 검증/is);
+    assert.match(normalized, /문구 완결성.*차단하지/is);
+    assert.match(normalized, /혼합.*full-readiness/is);
   }
 
   for (const relativePath of ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {
