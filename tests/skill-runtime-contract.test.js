@@ -766,6 +766,15 @@ test('document instructions use practical blockers and readiness-owned final ver
     assert.match(normalized, /full-readiness.*missing executable decision.*objectively verif/is);
     assert.match(normalized, /prose completeness.*(?:not|never).*block/is);
     assert.match(normalized, /mixed.*full-readiness/is);
+
+    // The design-validation section's actual blocker list must include the
+    // runtime policy's grounded behavior-causing unsound-design blocker
+    // (hooks/scripts/lib/assignment-rubrics.mjs DESIGN_VALIDATION_POLICY),
+    // not just narrate "design soundness" review without listing it.
+    const designSection = (source.split(/### full-readiness/u)[0].split(/### design-validation/u)[1] ?? '')
+      .replace(/\s+/gu, ' ');
+    assert.notEqual(designSection, '', 'design-validation section must exist before full-readiness');
+    assert.match(designSection, /grounded.*behavior-causing unsound design/is);
   }
   for (const source of korean) {
     const normalized = source.replace(/\s+/gu, ' ');
@@ -779,6 +788,11 @@ test('document instructions use practical blockers and readiness-owned final ver
     assert.match(normalized, /full-readiness.*누락된 실행 가능 결정.*객관적으로 검증/is);
     assert.match(normalized, /문구 완결성.*차단하지/is);
     assert.match(normalized, /혼합.*full-readiness/is);
+
+    const designSectionKo = (source.split(/### full-readiness/u)[0].split(/### design-validation/u)[1] ?? '')
+      .replace(/\s+/gu, ' ');
+    assert.notEqual(designSectionKo, '', 'design-validation section must exist before full-readiness');
+    assert.match(designSectionKo, /근거가 있고.*잘못된 동작을 유발하는 불건전한 설계/is);
   }
 
   for (const relativePath of ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {

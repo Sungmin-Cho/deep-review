@@ -105,8 +105,9 @@ role- and provider-independent; it does not apply to implementation phase.
 
 For an all-design-document/ADR scope, review implementation feasibility and
 design soundness: block only the shared functional-contradiction,
-infeasibility, and safety/security/compatibility/rollback-harm blockers
-above. Prose completeness and unspecified implementation detail never block.
+infeasibility, safety/security/compatibility/rollback-harm, and grounded
+behavior-causing unsound design blockers above. Prose completeness and
+unspecified implementation detail never block.
 
 ### full-readiness
 
