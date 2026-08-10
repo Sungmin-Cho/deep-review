@@ -177,6 +177,21 @@ export function parseExecutionPlanDocument(document, reviewerId) {
       if (!['success', 'unknown', 'failed'].includes(candidate.last_status)) {
         throw new Error(`routing plan candidate has invalid last_status: ${candidate.reviewer_id}`);
       }
+      if (Array.isArray(candidate.expansion_route_templates)) {
+        for (const template of candidate.expansion_route_templates) {
+          if (!template || typeof template !== 'object' || Array.isArray(template)) {
+            throw new Error(`routing plan expansion route template must be an object for ${candidate.reviewer_id}`);
+          }
+          if (['artifact_phase', 'risk', 'document_review_mode'].some((field) => Object.hasOwn(template, field))) {
+            const templateContext = normalizeInlineDocumentContext(template);
+            if (templateContext.artifactPhase !== planContext.artifactPhase
+                || templateContext.risk !== planContext.risk
+                || templateContext.documentReviewMode !== planContext.documentReviewMode) {
+              throw new Error(`routing plan expansion route template document context mismatch for ${candidate.reviewer_id}`);
+            }
+          }
+        }
+      }
       candidateById.set(candidate.reviewer_id, candidate);
     }
   }
