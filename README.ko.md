@@ -92,6 +92,7 @@ Claude Code 슬래시 커맨드와 Codex 스킬은 동일한 라우트 문법을
 - `--dry-run` / `--explain-routing`(리뷰 전용)은 artifact 분류, capability-aware 라우팅 계획, provenance를 출력하고 리뷰어 실행 전에 정지합니다.
 - `--routing <auto|fast|balanced|quality>`은 라우팅 정책을 선택합니다. 반복 가능한 `--model <provider>=<model>` / `--effort <provider>=<effort>`은 provider override를, `--reviewer-model <reviewer>=<model>` / `--reviewer-effort <reviewer>=<effort>`은 canonical reviewer override를 설정합니다.
 - `--allow-fallback`은 leaf runtime이 요청 model 또는 effort를 명시적으로 거부할 때 한 번의 visible retry를 허용합니다. 인증 실패, timeout, 빈 출력, 모호한 오류, 일반 실패는 retry하지 않으며, 승인 없이는 명시적 거부를 fail-closed합니다.
+- `--no-fallback`은 project 또는 user policy가 fallback을 허용해도 명시적으로 비활성화하며 `--allow-fallback`과 함께 사용할 수 없습니다.
 - `--allow-classifier`는 dry-run/explain에서 모호한 artifact에 semantic 분류를 사용할 수 있게 합니다. 제한된 artifact 내용은 untrusted data로 취급해 stdin으로만 전달하며, secret-like 내용은 외부로 보내지 않고 결정적 분류로 fallback합니다.
 - `--no-*`, `--codex`, `--codex-only`, `--ultracode`는 hard
   eligibility/required-assignment 제약입니다. reviewer-level override는 해당

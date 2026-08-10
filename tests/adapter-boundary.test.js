@@ -52,6 +52,102 @@ test('routing plan leaf validates protocol and maps only its canonical reviewer 
   assert.throws(() => parseExecutionPlanDocument(document, 'agy'), /reviewer.*agy/i);
 });
 
+test('routing-plan fallback authority accepts only boolean true across nested and legacy fields', async () => {
+  const { loadExecutionPlan, parseExecutionPlanDocument } = await import(planUrl);
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'deep-review-fallback-plan-'));
+  const planPath = path.join(temp, 'routing-plan.json');
+  const validCases = [
+    ['true', true, true],
+    ['false', false, false],
+    ['null', null, false],
+    ['missing', undefined, false],
+  ];
+  const invalidCases = [
+    ['string', 'false'],
+    ['number', 1],
+    ['object', {}],
+    ['array', []],
+  ];
+  const documentFor = (field, value) => {
+    const route = { reviewer_id: 'claude-opus', resolved: { model: 'opus', effort: 'high' } };
+    if (field === 'fallback') {
+      route.fallback = { occurred: false };
+      if (value !== undefined) route.fallback.allowed = value;
+    } else if (value !== undefined) {
+      route.allow_fallback = value;
+    }
+    return { protocol_version: '2.0', routes: [route] };
+  };
+
+  for (const field of ['fallback', 'allow_fallback']) {
+    for (const [label, value, expected] of validCases) {
+      const document = documentFor(field, value);
+      assert.equal(parseExecutionPlanDocument(document, 'claude-opus').allowFallback, expected, `${field}:${label}:direct`);
+      fs.writeFileSync(planPath, JSON.stringify(document));
+      assert.equal(loadExecutionPlan(planPath, 'claude-opus').allowFallback, expected, `${field}:${label}:load`);
+    }
+    for (const [label, value] of invalidCases) {
+      const document = documentFor(field, value);
+      assert.throws(
+        () => parseExecutionPlanDocument(document, 'claude-opus'),
+        /fallback authority.*boolean/u,
+        `${field}:${label}:direct`,
+      );
+      fs.writeFileSync(planPath, JSON.stringify(document));
+      assert.throws(
+        () => loadExecutionPlan(planPath, 'claude-opus'),
+        /fallback authority.*boolean/u,
+        `${field}:${label}:load`,
+      );
+    }
+  }
+});
+
+test('inline execution-route fallback authority accepts only boolean true across nested and legacy fields', async () => {
+  const { parseExecutionRouteJson } = await import(planUrl);
+  const validCases = [
+    ['true', true, true],
+    ['false', false, false],
+    ['null', null, false],
+    ['missing', undefined, false],
+  ];
+  const invalidCases = [
+    ['string', 'false'],
+    ['number', 1],
+    ['object', {}],
+    ['array', []],
+  ];
+  const routeFor = (field, value) => {
+    const route = {
+      protocol_version: '3.0', reviewer_id: 'agy', provider: 'agy', adapter_id: 'agy-cli',
+      assignment_role: 'standard', rubric_id: 'standard-v1', wave: 1, required: true,
+      selection_reason: 'test route', requested: { model: 'future-model', effort: null, source: 'cli-reviewer' },
+      resolved: { model: 'future-model', effort: null },
+    };
+    if (field === 'fallback') {
+      route.fallback = { occurred: false };
+      if (value !== undefined) route.fallback.allowed = value;
+    } else if (value !== undefined) {
+      route.allow_fallback = value;
+    }
+    return route;
+  };
+
+  for (const field of ['fallback', 'allow_fallback']) {
+    for (const [label, value, expected] of validCases) {
+      const parsed = parseExecutionRouteJson(JSON.stringify(routeFor(field, value)), 'agy');
+      assert.equal(parsed.allowFallback, expected, `${field}:${label}`);
+    }
+    for (const [label, value] of invalidCases) {
+      assert.throws(
+        () => parseExecutionRouteJson(JSON.stringify(routeFor(field, value)), 'agy'),
+        /fallback authority.*boolean/u,
+        `${field}:${label}`,
+      );
+    }
+  }
+});
+
 test('routing plan leaf reads both legacy 2.0 and assignment-aware 3.0 documents', async () => {
   const { parseExecutionPlanDocument } = await import(planUrl);
   const legacy = {

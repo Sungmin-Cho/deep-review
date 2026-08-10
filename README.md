@@ -92,6 +92,7 @@ Claude Code slash commands and Codex skills are distinct host entrypoints for th
 - `--dry-run` / `--explain-routing` (review-only) print the artifact classification, capability-aware routing plan, and provenance, then stop before any reviewer.
 - `--routing <auto|fast|balanced|quality>` selects a routing policy. Repeated `--model <provider>=<model>` / `--effort <provider>=<effort>` set provider overrides; repeated `--reviewer-model <reviewer>=<model>` / `--reviewer-effort <reviewer>=<effort>` set canonical reviewer overrides.
 - `--allow-fallback` permits one visible retry when a leaf runtime explicitly rejects the requested model or effort. Authentication failures, timeouts, empty output, ambiguous errors, and generic failures never retry; without authorization, explicit rejection fails closed.
+- `--no-fallback` explicitly disables fallback even when project or user policy enables it; it conflicts with `--allow-fallback`.
 - `--allow-classifier` lets dry-run/explain use semantic classification for ambiguous artifacts. Bounded artifact content is treated as untrusted data and sent through stdin; secret-like content is never sent and falls back to deterministic classification.
 - `--no-*`, `--codex`, `--codex-only`, and `--ultracode` are hard
   eligibility/required-assignment constraints. Reviewer-level overrides require
