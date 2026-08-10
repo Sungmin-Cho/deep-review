@@ -238,7 +238,7 @@ function validateConstraints(requested, reviewer, policy, capability) {
   }
 }
 
-export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', policy = {}, overrides = {}, capabilities = [] }) {
+export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', policy = {}, overrides = {}, capabilities = [], artifactPhase, documentReviewMode }) {
   const capability = capabilityFor(reviewer, capabilities);
   if (!capability || capability.available === false) throw new Error(`ERROR_PROVIDER_UNAVAILABLE: ${reviewer.provider}`);
   const routingPolicy = overrides.routing_policy || policy.routing?.policy || 'auto';
@@ -327,6 +327,11 @@ export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', po
     resolved,
     fallback,
     route_explanation: `${unit.target_kind}/${risk}/${size}/${assignmentRole} -> ${profile.model_tier}/${profile.effort}; reviewer plan: ${profile.reviewer_plan}`,
+    ...(artifactPhase ? {
+      artifact_phase: artifactPhase,
+      risk,
+      document_review_mode: documentReviewMode,
+    } : {}),
   };
 }
 
@@ -415,6 +420,8 @@ export function buildRoutingPlan({
       policy,
       overrides,
       capabilities,
+      artifactPhase: assignmentPlan.artifact_phase,
+      documentReviewMode: assignmentPlan.document_review_mode,
     });
   };
   const routes = assignmentPlan.assignments.map(routedAssignment);
@@ -458,6 +465,7 @@ export function buildRoutingPlan({
     reviewer_strategy: reviewerStrategy,
     shadow_mode: policy.features?.routing_shadow_mode === true,
     artifact_phase: assignmentPlan.artifact_phase,
+    document_review_mode: assignmentPlan.document_review_mode,
     risk,
     size,
     progress: assignmentPlan.progress,

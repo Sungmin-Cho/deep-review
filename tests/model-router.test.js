@@ -399,6 +399,55 @@ test('buildRoutingPlan emits protocol 3.0 with adaptive assignments and full can
   assert.ok(unused.every((candidate) => candidate.expansion_route_templates
     .every((route) => route.wave === 2 && route.resolved)));
   assert.match(renderRoutingExplanation(plan), /claude-opus/);
+
+  const designPlan = buildRoutingPlan({
+    artifacts: [
+      { target_kind: 'design-document', path: 'docs/design.md' },
+      { target_kind: 'architecture-decision-record', path: 'docs/adr.md' },
+    ],
+    reviewers,
+    policy: { routing: { policy: 'auto' } },
+    overrides: { protocol_version: '2.0', routing_policy: 'auto', allow_fallback: false, providers: {}, reviewers: {} },
+    capabilities: [
+      capability(),
+      capability({ adapter_id: 'agy-cli', provider: 'agy', model_selection: { supported: true, aliases: ['a', 'b', 'c', 'd'], catalog_complete: false, transport: 'config:agy_model' }, effort_selection: { supported: false, levels: [], transport: 'none' } }),
+      capability({ adapter_id: 'codex-native-generic', provider: 'codex', model_selection: { supported: false, aliases: [], catalog_complete: false, transport: 'none' } }),
+    ],
+  });
+  assert.equal(designPlan.document_review_mode, 'design-validation');
+  for (const route of designPlan.routes) {
+    assert.equal(route.artifact_phase, 'document');
+    assert.equal(route.risk, designPlan.risk);
+    assert.equal(route.document_review_mode, 'design-validation');
+  }
+  for (const candidate of designPlan.candidate_reviewers) {
+    for (const route of candidate.expansion_route_templates || []) {
+      assert.equal(route.artifact_phase, 'document');
+      assert.equal(route.risk, designPlan.risk);
+      assert.equal(route.document_review_mode, 'design-validation');
+    }
+  }
+
+  const planPlan = buildRoutingPlan({
+    artifacts: [{ target_kind: 'implementation-plan', path: 'docs/plan.md' }],
+    reviewers,
+    policy: { routing: { policy: 'auto' } },
+    overrides: { protocol_version: '2.0', routing_policy: 'auto', allow_fallback: false, providers: {}, reviewers: {} },
+    capabilities: [
+      capability(),
+      capability({ adapter_id: 'agy-cli', provider: 'agy', model_selection: { supported: true, aliases: ['a', 'b', 'c', 'd'], catalog_complete: false, transport: 'config:agy_model' }, effort_selection: { supported: false, levels: [], transport: 'none' } }),
+      capability({ adapter_id: 'codex-native-generic', provider: 'codex', model_selection: { supported: false, aliases: [], catalog_complete: false, transport: 'none' } }),
+    ],
+  });
+  assert.equal(planPlan.document_review_mode, 'full-readiness');
+  for (const route of planPlan.routes) {
+    assert.equal(route.document_review_mode, 'full-readiness');
+  }
+  for (const candidate of planPlan.candidate_reviewers) {
+    for (const route of candidate.expansion_route_templates || []) {
+      assert.equal(route.document_review_mode, 'full-readiness');
+    }
+  }
 });
 
 test('legacy codex-companion capability never creates reviewer candidates or routes', async () => {

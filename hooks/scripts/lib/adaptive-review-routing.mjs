@@ -1,4 +1,4 @@
-import { rubricIdForRole } from './assignment-rubrics.mjs';
+import { rubricIdForRole, isDocumentReviewMode } from './assignment-rubrics.mjs';
 import { REVIEWER_IDS, REVIEWER_PROVIDERS } from './reviewer-ids.mjs';
 
 const DOCUMENT_TARGETS = new Set([
@@ -7,6 +7,10 @@ const DOCUMENT_TARGETS = new Set([
   'requirements-specification',
   'architecture-decision-record',
   'test-plan',
+]);
+const DESIGN_REVIEW_TARGETS = new Set([
+  'design-document',
+  'architecture-decision-record',
 ]);
 const RISK_ORDER = Object.freeze(['low', 'medium', 'high', 'critical']);
 const STATUS_ORDER = Object.freeze(['success', 'unknown', 'failed']);
@@ -69,6 +73,15 @@ export function classifyArtifactPhase(artifacts = []) {
   return artifacts.every((artifact) => DOCUMENT_TARGETS.has(artifact?.target_kind))
     ? 'document'
     : 'implementation';
+}
+
+export function classifyDocumentReviewMode(artifacts = []) {
+  if (!Array.isArray(artifacts) || artifacts.length === 0) return 'full-readiness';
+  const mode = artifacts.every((artifact) => DESIGN_REVIEW_TARGETS.has(artifact?.target_kind))
+    ? 'design-validation'
+    : 'full-readiness';
+  if (!isDocumentReviewMode(mode)) throw new Error(`unsupported document review mode: ${String(mode)}`);
+  return mode;
 }
 
 function documentPrimaryRole(artifacts) {
@@ -192,6 +205,7 @@ export function planReviewerAssignments(options = {}) {
   const artifacts = Array.isArray(options.artifacts) ? options.artifacts : [];
   const risk = validateRisk(options.risk || 'low');
   const artifactPhase = classifyArtifactPhase(artifacts);
+  const documentReviewMode = classifyDocumentReviewMode(artifacts);
   const reviewerStrategy = options.reviewerStrategy || 'adaptive';
   if (!['adaptive', 'static'].includes(reviewerStrategy)) {
     throw new Error(`unsupported reviewer strategy: ${String(reviewerStrategy)}`);
@@ -367,6 +381,7 @@ export function planReviewerAssignments(options = {}) {
 
   return {
     artifact_phase: artifactPhase,
+    document_review_mode: documentReviewMode,
     risk,
     progress: progressState,
     reviewer_strategy: reviewerStrategy,

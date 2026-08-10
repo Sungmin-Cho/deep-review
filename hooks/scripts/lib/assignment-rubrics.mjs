@@ -27,6 +27,17 @@ export function validateRubricAssignment(role, rubricId) {
   return { role, rubricId: expected };
 }
 
+export const DOCUMENT_REVIEW_MODES = Object.freeze([
+  'design-validation',
+  'full-readiness',
+]);
+
+const DOCUMENT_REVIEW_MODE_SET = new Set(DOCUMENT_REVIEW_MODES);
+
+export function isDocumentReviewMode(value) {
+  return DOCUMENT_REVIEW_MODE_SET.has(value);
+}
+
 const DOCUMENT_REVIEW_POLICY = Object.freeze([
   'Document blockers are limited to concrete repository/artifact-grounded functional contradiction; implementation infeasibility or a missing decision that prevents execution; reachable safety/security/compatibility/rollback harm; or acceptance criteria incapable of objective verification.',
   'Style, readability, naming, preference, and ungrounded speculation are advisory/info or suppressed, not Warning/Critical pre-implementation blockers.',
