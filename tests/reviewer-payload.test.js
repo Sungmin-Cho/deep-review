@@ -83,6 +83,13 @@ function doctrineFromPrompt(prompt) {
   return match?.[1].trimEnd() ?? '';
 }
 
+function practicalPolicyFromPrompt(prompt) {
+  const match = prompt.match(
+    /### Practical document policy\n([\s\S]*?)(?=\n=====|$)/,
+  );
+  return match ? `### Practical document policy\n${match[1].trimEnd()}` : null;
+}
+
 function writeSingleReviewerPlan(root, {
   reviewerId,
   provider,
@@ -90,6 +97,7 @@ function writeSingleReviewerPlan(root, {
   assignmentRole,
   artifactPhase = 'implementation',
   risk = 'low',
+  documentReviewMode = 'full-readiness',
   model = 'review-model',
   effort = 'high',
 }) {
@@ -100,6 +108,7 @@ function writeSingleReviewerPlan(root, {
     shadow_mode: false,
     artifact_phase: artifactPhase,
     risk,
+    document_review_mode: documentReviewMode,
     progress: 'initial',
     minimum_reviewers: 1,
     maximum_reviewers: 4,
@@ -310,32 +319,71 @@ test('routing-plan assignment injects only the canonical trusted rubric for the 
   assert.ok(prompt.trimEnd().endsWith('REAL DIFF'));
 });
 
-test('document routes inject phase-aware practical policy for every provider and role', async () => {
+test('document policies separate design soundness from executable readiness', async () => {
+  const { documentReviewPolicyText } = await import(pathToFileURL(
+    join(pluginRoot, 'hooks', 'scripts', 'lib', 'assignment-rubrics.mjs'),
+  ).href);
+  const design = documentReviewPolicyText('design-validation');
+  const full = documentReviewPolicyText('full-readiness');
+  assert.match(design, /implementation infeasibility/i);
+  assert.match(design, /boundary|responsibility|data flow/i);
+  assert.match(design, /prose completeness.*not.*block/i);
+  assert.doesNotMatch(design, /missing executable decision/i);
+  assert.match(full, /missing executable decision/i);
+  assert.match(full, /Block only.*missing executable decision/i);
+  assert.match(full, /acceptance criteria.*objectively verif/i);
+  assert.match(full, /prose completeness.*not.*block/i);
+  assert.throws(() => documentReviewPolicyText('unknown'), /document review mode/u);
+});
+
+test('document routes inject mode-aware practical policy for every provider and role', async () => {
   const { buildReviewerPayload } = await loadPayload();
-  for (const route of [
+  const providerRoutes = [
     { reviewerId: 'claude-opus', provider: 'claude', adapterId: 'claude-cli', assignmentRole: 'feasibility' },
     { reviewerId: 'codex-review', provider: 'codex', adapterId: 'codex-native-generic', assignmentRole: 'traceability' },
     { reviewerId: 'codex-adversarial', provider: 'codex', adapterId: 'codex-companion', assignmentRole: 'adversarial' },
-  ]) {
-    const temp = temporaryDirectory(`deep-review-document-policy-${route.reviewerId}-`);
-    const routingPlan = writeSingleReviewerPlan(temp, {
-      ...route,
-      artifactPhase: 'document',
-      risk: 'high',
-    });
-    const result = buildReviewerPayload({
-      pluginRoot,
-      routingPlan,
-      reviewerId: route.reviewerId,
-      diff: 'DOCUMENT DIFF',
-    });
-    const prompt = readFileSync(result.promptFile, 'utf8');
-    assert.match(prompt, /artifact_phase: document/);
-    assert.match(prompt, /risk: high/);
-    assert.match(prompt, /practical document policy/i);
-    assert.match(prompt, /concrete repository\/artifact-grounded functional contradiction/i);
-    assert.match(prompt, /style.*readability.*naming.*preference/i);
-    assert.match(prompt, /missing future implementation\/tests.*implementation_verification/i);
+  ];
+  const modeExpectations = [
+    {
+      documentReviewMode: 'design-validation',
+      mustMatch: [/implementation infeasibility/i, /boundary|responsibility|data flow/i, /prose completeness.*not.*block/i],
+      mustNotMatch: [/missing executable decision/i],
+    },
+    {
+      documentReviewMode: 'full-readiness',
+      mustMatch: [
+        /missing executable decision/i,
+        /Block only.*missing executable decision/i,
+        /acceptance criteria.*objectively verif/i,
+        /prose completeness.*not.*block/i,
+      ],
+      mustNotMatch: [],
+    },
+  ];
+
+  for (const { documentReviewMode, mustMatch, mustNotMatch } of modeExpectations) {
+    for (const route of providerRoutes) {
+      const temp = temporaryDirectory(`deep-review-document-policy-${documentReviewMode}-${route.reviewerId}-`);
+      const routingPlan = writeSingleReviewerPlan(temp, {
+        ...route,
+        artifactPhase: 'document',
+        risk: 'high',
+        documentReviewMode,
+      });
+      const result = buildReviewerPayload({
+        pluginRoot,
+        routingPlan,
+        reviewerId: route.reviewerId,
+        diff: 'DOCUMENT DIFF',
+      });
+      const prompt = readFileSync(result.promptFile, 'utf8');
+      assert.match(prompt, /artifact_phase: document/);
+      assert.match(prompt, /risk: high/);
+      assert.match(prompt, new RegExp(`document_review_mode: ${documentReviewMode}`));
+      assert.match(prompt, /practical document policy/i);
+      for (const pattern of mustMatch) assert.match(prompt, pattern);
+      for (const pattern of mustNotMatch) assert.doesNotMatch(prompt, pattern);
+    }
   }
 
   const implementationRoot = temporaryDirectory('deep-review-document-policy-negative-');
@@ -789,6 +837,82 @@ test('an inline execution route produces the same trusted assignment as a plan f
   const payload = readFileSync(result.promptFile, 'utf8');
   assert.match(payload, /assignment_role: feasibility/u);
   assert.match(payload, /rubric_id: feasibility-v1/u);
+});
+
+test('inline document routes inject byte-identical practical policy for every provider', async () => {
+  const { buildReviewerPayload } = await loadPayload();
+  const providerRoutes = [
+    { reviewerId: 'claude-opus', provider: 'claude', adapterId: 'claude-native-agent', assignmentRole: 'feasibility' },
+    { reviewerId: 'codex-review', provider: 'codex', adapterId: 'codex-native-generic', assignmentRole: 'traceability' },
+    { reviewerId: 'codex-adversarial', provider: 'codex', adapterId: 'codex-companion', assignmentRole: 'adversarial' },
+  ];
+
+  for (const documentReviewMode of ['design-validation', 'full-readiness']) {
+    const policySections = [];
+    for (const route of providerRoutes) {
+      const executionRoute = {
+        protocol_version: '3.0',
+        reviewer_id: route.reviewerId,
+        provider: route.provider,
+        adapter_id: route.adapterId,
+        assignment_role: route.assignmentRole,
+        rubric_id: `${route.assignmentRole}-v1`,
+        wave: 1,
+        required: true,
+        selection_reason: 'inline document policy test',
+        artifact_phase: 'document',
+        risk: 'high',
+        document_review_mode: documentReviewMode,
+        resolved: { model: 'review-model', effort: 'high' },
+      };
+      const result = await buildReviewerPayload({
+        pluginRoot,
+        executionRouteJson: JSON.stringify(executionRoute),
+        reviewerId: route.reviewerId,
+        diff: 'INLINE DOCUMENT DIFF',
+      });
+      const prompt = readFileSync(result.promptFile, 'utf8');
+      assert.match(prompt, /artifact_phase: document/);
+      assert.match(prompt, /risk: high/);
+      assert.match(prompt, new RegExp(`document_review_mode: ${documentReviewMode}`));
+      policySections.push(practicalPolicyFromPrompt(prompt));
+    }
+    assert.ok(policySections[0], `${documentReviewMode} policy section must be present`);
+    for (const section of policySections.slice(1)) {
+      assert.equal(section, policySections[0], `${documentReviewMode} policy must be byte-identical across providers`);
+    }
+    if (documentReviewMode === 'full-readiness') {
+      assert.match(policySections[0], /missing executable decision/i);
+      assert.match(policySections[0], /Block only.*missing executable decision/i);
+    } else {
+      assert.doesNotMatch(policySections[0], /missing executable decision/i);
+    }
+  }
+
+  const implementationRoute = {
+    protocol_version: '3.0',
+    reviewer_id: 'claude-opus',
+    provider: 'claude',
+    adapter_id: 'claude-native-agent',
+    assignment_role: 'feasibility',
+    rubric_id: 'feasibility-v1',
+    wave: 1,
+    required: true,
+    selection_reason: 'inline implementation negative test',
+    artifact_phase: 'implementation',
+    risk: 'high',
+    document_review_mode: 'full-readiness',
+    resolved: { model: 'review-model', effort: 'high' },
+  };
+  const implementationResult = await buildReviewerPayload({
+    pluginRoot,
+    executionRouteJson: JSON.stringify(implementationRoute),
+    reviewerId: 'claude-opus',
+    diff: 'INLINE IMPLEMENTATION DIFF',
+  });
+  const implementationPrompt = readFileSync(implementationResult.promptFile, 'utf8');
+  assert.match(implementationPrompt, /artifact_phase: implementation/);
+  assert.doesNotMatch(implementationPrompt, /practical document policy/i);
 });
 
 test('an inline execution route fails closed on protocol, identity, and rubric drift', async () => {

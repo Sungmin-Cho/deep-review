@@ -38,16 +38,26 @@ export function isDocumentReviewMode(value) {
   return DOCUMENT_REVIEW_MODE_SET.has(value);
 }
 
-const DOCUMENT_REVIEW_POLICY = Object.freeze([
-  'Document blockers are limited to concrete repository/artifact-grounded functional contradiction; implementation infeasibility or a missing decision that prevents execution; reachable safety/security/compatibility/rollback harm; or acceptance criteria incapable of objective verification.',
-  'Style, readability, naming, preference, and ungrounded speculation are advisory/info or suppressed, not Warning/Critical pre-implementation blockers.',
-  'Missing future implementation/tests are implementation_verification evidence with objective acceptance evidence, not document blockers.',
+const DESIGN_VALIDATION_POLICY = Object.freeze([
+  'Block only a repository/artifact-grounded functional contradiction, implementation infeasibility, an unsound boundary/responsibility/dependency/data flow that would cause incorrect behavior, or reachable safety/security/compatibility/migration/recovery/rollback harm.',
+  'Prose completeness, wording polish, formatting, naming preference, traceability-table completeness, unspecified implementation detail, and missing future code/tests do not block design readiness.',
+  'Classify non-blocking implementation evidence as advisory/info or implementation_verification; never promote it merely to complete the document.',
 ]);
 
-export function documentReviewPolicyText() {
+const FULL_READINESS_POLICY = Object.freeze([
+  'Block only a repository/artifact-grounded functional contradiction, implementation infeasibility, a missing executable decision that prevents implementation or permits materially different valid implementations, reachable safety/security/compatibility/rollback harm, or acceptance criteria that cannot be objectively verified.',
+  'Prose completeness, sentence polish, formatting, section length, naming preference, harmless typos, and implementation-irrelevant omissions do not block full readiness.',
+  'A wording defect blocks only when it changes an executable command, path, condition, negation, ordering rule, or acceptance result; missing future code/tests remain implementation_verification evidence.',
+]);
+
+export function documentReviewPolicyText(mode = 'full-readiness') {
+  if (!isDocumentReviewMode(mode)) {
+    throw new Error(`unsupported document review mode: ${String(mode)}`);
+  }
+  const policy = mode === 'design-validation' ? DESIGN_VALIDATION_POLICY : FULL_READINESS_POLICY;
   return [
     '### Practical document policy',
-    ...DOCUMENT_REVIEW_POLICY.map((line) => `- ${line}`),
+    ...policy.map((line) => `- ${line}`),
   ].join('\n');
 }
 
