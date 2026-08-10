@@ -755,7 +755,7 @@ test('document instructions use practical blockers and readiness-owned final ver
     assert.match(normalized, /PRACTICAL DOCUMENT POLICY/u);
     assert.match(normalized, practicalBlocker);
     assert.match(normalized, /implementation infeasibility.*missing decision.*prevents execution/is);
-    assert.match(normalized, /reachable safety\/security\/compatibility\/rollback harm/is);
+    assert.match(normalized, /reachable safety\/security\/compatibility\/migration\/recovery\/rollback harm/is);
     assert.match(normalized, /acceptance criteria.*objective(?:ly verified| verification)/is);
     assert.match(normalized, nonBlockers);
     assert.match(normalized, deferredEvidence);
@@ -775,6 +775,11 @@ test('document instructions use practical blockers and readiness-owned final ver
       .replace(/\s+/gu, ' ');
     assert.notEqual(designSection, '', 'design-validation section must exist before full-readiness');
     assert.match(designSection, /grounded.*behavior-causing unsound design/is);
+
+    // Finding 6: the design-validation blocker list must include migration
+    // and recovery harm, aligned with the runtime policy's shared blocker
+    // floor (hooks/scripts/lib/assignment-rubrics.mjs SHARED_BLOCKER_FLOOR).
+    assert.match(designSection, /migration.*recovery.*rollback|migration\/recovery/is);
   }
   for (const source of korean) {
     const normalized = source.replace(/\s+/gu, ' ');
@@ -793,6 +798,10 @@ test('document instructions use practical blockers and readiness-owned final ver
       .replace(/\s+/gu, ' ');
     assert.notEqual(designSectionKo, '', 'design-validation section must exist before full-readiness');
     assert.match(designSectionKo, /근거가 있고.*잘못된 동작을 유발하는 불건전한 설계/is);
+
+    // Finding 6: README.ko.md must also include migration/recovery harm in
+    // the design-validation blocker list.
+    assert.match(designSectionKo, /마이그레이션.*복구|복구.*마이그레이션/is);
   }
 
   for (const relativePath of ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {

@@ -123,9 +123,6 @@ function normalizePlanDocumentContext(document) {
 function normalizeInlineDocumentContext(route) {
   const fields = ['artifact_phase', 'risk', 'document_review_mode'];
   const present = fields.filter((field) => Object.hasOwn(route, field));
-  if (present.length === 0) {
-    return { artifactPhase: null, risk: null, documentReviewMode: null };
-  }
   if (present.length !== fields.length) throw new Error('execution route document context must be complete');
   return validateDocumentContext(
     route.artifact_phase,
@@ -182,13 +179,11 @@ export function parseExecutionPlanDocument(document, reviewerId) {
           if (!template || typeof template !== 'object' || Array.isArray(template)) {
             throw new Error(`routing plan expansion route template must be an object for ${candidate.reviewer_id}`);
           }
-          if (['artifact_phase', 'risk', 'document_review_mode'].some((field) => Object.hasOwn(template, field))) {
-            const templateContext = normalizeInlineDocumentContext(template);
-            if (templateContext.artifactPhase !== planContext.artifactPhase
-                || templateContext.risk !== planContext.risk
-                || templateContext.documentReviewMode !== planContext.documentReviewMode) {
-              throw new Error(`routing plan expansion route template document context mismatch for ${candidate.reviewer_id}`);
-            }
+          const templateContext = normalizeInlineDocumentContext(template);
+          if (templateContext.artifactPhase !== planContext.artifactPhase
+              || templateContext.risk !== planContext.risk
+              || templateContext.documentReviewMode !== planContext.documentReviewMode) {
+            throw new Error(`routing plan expansion route template document context mismatch for ${candidate.reviewer_id}`);
           }
         }
       }
@@ -245,13 +240,11 @@ export function parseExecutionPlanDocument(document, reviewerId) {
           || !Object.hasOwn(candidate.resolved, 'model') || !Object.hasOwn(candidate.resolved, 'effort')) {
         throw new Error(`routing plan resolved model/effort is invalid for ${candidate.reviewer_id}`);
       }
-      if (['artifact_phase', 'risk', 'document_review_mode'].some((field) => Object.hasOwn(candidate, field))) {
-        const routeContext = normalizeInlineDocumentContext(candidate);
-        if (routeContext.artifactPhase !== planContext.artifactPhase
-            || routeContext.risk !== planContext.risk
-            || routeContext.documentReviewMode !== planContext.documentReviewMode) {
-          throw new Error(`routing plan route document context mismatch for ${candidate.reviewer_id}`);
-        }
+      const routeContext = normalizeInlineDocumentContext(candidate);
+      if (routeContext.artifactPhase !== planContext.artifactPhase
+          || routeContext.risk !== planContext.risk
+          || routeContext.documentReviewMode !== planContext.documentReviewMode) {
+        throw new Error(`routing plan route document context mismatch for ${candidate.reviewer_id}`);
       }
     }
   }

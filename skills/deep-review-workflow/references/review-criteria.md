@@ -92,8 +92,8 @@ rules.yaml이 있으면 해당 규칙 기준, 없으면 일반 원칙:
 For a validated protocol 3 document phase, document blockers are limited to a
 concrete repository/artifact-grounded functional contradiction; implementation
 infeasibility or a missing decision that prevents execution; reachable
-safety/security/compatibility/rollback harm; or acceptance criteria incapable
-of objective verification.
+safety/security/compatibility/migration/recovery/rollback harm; or acceptance
+criteria incapable of objective verification.
 
 Style, readability, naming, preference, and ungrounded speculation are
 advisory/info or suppressed, not Warning/Critical pre-implementation blockers.
@@ -105,9 +105,9 @@ role- and provider-independent; it does not apply to implementation phase.
 
 For an all-design-document/ADR scope, review implementation feasibility and
 design soundness: block only the shared functional-contradiction,
-infeasibility, safety/security/compatibility/rollback-harm, and grounded
-behavior-causing unsound design blockers above. Prose completeness and
-unspecified implementation detail never block.
+infeasibility, safety/security/compatibility/migration/recovery/rollback-harm,
+and grounded behavior-causing unsound design blockers above. Prose
+completeness and unspecified implementation detail never block.
 
 ### full-readiness
 

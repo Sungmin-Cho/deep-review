@@ -53,7 +53,9 @@ function trustedAssignmentSection(options) {
       ? [
           `artifact_phase: ${executionPlan.artifactPhase}`,
           `risk: ${executionPlan.risk}`,
-          `document_review_mode: ${executionPlan.documentReviewMode}`,
+          ...(executionPlan.artifactPhase === 'document'
+            ? [`document_review_mode: ${executionPlan.documentReviewMode}`]
+            : []),
         ]
       : []),
     '',

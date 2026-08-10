@@ -272,8 +272,9 @@ deep-review reads several files under `.deep-review/`:
 Pure-document review uses a trusted artifact phase and risk in every reviewer
 assignment. Document blockers are limited to a concrete repository/artifact-grounded
 functional contradiction; implementation infeasibility or a missing decision
-that prevents execution; reachable safety/security/compatibility/rollback harm;
-or acceptance criteria incapable of objective verification.
+that prevents execution; reachable
+safety/security/compatibility/migration/recovery/rollback harm; or acceptance
+criteria incapable of objective verification.
 
 Style, readability, naming, preference, and ungrounded speculation are
 advisory/info or suppressed, not Warning/Critical pre-implementation blockers.
@@ -285,9 +286,9 @@ disagreement does not add a same-round reviewer; operational floors remain.
 
 For an all-design-document/ADR scope, review implementation feasibility and
 design soundness: block only the shared functional-contradiction,
-infeasibility, safety/security/compatibility/rollback-harm, and grounded
-behavior-causing unsound design blockers above. Prose completeness and
-unspecified implementation detail never block.
+infeasibility, safety/security/compatibility/migration/recovery/rollback-harm,
+and grounded behavior-causing unsound design blockers above. Prose
+completeness and unspecified implementation detail never block.
 
 ### full-readiness
 

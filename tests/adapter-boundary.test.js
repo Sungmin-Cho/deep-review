@@ -123,6 +123,7 @@ test('inline execution-route fallback authority accepts only boolean true across
       assignment_role: 'standard', rubric_id: 'standard-v1', wave: 1, required: true,
       selection_reason: 'test route', requested: { model: 'future-model', effort: null, source: 'cli-reviewer' },
       resolved: { model: 'future-model', effort: null },
+      artifact_phase: 'implementation', risk: 'medium', document_review_mode: 'full-readiness',
     };
     if (field === 'fallback') {
       route.fallback = { occurred: false };
@@ -147,10 +148,17 @@ test('inline execution-route fallback authority accepts only boolean true across
     }
   }
 
-  const legacy = parseExecutionRouteJson(JSON.stringify(routeFor('fallback', false)), 'agy');
-  assert.equal(legacy.artifactPhase, null);
-  assert.equal(legacy.risk, null);
-  assert.equal(legacy.documentReviewMode, null);
+  // A protocol-3 inline route must carry complete document context — an
+  // all-three-absent route fails closed just like a partial one, it does not
+  // silently degrade to a context-free legacy route.
+  const contextFree = routeFor('fallback', false);
+  delete contextFree.artifact_phase;
+  delete contextFree.risk;
+  delete contextFree.document_review_mode;
+  assert.throws(
+    () => parseExecutionRouteJson(JSON.stringify(contextFree), 'agy'),
+    /execution route document context must be complete/,
+  );
 
   const documentRoute = routeFor('fallback', false);
   Object.assign(documentRoute, {
@@ -174,6 +182,9 @@ test('inline execution-route fallback authority accepts only boolean true across
     ['artifact_phase', 'risk'], ['artifact_phase', 'document_review_mode'], ['risk', 'document_review_mode'],
   ]) {
     const partial = routeFor('fallback', false);
+    delete partial.artifact_phase;
+    delete partial.risk;
+    delete partial.document_review_mode;
     for (const field of kept) partial[field] = fullDocumentContext[field];
     assert.throws(
       () => parseExecutionRouteJson(JSON.stringify(partial), 'agy'),
@@ -230,6 +241,9 @@ test('routing plan leaf reads both legacy 2.0 and assignment-aware 3.0 documents
       required: true,
       selection_reason: 'role fit and provider diversity',
       resolved: { model: 'opus', effort: 'xhigh' },
+      artifact_phase: 'document',
+      risk: 'high',
+      document_review_mode: 'full-readiness',
     }],
   };
   const currentPlan = parseExecutionPlanDocument(current, 'claude-opus');
@@ -275,6 +289,14 @@ test('routing plan leaf reads both legacy 2.0 and assignment-aware 3.0 documents
   assert.throws(() => parseExecutionPlanDocument({
     ...current,
     routes: [routeWithoutRisk],
+  }, 'claude-opus'), /execution route document context must be complete/);
+  const {
+    artifact_phase: _omittedPhase, risk: _omittedRisk2, document_review_mode: _omittedMode,
+    ...routeWithoutContext
+  } = current.routes[0];
+  assert.throws(() => parseExecutionPlanDocument({
+    ...current,
+    routes: [routeWithoutContext],
   }, 'claude-opus'), /execution route document context must be complete/);
   assert.throws(() => parseExecutionPlanDocument({
     ...current,
@@ -406,13 +428,33 @@ test('routing plan protocol 3.0 validates candidate expansion route template doc
       required: true,
       selection_reason: 'role fit and provider diversity',
       resolved: { model: 'opus', effort: 'xhigh' },
+      artifact_phase: 'document',
+      risk: 'high',
+      document_review_mode: 'full-readiness',
     }],
   };
 
-  // A wholly context-free legacy template stays readable: the plan itself has
-  // no document_review_mode and normalizes to 'full-readiness'.
-  const legacyParsed = parseExecutionPlanDocument(base, 'claude-opus');
-  assert.equal(legacyParsed.documentReviewMode, 'full-readiness');
+  // A wholly context-free template must fail closed just like a partial one —
+  // it must never silently inherit the plan's default full-readiness mode.
+  assert.throws(
+    () => parseExecutionPlanDocument(base, 'claude-opus'),
+    /execution route document context must be complete/,
+  );
+
+  // A template that carries the complete, matching context parses cleanly;
+  // the plan itself has no document_review_mode and normalizes to
+  // 'full-readiness'.
+  const withFullContextTemplate = structuredClone(base);
+  withFullContextTemplate.candidate_reviewers[1].expansion_route_templates[0] = {
+    reviewer_id: 'agy',
+    assignment_role: 'standard',
+    resolved: { model: 'a', effort: 'medium' },
+    artifact_phase: 'document',
+    risk: 'high',
+    document_review_mode: 'full-readiness',
+  };
+  const fullContextParsed = parseExecutionPlanDocument(withFullContextTemplate, 'claude-opus');
+  assert.equal(fullContextParsed.documentReviewMode, 'full-readiness');
 
   // A template whose own context is internally valid but disagrees with the
   // plan's default full-readiness must still fail closed, not silently carry

@@ -38,15 +38,22 @@ export function isDocumentReviewMode(value) {
   return DOCUMENT_REVIEW_MODE_SET.has(value);
 }
 
+// Both modes share the same grounded-harm blocker floor and the same
+// non-blocker floor. full-readiness must stay a strict additive superset of
+// design-validation's blockers — it may only add executable-readiness
+// blockers on top, never drop a design blocker.
+const SHARED_BLOCKER_FLOOR = 'a repository/artifact-grounded functional contradiction, implementation infeasibility, an unsound boundary/responsibility/dependency/data flow that would cause incorrect behavior, or reachable safety/security/compatibility/migration/recovery/rollback harm';
+const SHARED_NON_BLOCKER_FLOOR = 'Prose completeness, wording polish, formatting, naming preference, harmless typos, traceability-table completeness, unspecified implementation detail, and missing future code/tests';
+
 const DESIGN_VALIDATION_POLICY = Object.freeze([
-  'Block only a repository/artifact-grounded functional contradiction, implementation infeasibility, an unsound boundary/responsibility/dependency/data flow that would cause incorrect behavior, or reachable safety/security/compatibility/migration/recovery/rollback harm.',
-  'Prose completeness, wording polish, formatting, naming preference, traceability-table completeness, unspecified implementation detail, and missing future code/tests do not block design readiness.',
+  `Block only ${SHARED_BLOCKER_FLOOR}.`,
+  `${SHARED_NON_BLOCKER_FLOOR} do not block design readiness.`,
   'Classify non-blocking implementation evidence as advisory/info or implementation_verification; never promote it merely to complete the document.',
 ]);
 
 const FULL_READINESS_POLICY = Object.freeze([
-  'Block only a repository/artifact-grounded functional contradiction, implementation infeasibility, a missing executable decision that prevents implementation or permits materially different valid implementations, reachable safety/security/compatibility/rollback harm, or acceptance criteria that cannot be objectively verified.',
-  'Prose completeness, sentence polish, formatting, section length, naming preference, harmless typos, and implementation-irrelevant omissions do not block full readiness.',
+  `Block only ${SHARED_BLOCKER_FLOOR}, a missing executable decision that leaves required observable/executable semantics undefined or prevents implementation, or acceptance criteria that cannot be objectively verified.`,
+  `${SHARED_NON_BLOCKER_FLOOR} do not block full readiness.`,
   'A wording defect blocks only when it changes an executable command, path, condition, negation, ordering rule, or acceptance result; missing future code/tests remain implementation_verification evidence.',
 ]);
 

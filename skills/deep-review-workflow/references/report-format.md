@@ -137,8 +137,8 @@ This is deterministic (no AskUserQuestion at synthesis) — see spec §4.3.1 for
 For a trusted `artifact_phase: document` assignment, document blockers are
 limited to a concrete repository/artifact-grounded functional contradiction;
 implementation infeasibility or a missing decision that prevents execution;
-reachable safety/security/compatibility/rollback harm; or acceptance criteria
-incapable of objective verification.
+reachable safety/security/compatibility/migration/recovery/rollback harm; or
+acceptance criteria incapable of objective verification.
 
 Style, readability, naming, preference, and ungrounded speculation are
 advisory/info or suppressed, not Warning/Critical pre-implementation blockers.
@@ -150,9 +150,9 @@ independent of reviewer role and provider.
 
 For an all-design-document/ADR scope, review implementation feasibility and
 design soundness: block only the shared functional-contradiction,
-infeasibility, safety/security/compatibility/rollback-harm, and grounded
-behavior-causing unsound design blockers above. Prose completeness and
-unspecified implementation detail never block.
+infeasibility, safety/security/compatibility/migration/recovery/rollback-harm,
+and grounded behavior-causing unsound design blockers above. Prose
+completeness and unspecified implementation detail never block.
 
 ### full-readiness
 
