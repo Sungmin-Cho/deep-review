@@ -105,7 +105,9 @@ as a command, path, condition, negation, ordering rule, or acceptance result.
    - any other, mixed, empty, or unresolved set: `full-readiness`.
 3. The routing plan records the derived mode and copies the trusted
    `artifact_phase`, `risk`, and `document_review_mode` onto every protocol-3
-   inline execution route, including expansion routes.
+   inline execution route. The mode is fixed when the expansion template is
+   built; same-round expansion forwards it verbatim and never re-derives it per
+   reviewer or provider.
 4. Inline-route validation accepts only the two known modes, requires document
    context to be internally consistent, and fails closed on invalid values.
    A routing-plan document that identifies document phase but omits the new
@@ -113,8 +115,11 @@ as a command, path, condition, negation, ordering rule, or acceptance result.
    document context preserves its pre-change behavior and cannot opt into
    `design-validation`; every route emitted by the current producer carries
    the complete context.
-5. `build-reviewer-payload.mjs` reads only the validated execution-route result
-   and injects the matching policy text. It remains the shared doctrine
+5. `build-reviewer-payload.mjs` reads only the validated execution-route result.
+   `artifact_phase` decides whether document policy is injected;
+   `document_review_mode` is the sole selector for which document blocker
+   policy is injected. The payload builder never re-derives the mode from
+   phase, risk, role, reviewer, or provider. It remains the shared doctrine
    injector for Claude Code and Codex.
 6. Review synthesis and document readiness consume the resulting structured
    findings exactly as they do today.
@@ -141,6 +146,8 @@ An explicitly supplied unknown mode is rejected rather than silently
 downgraded. A routing-plan document with document phase and no mode retains
 full-readiness semantics for compatibility. A legacy context-free inline route
 remains readable but never gains the relaxed design policy by inference.
+No missing, malformed, or default-value path may produce
+`design-validation`; only the validated all-design/ADR derivation may do so.
 
 ## Host Compatibility
 
