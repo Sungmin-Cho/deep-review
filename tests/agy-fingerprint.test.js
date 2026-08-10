@@ -139,6 +139,7 @@ test('agy inline fallback authority rejects malformed values before spawn and ga
     requested: { model: 'future-model', effort: null, source: 'cli-reviewer' },
     resolved: { model: 'future-model', effort: null },
     fallback: { allowed, occurred: false },
+    artifact_phase: 'implementation', risk: 'medium', document_review_mode: 'full-readiness',
   });
   const invoke = (label, allowed) => {
     const outputFile = join(repo, `${label}.txt`);
