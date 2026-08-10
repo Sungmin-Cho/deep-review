@@ -168,6 +168,43 @@ const candidates = [
   },
 ];
 
+// Kept separate from routingPlan() so nested `routingPlan().routes` callers
+// (building an override routes array from the two standard routes) get a
+// fresh, context-free route pair every time — never a copy that already
+// carries a *previous* call's finalized artifact_phase/risk/document_review_mode,
+// which would then mismatch against a differently-overridden outer plan.
+function baseRoutes() {
+  return [
+    {
+      reviewer_id: 'claude-opus', provider: 'claude', adapter_id: 'claude-cli',
+      assignment_role: 'standard', rubric_id: 'standard-v1', wave: 1, required: false,
+      selection_reason: 'initial standard route', resolved: { model: null, effort: 'high' },
+    },
+    {
+      reviewer_id: 'codex-review', provider: 'codex', adapter_id: 'codex-native-generic',
+      assignment_role: 'traceability', rubric_id: 'traceability-v1', wave: 1, required: false,
+      selection_reason: 'initial traceability route', resolved: { model: null, effort: 'high' },
+    },
+  ];
+}
+
+// Protocol 3 now requires every route and expansion route template to carry
+// complete artifact_phase/risk/document_review_mode context matching the
+// plan (production buildRoutingPlan always emits it). A fixture entry that
+// already sets at least one of the three fields is left untouched — that's a
+// test deliberately constructing a mismatch/partial-context/forgery case —
+// otherwise it is defaulted to the plan's own final context.
+function withDefaultDocumentContext(entry, context) {
+  const fields = ['artifact_phase', 'risk', 'document_review_mode'];
+  if (fields.some((field) => Object.hasOwn(entry, field))) return entry;
+  return {
+    ...entry,
+    artifact_phase: context.artifactPhase,
+    risk: context.risk,
+    document_review_mode: context.documentReviewMode,
+  };
+}
+
 function routingPlan(overrides = {}) {
   const plan = {
     protocol_version: '3.0',
@@ -184,18 +221,7 @@ function routingPlan(overrides = {}) {
     initial_reviewer_ids: ['claude-opus', 'codex-review'],
     required_reviewer_ids: [],
     candidate_reviewers: candidates,
-    routes: [
-      {
-        reviewer_id: 'claude-opus', provider: 'claude', adapter_id: 'claude-cli',
-        assignment_role: 'standard', rubric_id: 'standard-v1', wave: 1, required: false,
-        selection_reason: 'initial standard route', resolved: { model: null, effort: 'high' },
-      },
-      {
-        reviewer_id: 'codex-review', provider: 'codex', adapter_id: 'codex-native-generic',
-        assignment_role: 'traceability', rubric_id: 'traceability-v1', wave: 1, required: false,
-        selection_reason: 'initial traceability route', resolved: { model: null, effort: 'high' },
-      },
-    ],
+    routes: baseRoutes(),
     ...overrides,
   };
   if (Object.hasOwn(overrides, 'routes')
@@ -210,6 +236,22 @@ function routingPlan(overrides = {}) {
       .filter((route) => route.wave === 1 && route.required === true)
       .map((route) => route.reviewer_id);
   }
+  const context = {
+    artifactPhase: plan.artifact_phase,
+    risk: plan.risk,
+    documentReviewMode: plan.document_review_mode ?? 'full-readiness',
+  };
+  plan.routes = (plan.routes || []).map((route) => withDefaultDocumentContext(route, context));
+  plan.candidate_reviewers = (plan.candidate_reviewers || []).map((candidate) => (
+    Array.isArray(candidate.expansion_route_templates)
+      ? {
+        ...candidate,
+        expansion_route_templates: candidate.expansion_route_templates.map(
+          (template) => withDefaultDocumentContext(template, context),
+        ),
+      }
+      : candidate
+  ));
   return plan;
 }
 
@@ -697,9 +739,9 @@ test('a lone finding from a security assignment requests security confirmation',
   const { synthesizeReviewRound } = await import(synthesisUrl);
   const plan = routingPlan({
     routes: [
-      routingPlan().routes[0],
+      baseRoutes()[0],
       {
-        ...routingPlan().routes[1],
+        ...baseRoutes()[1],
         assignment_role: 'security',
         rubric_id: 'security-v1',
       },
@@ -756,7 +798,7 @@ test('an unavailable explicitly required reviewer fails closed without replaceme
   const { synthesizeReviewRound } = await import(synthesisUrl);
   const plan = routingPlan({
     required_reviewer_ids: ['codex-review'],
-    routes: routingPlan().routes.map((route) => (
+    routes: baseRoutes().map((route) => (
       route.reviewer_id === 'codex-review'
         ? {
           ...route,
@@ -788,7 +830,7 @@ test('an unavailable adaptive route applies the high-risk confidence floor once 
     provider_family_minimum: 2,
     initial_reviewer_ids: ['claude-opus', 'codex-review', 'agy'],
     routes: [
-      ...routingPlan().routes,
+      ...baseRoutes(),
       {
         reviewer_id: 'agy',
         provider: 'agy',
@@ -824,7 +866,7 @@ test('an unavailable required expansion replacement fails closed after the only 
   const { synthesizeReviewRound } = await import(synthesisUrl);
   const plan = routingPlan({
     routes: [
-      routingPlan().routes[0],
+      baseRoutes()[0],
       {
         reviewer_id: 'agy',
         provider: 'agy',
@@ -858,7 +900,7 @@ test('a missing wave-2 route cannot bypass a broken reviewer floor by clearing r
   const { synthesizeReviewRound } = await import(synthesisUrl);
   const plan = routingPlan({
     routes: [
-      routingPlan().routes[0],
+      baseRoutes()[0],
       {
         reviewer_id: 'agy',
         provider: 'agy',
@@ -892,7 +934,7 @@ test('a missing wave-2 confirmation fails closed even when the base reviewer flo
   const { synthesizeReviewRound } = await import(synthesisUrl);
   const plan = routingPlan({
     routes: [
-      ...routingPlan().routes,
+      ...baseRoutes(),
       {
         reviewer_id: 'agy',
         provider: 'agy',
@@ -929,7 +971,7 @@ test('a materialized wave-2 route is authoritative when the caller wave counter 
   const { synthesizeReviewRound } = await import(synthesisUrl);
   const plan = routingPlan({
     routes: [
-      ...routingPlan().routes,
+      ...baseRoutes(),
       {
         reviewer_id: 'agy',
         provider: 'agy',
@@ -977,7 +1019,7 @@ test('an initial reviewer cannot be relabeled as a materialized wave-2 voice', a
   const { synthesizeReviewRound } = await import(synthesisUrl);
   const plan = routingPlan({
     initial_reviewer_ids: ['claude-opus', 'codex-review'],
-    routes: routingPlan().routes.map((route) => (
+    routes: baseRoutes().map((route) => (
       route.reviewer_id === 'codex-review'
         ? {
           ...route,
@@ -1013,8 +1055,8 @@ test('synthesis rejects forged canonical provider identities before counting pro
       { ...candidates[2], provider: 'agy' },
     ],
     routes: [
-      routingPlan().routes[0],
-      routingPlan().routes[1],
+      baseRoutes()[0],
+      baseRoutes()[1],
       {
         reviewer_id: 'codex-adversarial',
         provider: 'agy',
@@ -1051,7 +1093,7 @@ test('synthesis rejects malformed required and wave types before required-route 
   ]) {
     const plan = routingPlan({
       routes: [
-        routingPlan().routes[0],
+        baseRoutes()[0],
         {
           reviewer_id: 'agy',
           provider: 'agy',
@@ -1089,7 +1131,7 @@ test('CLI refuses pre-evaluated attempts without raw fingerprint-bound output', 
       minimum_reviewers: 3,
       planned_reviewers: 3,
       routes: [
-        ...routingPlan().routes,
+        ...baseRoutes(),
         {
           reviewer_id: 'agy',
           provider: 'agy',
@@ -1122,7 +1164,7 @@ test('a final wave uses every trusted attempt and refuses a second expansion', a
     consensus: { findings: [{ severity: 'warning', roles: ['claude-opus'] }] },
     routingPlan: routingPlan({
       routes: [
-        ...routingPlan().routes,
+        ...baseRoutes(),
         {
           reviewer_id: 'agy',
           provider: 'agy',
@@ -1149,7 +1191,7 @@ test('expansion candidate exhaustion applies a confidence floor without lowering
   const { synthesizeReviewRound } = await import(synthesisUrl);
   const noUnused = routingPlan({
     candidate_reviewers: candidates.slice(0, 1),
-    routes: [routingPlan().routes[0]],
+    routes: [baseRoutes()[0]],
   });
   const approval = synthesizeReviewRound({
     attempts: [attempt('claude-opus')],
@@ -1194,7 +1236,7 @@ test('N_actual=0 remains fail-closed when no expansion candidate exists', async 
     attempts: [attempt('claude-opus', { included: false, exclusion: 'timeout' })],
     routingPlan: routingPlan({
       candidate_reviewers: [candidates[0]],
-      routes: [routingPlan().routes[0]],
+      routes: [baseRoutes()[0]],
     }),
   });
   assert.equal(result.status, 'operational_failure');
@@ -1227,7 +1269,7 @@ test('shadow mode records but does not apply adaptive expansion or confidence fl
     attempts: [attempt('claude-opus')],
     routingPlan: routingPlan({
       shadow_mode: true,
-      routes: [routingPlan().routes[0]],
+      routes: [baseRoutes()[0]],
       candidate_reviewers: candidates.slice(0, 1),
     }),
   });
@@ -1245,7 +1287,7 @@ test('shadow mode still enforces critical implementation and explicit deferred r
     routingPlan: routingPlan({
       shadow_mode: true,
       risk: 'critical',
-      routes: [routingPlan().routes[0]],
+      routes: [baseRoutes()[0]],
       candidate_reviewers: candidates.slice(0, 1),
     }),
   });
@@ -1257,7 +1299,7 @@ test('shadow mode still enforces critical implementation and explicit deferred r
     attempts: [attempt('claude-opus')],
     routingPlan: routingPlan({
       shadow_mode: true,
-      routes: [routingPlan().routes[0]],
+      routes: [baseRoutes()[0]],
       candidate_reviewers: candidates.slice(0, 1),
     }),
     deferredAcceptance: {
@@ -1374,7 +1416,7 @@ test('a routing-plan operational failure cannot emit a verdict or allow Phase 6'
     routingPlan: routingPlan({
       operational_failure: true,
       shortfalls: ['required_provider:codex'],
-      routes: [routingPlan().routes[0]],
+      routes: [baseRoutes()[0]],
     }),
   });
   assert.equal(result.status, 'operational_failure');
