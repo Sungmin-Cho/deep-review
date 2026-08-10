@@ -2,7 +2,7 @@
 name: deep-review
 description: Public cross-runtime entrypoint for independent review, initialization, and evidence-based review response.
 user-invocable: true
-argument-hint: "[init] [--contract [SLICE-NNN]] [--entropy] [--ultracode] [--codex|--no-codex] [--no-opus] [--agy|--no-agy] [--codex-only] [--reviewer-strategy adaptive|static] [--readiness-receipt PATH] [--dry-run] [--explain-routing] [--routing auto|fast|balanced|quality] [--model PROVIDER=MODEL] [--effort PROVIDER=EFFORT] [--reviewer-model REVIEWER=MODEL] [--reviewer-effort REVIEWER=EFFORT] [--allow-fallback] [--allow-classifier] [--respond (REPORT_PATH | --source=pr [--pr=NNN])]"
+argument-hint: "[init] [--contract [SLICE-NNN]] [--entropy] [--ultracode] [--codex|--no-codex] [--no-opus] [--agy|--no-agy] [--codex-only] [--reviewer-strategy adaptive|static] [--readiness-receipt PATH] [--dry-run] [--explain-routing] [--routing auto|fast|balanced|quality] [--model PROVIDER=MODEL] [--effort PROVIDER=EFFORT] [--reviewer-model REVIEWER=MODEL] [--reviewer-effort REVIEWER=EFFORT] [--allow-fallback|--no-fallback] [--allow-classifier] [--respond (REPORT_PATH | --source=pr [--pr=NNN])]"
 ---
 
 # deep-review — public route
@@ -84,8 +84,9 @@ Routing overrides are review-only. `--routing` selects `auto`, `fast`,
 `--effort PROVIDER=EFFORT` set provider defaults; repeated
 `--reviewer-model REVIEWER=MODEL` and `--reviewer-effort REVIEWER=EFFORT` set
 canonical reviewer overrides. `--allow-fallback` permits a visible downgrade
-when an explicit request cannot be applied. Model values are opaque and split
-only at the first `=`.
+when an explicit request cannot be applied. `--no-fallback` explicitly
+overrides a permissive project/user policy and conflicts with
+`--allow-fallback`. Model values are opaque and split only at the first `=`.
 
 Adaptive reviewer routing and automatic model routing are enabled by default.
 `--reviewer-strategy adaptive` selects only the role-fit reviewer floor and may

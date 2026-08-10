@@ -16,11 +16,14 @@ import {
 import {
   __testing as agyTesting,
   normalizeAgyReport,
+  parseCli as parseAgyCli,
   runAgyReviewer,
 } from '../hooks/scripts/run-agy-reviewer.mjs';
+import { parseReviewerReport } from '../hooks/scripts/review-synthesis.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const privacyCliPath = join(pluginRoot, 'hooks', 'scripts', 'agy-privacy-preflight.mjs');
+const agyCliPath = join(pluginRoot, 'hooks', 'scripts', 'run-agy-reviewer.mjs');
 
 function workspace(label) {
   return mkdtempSync(join(tmpdir(), `deep-review-${label}-`));
@@ -86,6 +89,92 @@ function config(repo, fingerprint = '', at = '') {
   return path;
 }
 
+test('agy CLI accepts exactly one execution source paired with reviewer-id', () => {
+  assert.deepEqual(
+    parseAgyCli(['--routing-plan', 'routing.json', '--reviewer-id', 'agy']),
+    { routingPlan: 'routing.json', reviewerId: 'agy' },
+  );
+  assert.deepEqual(
+    parseAgyCli(['--execution-route-json', '{"reviewer_id":"agy"}', '--reviewer-id', 'agy']),
+    { executionRouteJson: '{"reviewer_id":"agy"}', reviewerId: 'agy' },
+  );
+  for (const argv of [
+    ['--routing-plan', 'routing.json'],
+    ['--execution-route-json', '{}'],
+    ['--reviewer-id', 'agy'],
+    ['--routing-plan', 'routing.json', '--execution-route-json', '{}', '--reviewer-id', 'agy'],
+  ]) {
+    assert.throws(() => parseAgyCli(argv), /exactly one execution source.*reviewer-id/u);
+  }
+});
+
+test('agy CLI rejects present-but-empty execution source and reviewer values', () => {
+  for (const argv of [
+    ['--reviewer-id', ''],
+    ['--routing-plan', ''],
+    ['--execution-route-json', ''],
+    ['--routing-plan', '', '--reviewer-id', ''],
+    ['--execution-route-json', '', '--reviewer-id', ''],
+    ['--routing-plan', '', '--reviewer-id', 'agy'],
+    ['--routing-plan', 'routing.json', '--reviewer-id', ''],
+    ['--execution-route-json', '', '--reviewer-id', 'agy'],
+    ['--execution-route-json', '{}', '--reviewer-id', ''],
+    ['--routing-plan', '', '--execution-route-json', '{}', '--reviewer-id', 'agy'],
+    ['--routing-plan', 'routing.json', '--execution-route-json', '', '--reviewer-id', 'agy'],
+  ]) {
+    assert.throws(() => parseAgyCli(argv), /non-empty|exactly one execution source/u);
+  }
+});
+
+test('agy inline fallback authority rejects malformed values before spawn and gates unsupported-model retry', () => {
+  const repo = repository('agy-inline-fallback-authority');
+  const configPath = config(repo);
+  const promptFile = join(repo, 'prompt.txt');
+  const binary = fakeAgy(repo);
+  writeFileSync(promptFile, 'review this change');
+  const routeFor = (allowed) => ({
+    protocol_version: '3.0', reviewer_id: 'agy', provider: 'agy', adapter_id: 'agy-cli',
+    assignment_role: 'standard', rubric_id: 'standard-v1', wave: 1, required: true,
+    selection_reason: 'bridge fallback authority test',
+    requested: { model: 'future-model', effort: null, source: 'cli-reviewer' },
+    resolved: { model: 'future-model', effort: null },
+    fallback: { allowed, occurred: false },
+  });
+  const invoke = (label, allowed) => {
+    const outputFile = join(repo, `${label}.txt`);
+    const log = join(workspace(`agy-inline-${label}-log`), 'argv.jsonl');
+    const result = spawnSync(process.execPath, [
+      agyCliPath,
+      '--binary', binary,
+      '--project-root', repo,
+      '--plugin-root', pluginRoot,
+      '--config', configPath,
+      '--prompt-file', promptFile,
+      '--output', outputFile,
+      '--mode', 'off',
+      '--execution-route-json', JSON.stringify(routeFor(allowed)),
+      '--reviewer-id', 'agy',
+      '--timeout-seconds', '5',
+    ], {
+      encoding: 'utf8', shell: false,
+      env: { ...process.env, FAKE_LOG: log, FAKE_BEHAVIOR: 'unsupported' },
+    });
+    return { result, calls: rows(log) };
+  };
+
+  const malformed = invoke('malformed', 'false');
+  assert.equal(malformed.result.status, 2, malformed.result.stderr);
+  assert.equal(malformed.calls.length, 0);
+
+  const denied = invoke('denied', false);
+  assert.equal(denied.result.status, 2, denied.result.stderr);
+  assert.equal(denied.calls.length, 1);
+
+  const authorized = invoke('authorized', true);
+  assert.equal(authorized.result.status, 0, authorized.result.stderr);
+  assert.equal(authorized.calls.length, 2);
+});
+
 test('agy report normalization accepts only canonical reports with section/count consistency', () => {
   const clean = normalizeAgyReport([
     '# Deep Review Report — 2026-07-24',
@@ -105,7 +194,9 @@ test('agy report normalization accepts only canonical reports with section/count
     '- Security assignment cleared.',
   ].join('\n'));
   assert.equal(clean.includes('**Verdict**: APPROVE'), true);
-  assert.equal(normalizeAgyReport(clean.replaceAll('None.', '(없음)')) !== null, true);
+  const localizedEmptySections = normalizeAgyReport(clean.replaceAll('None.', '(없음)'));
+  assert.equal(localizedEmptySections, clean);
+  assert.notEqual(parseReviewerReport(localizedEmptySections, { strict: true }), null);
 
   const findingReport = [
     '# Deep Review Report — 2026-07-24',
@@ -123,7 +214,30 @@ test('agy report normalization accepts only canonical reports with section/count
     '### ℹ️ Info',
     'None.',
   ].join('\n');
-  assert.equal(normalizeAgyReport(findingReport), findingReport);
+  assert.equal(normalizeAgyReport(findingReport), null);
+
+  const strictFindingReport = [
+    '# Deep Review Report — 2026-07-24',
+    '',
+    '## Summary',
+    '- **Verdict**: REQUEST_CHANGES',
+    '- **Issues**: 🔴 1건, 🟡 1건, ℹ️ 0건',
+    '',
+    '## Code Review',
+    '### 🔴 Critical',
+    '- C1. reachable authorization bypass with literal (없음) evidence.',
+    '### 🟡 Warning',
+    '- Missing regression coverage.',
+    '### ℹ️ Info',
+    'None.',
+    '### 🟢 Passed',
+    '- Remaining contract checks passed.',
+  ].join('\n');
+  const findingWithLocalizedEmptySection = strictFindingReport.replace('None.', '(없음)');
+  const normalizedFindingWithLocalizedEmptySection = normalizeAgyReport(findingWithLocalizedEmptySection);
+  assert.equal(normalizedFindingWithLocalizedEmptySection, strictFindingReport);
+  assert.match(normalizedFindingWithLocalizedEmptySection, /literal \(없음\) evidence/u);
+  assert.notEqual(parseReviewerReport(normalizedFindingWithLocalizedEmptySection, { strict: true }), null);
 
   const contradictory = [
     '# Deep Review Report — 2026-07-24',
@@ -144,6 +258,42 @@ test('agy report normalization accepts only canonical reports with section/count
   assert.equal(normalizeAgyReport(clean.replace('🟡 0건', '🟡 1건')), null);
   assert.equal(normalizeAgyReport('# Deep Review v2.0 — Security Review Report\n**Verdict**: **PASS**'), null);
   assert.equal(normalizeAgyReport('agy review ok'), null);
+});
+
+test('agy bridge cannot publish success for a report rejected by strict synthesis', async () => {
+  const repo = repository('agy-strict-report');
+  const promptFile = join(repo, 'prompt.txt');
+  const outputFile = join(repo, 'review.txt');
+  writeFileSync(promptFile, 'review this change');
+  const nonStrictReport = [
+    '# Deep Review Report — 2026-07-24',
+    '',
+    '## Summary',
+    '- **Verdict**: REQUEST_CHANGES',
+    '- **Issues**: 🔴 1건, 🟡 0건, ℹ️ 0건',
+    '',
+    '## Code Review',
+    '### 🔴 Critical',
+    '#### C1. subheading finding is not strict',
+    'Evidence and remediation.',
+    '### 🟡 Warning',
+    'None.',
+    '### ℹ️ Info',
+    'None.',
+    '### 🟢 Passed',
+    '- Remaining checks passed.',
+  ].join('\n');
+  const result = await runAgyReviewer({
+    binary: '/fake/agy', projectRoot: repo, pluginRoot, promptFile, outputFile,
+    mode: 'off', timeoutSeconds: 5,
+    privacyPreparer: async () => ({ outcome: 'auto_ack', fingerprint: 'same' }),
+    fingerprintCapturer: async () => ({ mode: 'off', digest: null, error: null }),
+    processRunner: async () => ({
+      code: 0, timedOut: false, stdout: Buffer.from(nonStrictReport), stderr: Buffer.alloc(0),
+    }),
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(readFileSync(`${outputFile}.status`, 'utf8'), 'failed\n');
 });
 
 test('fingerprint modes detect tracked, untracked, HEAD, sensitive ignored, and runtime-state drift', async () => {
@@ -485,6 +635,9 @@ test('agy bridge enforces privacy before spawn, prepends readonly text, retries 
   const result = await runAgyReviewer({
     binary, projectRoot: repo, pluginRoot, configPath, promptFile, outputFile,
     mode: 'hybrid', model: 'Gemini 3.5 Flash (High)', timeoutSeconds: 5,
+    executionPlan: {
+      model: 'Gemini 3.5 Flash (High)', effort: null, source: 'cli-reviewer', allowFallback: true,
+    },
     env: { ...process.env, FAKE_LOG: log, FAKE_BEHAVIOR: 'unsupported' },
   });
   assert.equal(result.status, 'success');
@@ -500,6 +653,26 @@ test('agy bridge enforces privacy before spawn, prepends readonly text, retries 
   assert.equal(prompt.endsWith('ORIGINAL BODY 리뷰 Ω'), true);
   assert.equal(readFileSync(`${outputFile}.status`, 'utf8'), 'success\n');
   assert.equal(readdirSync(repo).some((name) => name.endsWith('.tmp')), false);
+});
+
+test('agy bridge does not retry an unsupported legacy model without affirmative fallback authority', async () => {
+  const repo = repository('agy-legacy-no-fallback');
+  const configPath = config(repo);
+  const promptFile = join(repo, 'prompt.txt');
+  const outputFile = join(repo, 'review.txt');
+  const log = join(workspace('agy-legacy-no-fallback-log'), 'argv.jsonl');
+  const binary = fakeAgy(repo);
+  writeFileSync(promptFile, 'review this change');
+
+  const result = await runAgyReviewer({
+    binary, projectRoot: repo, pluginRoot, configPath, promptFile, outputFile,
+    mode: 'hybrid', model: 'Gemini 3.5 Flash (High)', timeoutSeconds: 5,
+    env: { ...process.env, FAKE_LOG: log, FAKE_BEHAVIOR: 'unsupported' },
+  });
+  assert.equal(rows(log).length, 1);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error_code, 'ERROR_UNSUPPORTED_MODEL');
+  assert.equal(readFileSync(`${outputFile}.status`, 'utf8'), 'failed\n');
 });
 
 test('agy classifier prioritizes mutation then truncation and bypass flags are true no-ops', async () => {
@@ -691,6 +864,9 @@ test('agy revalidates privacy before an unsupported-model retry can assemble ano
     outputFile,
     mode: 'hybrid',
     model: 'future-model',
+    executionPlan: {
+      model: 'future-model', effort: null, source: 'cli-reviewer', allowFallback: true,
+    },
     privacyPreparer,
     async processRunner() {
       processCalls += 1;

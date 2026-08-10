@@ -10,6 +10,7 @@ const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
 const routeUrl = pathToFileURL(path.join(root, 'hooks/scripts/public-route.mjs')).href;
 const classifyUrl = pathToFileURL(path.join(root, 'hooks/scripts/classify-artifacts.mjs')).href;
+const planUrl = pathToFileURL(path.join(root, 'hooks/scripts/lib/execution-plan.mjs')).href;
 
 test('review routing flags normalize repeated provider and canonical reviewer overrides', async () => {
   const { parsePublicRoute } = await import(routeUrl);
@@ -41,6 +42,74 @@ test('review routing flags normalize repeated provider and canonical reviewer ov
     required_reviewers: ['agy', 'claude-opus', 'codex-adversarial', 'codex-review'],
     enabled_providers: ['agy'],
   });
+});
+
+test('explicit --no-fallback overrides permissive policy and conflicts with --allow-fallback', async () => {
+  const { parsePublicRoute } = await import(routeUrl);
+  const { runClassifyArtifactsCli } = await import(classifyUrl);
+  const parse = (entry, argv) => parsePublicRoute({ entry, host: 'codex', cwd: root, argv });
+  const review = parse('review', ['--no-fallback']);
+  assert.equal(review.ok, true);
+  assert.equal(review.overrides.allow_fallback, false);
+  const loop = parse('loop', ['--no-fallback', '--max=2']);
+  assert.equal(loop.ok, true);
+  assert.equal(loop.overrides.allow_fallback, false);
+  assert.equal(parse('review', ['--allow-fallback', '--no-fallback']).ok, false);
+
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'deep-review-no-fallback-'));
+  fs.writeFileSync(path.join(repo, 'notes.md'), 'plain review notes');
+  const files = path.join(repo, 'targets.z');
+  fs.writeFileSync(files, 'notes.md\0');
+  const result = await runClassifyArtifactsCli(
+    ['--repo', repo, '--change-state', 'non-git', '--files-from0', files,
+      '--overrides-json', JSON.stringify(review.overrides), '--emit-routing-plan'],
+    {},
+    {
+      capabilities: routingTestCapabilities(), reviewers: routingTestReviewers,
+      projectPolicy: { routing: { allow_fallback: true } },
+    },
+  );
+  assert.ok(result.routing_plan.routes.length > 0);
+  assert.equal(result.routing_plan.routes.every((route) => route.fallback?.allowed === false), true);
+});
+
+test('explicit --no-fallback stays applicable when automatic routing is disabled or shadow-only', async () => {
+  const { parsePublicRoute } = await import(routeUrl);
+  const { runClassifyArtifactsCli } = await import(classifyUrl);
+  const { parseExecutionRouteJson } = await import(planUrl);
+  const publicRoute = parsePublicRoute({
+    entry: 'review', host: 'codex', cwd: root, argv: ['--no-fallback'],
+  });
+  assert.equal(publicRoute.ok, true);
+
+  for (const [label, features] of [
+    ['automatic-disabled', { automatic_model_routing: false }],
+    ['shadow-only', { routing_shadow_mode: true }],
+  ]) {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), `deep-review-no-fallback-${label}-`));
+    fs.writeFileSync(path.join(repo, 'notes.md'), 'plain review notes');
+    const files = path.join(repo, 'targets.z');
+    fs.writeFileSync(files, 'notes.md\0');
+    const result = await runClassifyArtifactsCli(
+      ['--repo', repo, '--change-state', 'non-git', '--files-from0', files,
+        '--overrides-json', JSON.stringify(publicRoute.overrides), '--emit-routing-plan'],
+      {},
+      {
+        capabilities: routingTestCapabilities(), reviewers: routingTestReviewers,
+        projectPolicy: { features, routing: { allow_fallback: true } },
+      },
+    );
+    assert.equal(result.routing_plan.apply_automatic, false, label);
+    assert.equal(result.routing_plan.explicit_overrides, true, label);
+    const route = result.routing_plan.routes[0];
+    assert.equal(route.fallback.allowed, false, label);
+    const leaf = parseExecutionRouteJson(JSON.stringify({
+      protocol_version: result.routing_plan.protocol_version,
+      ...route,
+    }), route.reviewer_id);
+    assert.equal(leaf.allowFallback, false, label);
+    assert.equal(leaf.routingFallback.occurred, false, label);
+  }
 });
 
 test('routing flags reject duplicates, unknown keys, and codex-only conflicts', async () => {

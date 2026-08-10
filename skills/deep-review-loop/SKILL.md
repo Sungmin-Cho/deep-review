@@ -2,7 +2,7 @@
 name: deep-review-loop
 description: Alternate independent review and evidence-based response until convergence on Claude Code or Codex.
 user-invocable: true
-argument-hint: "[--contract [SLICE-NNN]] [--entropy] [--ultracode] [--codex|--no-codex] [--no-opus] [--agy|--no-agy] [--codex-only] [--reviewer-strategy adaptive|static] [--readiness-receipt PATH] [--routing auto|fast|balanced|quality] [--model PROVIDER=MODEL] [--effort PROVIDER=EFFORT] [--reviewer-model REVIEWER=MODEL] [--reviewer-effort REVIEWER=EFFORT] [--allow-fallback] [--allow-classifier] [--max=N] [--session-doc]"
+argument-hint: "[--contract [SLICE-NNN]] [--entropy] [--ultracode] [--codex|--no-codex] [--no-opus] [--agy|--no-agy] [--codex-only] [--reviewer-strategy adaptive|static] [--readiness-receipt PATH] [--routing auto|fast|balanced|quality] [--model PROVIDER=MODEL] [--effort PROVIDER=EFFORT] [--reviewer-model REVIEWER=MODEL] [--reviewer-effort REVIEWER=EFFORT] [--allow-fallback|--no-fallback] [--allow-classifier] [--max=N] [--session-doc]"
 ---
 
 # deep-review-loop — Review and Respond loop
@@ -27,7 +27,7 @@ expanded `argv` without independently reparsing it.
   work. When it is omitted, implementation scope defaults to 5 rounds,
   low/medium document scope to 2, and high/critical document scope to 3.
 - Accept `--contract [SLICE-NNN]`, `--entropy`, every public reviewer flag,
-  routing/model/effort override, `--reviewer-strategy`, `--allow-fallback`,
+  routing/model/effort override, `--reviewer-strategy`, `--allow-fallback`, `--no-fallback`,
   `--allow-classifier`, and `--readiness-receipt`.
 - Accept `--session-doc` (opt-in, **default OFF**). When present, maintain one
   consolidated per-session review document (§4/§6); the terminal review and

@@ -26,6 +26,29 @@ function requiredBoundedInteger(value, field, minimum, maximum) {
   return value;
 }
 
+function fallbackAuthority(route) {
+  let nestedPresent = false;
+  let nestedValue;
+  if (Object.hasOwn(route, 'fallback') && route.fallback !== null) {
+    if (typeof route.fallback !== 'object' || Array.isArray(route.fallback)) {
+      throw new Error('routing plan fallback must be an object or null');
+    }
+    nestedPresent = Object.hasOwn(route.fallback, 'allowed');
+    if (nestedPresent) nestedValue = route.fallback.allowed;
+  }
+  const legacyPresent = Object.hasOwn(route, 'allow_fallback');
+  const legacyValue = route.allow_fallback;
+  for (const [present, value, field] of [
+    [nestedPresent, nestedValue, 'fallback.allowed'],
+    [legacyPresent, legacyValue, 'allow_fallback'],
+  ]) {
+    if (present && value !== null && typeof value !== 'boolean') {
+      throw new Error(`routing plan fallback authority ${field} must be boolean or null`);
+    }
+  }
+  return (nestedPresent ? nestedValue : legacyPresent ? legacyValue : false) === true;
+}
+
 function validateProtocol3Metadata(document) {
   if (!['document', 'implementation'].includes(document.artifact_phase)) {
     throw new Error('routing plan artifact_phase must be "document" or "implementation"');
@@ -187,7 +210,7 @@ export function parseExecutionPlanDocument(document, reviewerId) {
     source,
     modelSource: requested.model_source || source,
     effortSource: requested.effort_source || source,
-    allowFallback: Boolean(route.fallback?.allowed ?? route.allow_fallback),
+    allowFallback: fallbackAuthority(route),
     modelTransport: route.transports?.model || route.model_transport,
     effortTransport: route.transports?.effort || route.effort_transport,
     routingFallback: route.fallback || null,
@@ -253,7 +276,7 @@ export function parseExecutionRoute(route, reviewerId) {
     source,
     modelSource: requested.model_source || source,
     effortSource: requested.effort_source || source,
-    allowFallback: Boolean(route.fallback?.allowed ?? route.allow_fallback),
+    allowFallback: fallbackAuthority(route),
     modelTransport: route.transports?.model || route.model_transport,
     effortTransport: route.transports?.effort || route.effort_transport,
     routingFallback: route.fallback || null,

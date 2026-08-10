@@ -126,6 +126,7 @@ function parseReview(argv, host, cwd, provenance = {}) {
   let hasOverrides = false;
   let reviewerStrategySeen = false;
   let routingPolicySeen = false;
+  let fallbackMode = null;
   let readinessReceipt = null;
   // G3: routing_policy and allow_fallback stay absent unless the caller
   // actually passes --routing/--allow-fallback, so an unrelated flag (e.g.
@@ -179,7 +180,20 @@ function parseReview(argv, host, cwd, provenance = {}) {
       continue;
     }
     if (token === '--allow-fallback') {
+      if (fallbackMode !== null) {
+        return { ...routeError('--allow-fallback conflicts with or duplicates --no-fallback'), host, argv: expanded };
+      }
       overrides.allow_fallback = true;
+      fallbackMode = 'allow';
+      hasOverrides = true;
+      continue;
+    }
+    if (token === '--no-fallback') {
+      if (fallbackMode !== null) {
+        return { ...routeError('--no-fallback conflicts with or duplicates --allow-fallback'), host, argv: expanded };
+      }
+      overrides.allow_fallback = false;
+      fallbackMode = 'deny';
       hasOverrides = true;
       continue;
     }

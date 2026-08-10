@@ -13,6 +13,7 @@ import {
 } from './lib/process.mjs';
 import { atomicWriteFile, resolvePluginRoot } from './lib/runtime-context.mjs';
 import { loadExecutionPlan, parseExecutionRouteJson } from './lib/execution-plan.mjs';
+import { parseReviewerReport } from './review-synthesis.mjs';
 
 const BODY_LIMIT = 198_000;
 const WINDOWS_CREATE_PROCESS_LIMIT = 32_767;
@@ -54,14 +55,16 @@ Use REQUEST_CHANGES when any Critical exists, CONCERN when only Warnings exist,
 and APPROVE only when both Critical and Warning counts are zero. The issue
 counts MUST equal the findings in the sections. Missing or malformed contract
 fields cause this reviewer output to be excluded.
-For an empty severity section, write exactly \`없음.\`, \`None.\`, or
-\`(없음)\`; do not invent another placeholder.
+Under each severity heading, write exactly one single-line \`- \` bullet per
+finding, with its evidence and remediation on that same bullet. For an empty
+severity section, write exactly \`None.\`. Keep Passed entries as \`- \` bullets.
 ============================================================
 
 `;
 const AUTH_PATTERN = /Reauthentication required|do not currently have an active account|OAuth token expired|Please run.*agy.*login|Not signed in|Authentication failed/iu;
 const UNSUPPORTED_MODEL_PATTERN = /unsupported[^\n]*(?:model|--model)|unknown[^\n]*(?:model|--model)|invalid[^\n]*model|unrecognized[^\n]*--model/iu;
 const SAFE_MODEL_PATTERN = /^[A-Za-z0-9 ._/()-]+$/u;
+const EMPTY_SECTION_PATTERN = /^(?:None\.|없음\.|\(None\)|\(없음\)|- N\/A|- None\.)$/iu;
 
 function requiredString(value, name) {
   if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
@@ -94,7 +97,7 @@ function sectionFindingCount(output, heading) {
   ).exec(output);
   if (!match) return null;
   const body = match[1].trim();
-  if (/^(?:None\.|없음\.|\(None\)|\(없음\)|- N\/A|- None\.)$/iu.test(body)) return 0;
+  if (EMPTY_SECTION_PATTERN.test(body)) return 0;
   const subheadings = [...body.matchAll(/^####\s+\S.*$/gmu)].length;
   if (subheadings > 0) return subheadings;
   const listItems = [...body.matchAll(/^(?:[-*]\s+|[0-9]+\.\s+)\S.*$/gmu)].length;
@@ -119,7 +122,18 @@ export function normalizeAgyReport(output) {
   const expectedVerdict = declared[0] > 0
     ? 'REQUEST_CHANGES'
     : declared[1] > 0 ? 'CONCERN' : 'APPROVE';
-  return verdict === expectedVerdict ? output : null;
+  if (verdict !== expectedVerdict) return null;
+  let canonical = output;
+  for (const heading of ['🔴 Critical', '🟡 Warning', 'ℹ️ Info']) {
+    const escaped = heading.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    canonical = canonical.replace(
+      new RegExp(`(^### ${escaped}[ \\t]*\\r?\\n)([\\s\\S]*?)(?=^### |^## |(?![\\s\\S]))`, 'mu'),
+      (section, prefix, body) => (EMPTY_SECTION_PATTERN.test(body.trim())
+        ? `${prefix}${body.replace(body.trim(), 'None.')}`
+        : section),
+    );
+  }
+  return parseReviewerReport(canonical, { strict: true }) ? canonical : null;
 }
 
 function publishTerminalFiles(outputFile, processResult, status, warnings, mutationReason) {
@@ -375,9 +389,9 @@ export async function runAgyReviewer(options = {}) {
     && !AUTH_PATTERN.test(firstStderr)
     && UNSUPPORTED_MODEL_PATTERN.test(firstStderr)
   ) {
-    if (executionPlan?.source?.startsWith('cli-') && !executionPlan.allowFallback) {
+    if (executionPlan?.allowFallback !== true) {
       strictUnsupportedModel = true;
-      warnings.push(`ERROR_UNSUPPORTED_MODEL: agy rejected explicit model ${model}; fallback is disabled`);
+      warnings.push(`ERROR_UNSUPPORTED_MODEL: agy rejected requested model ${model}; fallback is not affirmatively authorized`);
     } else {
       terminalPrivacy = await privacyPreparer({
       repo: projectRoot,
@@ -473,8 +487,20 @@ export function parseCli(argv) {
     values[key] = argv[index + 1];
     index += 1;
   }
-  if (Boolean(values.routingPlan) !== Boolean(values.reviewerId)) {
-    throw new Error('--routing-plan and --reviewer-id must be provided together');
+  const hasRoutingPlan = Object.hasOwn(values, 'routingPlan');
+  const hasExecutionRouteJson = Object.hasOwn(values, 'executionRouteJson');
+  const hasReviewerId = Object.hasOwn(values, 'reviewerId');
+  for (const [present, key, flag] of [
+    [hasRoutingPlan, 'routingPlan', '--routing-plan'],
+    [hasExecutionRouteJson, 'executionRouteJson', '--execution-route-json'],
+    [hasReviewerId, 'reviewerId', '--reviewer-id'],
+  ]) {
+    if (present && values[key].length === 0) throw new Error(`${flag} must be non-empty`);
+  }
+  const executionSourceCount = Number(hasRoutingPlan) + Number(hasExecutionRouteJson);
+  if (executionSourceCount > 1
+      || (executionSourceCount === 1) !== hasReviewerId) {
+    throw new Error('exactly one execution source (--routing-plan or --execution-route-json) and --reviewer-id must be provided together');
   }
   return values;
 }
@@ -482,7 +508,7 @@ export function parseCli(argv) {
 async function main() {
   const options = parseCli(process.argv.slice(2));
   if (options.help) {
-    process.stdout.write('Usage: run-agy-reviewer.mjs --binary FILE --project-root DIR --plugin-root DIR --prompt-file FILE --output FILE [--mode MODE] [--model MODEL] [--routing-plan FILE --reviewer-id ID] [--timeout-seconds N]\n');
+    process.stdout.write('Usage: run-agy-reviewer.mjs --binary FILE --project-root DIR --plugin-root DIR --prompt-file FILE --output FILE [--mode MODE] [--model MODEL] [(--routing-plan FILE | --execution-route-json JSON) --reviewer-id ID] [--timeout-seconds N]\n');
     return;
   }
   options.pluginRoot ??= resolvePluginRoot();

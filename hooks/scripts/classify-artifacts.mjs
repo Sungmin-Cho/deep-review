@@ -470,6 +470,7 @@ function defaultReviewers(capabilities, overrides) {
 function hasExecutionOverride(overrides) {
   return Boolean(overrides && (
     overrides.codex_only === true
+    || Object.hasOwn(overrides, 'allow_fallback')
     || Object.values(overrides.providers || {}).some((value) => value.model !== undefined || value.effort !== undefined)
     || Object.values(overrides.reviewers || {}).some((value) => value.model !== undefined || value.effort !== undefined)
     || (overrides.routing_policy !== undefined && overrides.routing_policy !== 'auto')
