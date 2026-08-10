@@ -755,11 +755,31 @@ test('document instructions use practical blockers and readiness-owned final ver
     assert.match(normalized, /PRACTICAL DOCUMENT POLICY/u);
     assert.match(normalized, practicalBlocker);
     assert.match(normalized, /implementation infeasibility.*missing decision.*prevents execution/is);
-    assert.match(normalized, /reachable safety\/security\/compatibility\/rollback harm/is);
+    assert.match(normalized, /reachable safety\/security\/compatibility\/migration\/recovery\/rollback harm/is);
     assert.match(normalized, /acceptance criteria.*objective(?:ly verified| verification)/is);
     assert.match(normalized, nonBlockers);
     assert.match(normalized, deferredEvidence);
     assert.match(normalized, /DOCUMENT_BLOCKED.*REQUEST_CHANGES.*READY_FOR_IMPLEMENTATION.*APPROVE/is);
+    assert.match(normalized, /design-validation/u);
+    assert.match(normalized, /full-readiness/u);
+    assert.match(normalized, /design-validation.*implementation feasibility.*design soundness/is);
+    assert.match(normalized, /full-readiness.*missing executable decision.*objectively verif/is);
+    assert.match(normalized, /prose completeness.*(?:not|never).*block/is);
+    assert.match(normalized, /mixed.*full-readiness/is);
+
+    // The design-validation section's actual blocker list must include the
+    // runtime policy's grounded behavior-causing unsound-design blocker
+    // (hooks/scripts/lib/assignment-rubrics.mjs DESIGN_VALIDATION_POLICY),
+    // not just narrate "design soundness" review without listing it.
+    const designSection = (source.split(/### full-readiness/u)[0].split(/### design-validation/u)[1] ?? '')
+      .replace(/\s+/gu, ' ');
+    assert.notEqual(designSection, '', 'design-validation section must exist before full-readiness');
+    assert.match(designSection, /grounded.*behavior-causing unsound design/is);
+
+    // Finding 6: the design-validation blocker list must include migration
+    // and recovery harm, aligned with the runtime policy's shared blocker
+    // floor (hooks/scripts/lib/assignment-rubrics.mjs SHARED_BLOCKER_FLOOR).
+    assert.match(designSection, /migration.*recovery.*rollback|migration\/recovery/is);
   }
   for (const source of korean) {
     const normalized = source.replace(/\s+/gu, ' ');
@@ -769,6 +789,19 @@ test('document instructions use practical blockers and readiness-owned final ver
     assert.match(normalized, /스타일.*가독성.*명명.*취향.*근거 없는 추측/is);
     assert.match(normalized, /구현 검증.*객관적으로/is);
     assert.match(normalized, /DOCUMENT_BLOCKED.*REQUEST_CHANGES.*READY_FOR_IMPLEMENTATION.*APPROVE/is);
+    assert.match(normalized, /design-validation.*구현 가능성.*설계 건전성/is);
+    assert.match(normalized, /full-readiness.*누락된 실행 가능 결정.*객관적으로 검증/is);
+    assert.match(normalized, /문구 완결성.*차단하지/is);
+    assert.match(normalized, /혼합.*full-readiness/is);
+
+    const designSectionKo = (source.split(/### full-readiness/u)[0].split(/### design-validation/u)[1] ?? '')
+      .replace(/\s+/gu, ' ');
+    assert.notEqual(designSectionKo, '', 'design-validation section must exist before full-readiness');
+    assert.match(designSectionKo, /근거가 있고.*잘못된 동작을 유발하는 불건전한 설계/is);
+
+    // Finding 6: README.ko.md must also include migration/recovery harm in
+    // the design-validation blocker list.
+    assert.match(designSectionKo, /마이그레이션.*복구|복구.*마이그레이션/is);
   }
 
   for (const relativePath of ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {

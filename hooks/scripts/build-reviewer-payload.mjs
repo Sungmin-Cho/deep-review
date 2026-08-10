@@ -53,12 +53,15 @@ function trustedAssignmentSection(options) {
       ? [
           `artifact_phase: ${executionPlan.artifactPhase}`,
           `risk: ${executionPlan.risk}`,
+          ...(executionPlan.artifactPhase === 'document'
+            ? [`document_review_mode: ${executionPlan.documentReviewMode}`]
+            : []),
         ]
       : []),
     '',
     rubricTextForRole(executionPlan.assignmentRole),
     ...(executionPlan.artifactPhase === 'document'
-      ? ['', documentReviewPolicyText()]
+      ? ['', documentReviewPolicyText(executionPlan.documentReviewMode || 'full-readiness')]
       : []),
   ];
   return { content: lines.join('\n'), executionPlan };

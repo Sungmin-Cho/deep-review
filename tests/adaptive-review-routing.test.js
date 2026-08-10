@@ -73,6 +73,25 @@ test('artifact phase is document only for an all-design/spec/plan/ADR/test-plan 
   assert.equal(classifyArtifactPhase([{ target_kind: 'generic-document' }]), 'implementation');
 });
 
+test('document review mode is relaxed only for an all-design or ADR scope', async () => {
+  const { classifyDocumentReviewMode } = await import(adaptiveUrl);
+  assert.equal(classifyDocumentReviewMode([
+    { target_kind: 'design-document' },
+    { target_kind: 'architecture-decision-record' },
+  ]), 'design-validation');
+  for (const artifacts of [
+    [],
+    new Array(1),
+    [{ target_kind: 'implementation-plan' }],
+    [{ target_kind: 'requirements-specification' }],
+    [{ target_kind: 'test-plan' }],
+    [{ target_kind: 'design-document' }, { target_kind: 'implementation-plan' }],
+    [{ target_kind: 'generic-document' }],
+  ]) {
+    assert.equal(classifyDocumentReviewMode(artifacts), 'full-readiness');
+  }
+});
+
 test('adaptive matrix selects role-fit reviewer floors by phase and risk', async () => {
   const { planReviewerAssignments } = await import(adaptiveUrl);
 

@@ -20,6 +20,9 @@
 .deep-review/
 docs/
 
+# 이 zero-dependency 플러그인에서 로컬 npm 실행이 만드는 비제품 산출물
+/package-lock.json
+
 # deep-loop 플러그인 런타임 상태(runs/insights/event-log). `.deep-review/`와
 # 같은 취지로, 오케스트레이션 로컬 상태를 공개 저장소에 커밋하지 않습니다.
 .deep-loop/

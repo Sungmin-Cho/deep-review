@@ -92,8 +92,8 @@ rules.yaml이 있으면 해당 규칙 기준, 없으면 일반 원칙:
 For a validated protocol 3 document phase, document blockers are limited to a
 concrete repository/artifact-grounded functional contradiction; implementation
 infeasibility or a missing decision that prevents execution; reachable
-safety/security/compatibility/rollback harm; or acceptance criteria incapable
-of objective verification.
+safety/security/compatibility/migration/recovery/rollback harm; or acceptance
+criteria incapable of objective verification.
 
 Style, readability, naming, preference, and ungrounded speculation are
 advisory/info or suppressed, not Warning/Critical pre-implementation blockers.
@@ -101,7 +101,25 @@ Missing future implementation/tests are implementation_verification evidence
 with objective acceptance evidence, not document blockers. The policy is
 role- and provider-independent; it does not apply to implementation phase.
 
+### design-validation
+
+For an all-design-document/ADR scope, review implementation feasibility and
+design soundness: block only the shared functional-contradiction,
+infeasibility, safety/security/compatibility/migration/recovery/rollback-harm,
+and grounded behavior-causing unsound design blockers above. Prose
+completeness and unspecified implementation detail never block.
+
+### full-readiness
+
+For mixed, ambiguous, or executable document scopes, full-readiness applies:
+additionally block a missing executable decision or an acceptance criterion
+that fails to be objectively verifiable. Prose completeness, wording polish,
+formatting, and harmless typos still never block. Mixed or ambiguous scope
+classification uses full-readiness.
+
 Artifact Gate readiness owns the final document verdict:
 `DOCUMENT_BLOCKED` => `REQUEST_CHANGES`; `READY_FOR_IMPLEMENTATION` with
 deferred findings => `CONCERN`; and `READY_FOR_IMPLEMENTATION` with no deferred
-findings => `APPROVE`.
+findings => `APPROVE`, across both modes. Readiness stays the final verdict
+authority; the implementation phase retains normal code review, not this
+document policy.

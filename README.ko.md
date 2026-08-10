@@ -270,8 +270,9 @@ deep-review는 `.deep-review/` 아래 여러 파일을 읽습니다:
 
 순수 문서 리뷰는 신뢰된 artifact phase와 risk를 모든 리뷰어 assignment에
 전달합니다. 문서 blocker는 저장소/아티팩트에 근거한 구체적 기능 모순,
-구현 불가능성 또는 실행을 막는 결정 누락, 도달 가능한 안전/보안/호환성/롤백
-피해, 객관적으로 검증할 수 없는 acceptance criteria로 제한합니다.
+구현 불가능성 또는 실행을 막는 결정 누락, 도달 가능한
+안전/보안/호환성/마이그레이션/복구/롤백 피해, 객관적으로 검증할 수 없는
+acceptance criteria로 제한합니다.
 
 스타일, 가독성, 명명, 취향, 근거 없는 추측은 advisory/info로 남기거나
 억제하며 pre-implementation blocker로 올리지 않습니다. 미래 구현/테스트
@@ -279,9 +280,27 @@ deep-review는 `.deep-review/` 아래 여러 파일을 읽습니다:
 문서 finding만으로 same-round reviewer를 추가하지 않으며 운영 floor는
 fail-closed로 유지합니다.
 
+### design-validation
+
+전체 설계 문서/ADR 범위에서는 구현 가능성과 설계 건전성을 검토합니다: 위의
+공유된 기능 모순, 구현 불가능성, 안전/보안/호환성/마이그레이션/복구/롤백
+피해, 근거가 있고 잘못된 동작을 유발하는 불건전한 설계 blocker만
+차단합니다. 문구 완결성과 구체화되지 않은 구현 세부사항은 결코
+차단하지 않습니다.
+
+### full-readiness
+
+혼합되었거나 모호하거나 실행 가능한 문서 범위에서는 full-readiness가
+적용됩니다: 누락된 실행 가능 결정 또는 객관적으로 검증 가능하지 않은
+acceptance criterion을 추가로 차단합니다. 문구 완결성, 표현 다듬기, 서식,
+사소한 오타는 여전히 차단하지 않습니다. 혼합되었거나 모호한 범위 분류는
+full-readiness를 사용합니다.
+
 Artifact Gate readiness가 최종 문서 판정을 소유합니다: `DOCUMENT_BLOCKED` =>
 `REQUEST_CHANGES`; `READY_FOR_IMPLEMENTATION`에 deferred finding이 있으면
-`CONCERN`; 없으면 `APPROVE`입니다.
+`CONCERN`; 없으면 `APPROVE`입니다 (양쪽 모드 공통). Readiness가 최종 판정
+권한을 유지하며, implementation phase는 이 문서 정책이 아니라 일반 code
+review를 유지합니다.
 
 ## 링크
 

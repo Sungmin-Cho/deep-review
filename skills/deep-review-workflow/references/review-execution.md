@@ -456,8 +456,8 @@ exact-one `*-review.md` report-set delta remains unchanged.
 For a validated document phase, document blockers are limited to a concrete
 repository/artifact-grounded functional contradiction; implementation
 infeasibility or a missing decision that prevents execution; reachable
-safety/security/compatibility/rollback harm; or acceptance criteria incapable
-of objective verification.
+safety/security/compatibility/migration/recovery/rollback harm; or acceptance
+criteria incapable of objective verification.
 
 Style, readability, naming, preference, and ungrounded speculation are
 advisory/info or suppressed, not Warning/Critical pre-implementation blockers.
@@ -466,11 +466,29 @@ with objective acceptance evidence, not document blockers. Document findings
 alone do not allocate a same-round expansion; reviewer minimum/floor and
 readiness-mismatch expansion remain active.
 
+### design-validation
+
+For an all-design-document/ADR scope, review implementation feasibility and
+design soundness: block only the shared functional-contradiction,
+infeasibility, safety/security/compatibility/migration/recovery/rollback-harm,
+and grounded behavior-causing unsound design blockers above. Prose
+completeness and unspecified implementation detail never block.
+
+### full-readiness
+
+For mixed, ambiguous, or executable document scopes, full-readiness applies:
+additionally block a missing executable decision or an acceptance criterion
+that fails to be objectively verifiable. Prose completeness, wording polish,
+formatting, and harmless typos still never block. Mixed or ambiguous scope
+classification uses full-readiness.
+
 Artifact Gate readiness owns the final document verdict:
 `DOCUMENT_BLOCKED` => `REQUEST_CHANGES`; `READY_FOR_IMPLEMENTATION` with
 deferred findings => `CONCERN`; and `READY_FOR_IMPLEMENTATION` with no deferred
-findings => `APPROVE`. Recompute this verdict from the sealed Artifact Gate
-evidence during verification; do not add it to the readiness receipt schema.
+findings => `APPROVE`, across both modes. Recompute this verdict from the
+sealed Artifact Gate evidence during verification; do not add it to the
+readiness receipt schema. Readiness stays the final verdict authority; the
+implementation phase retains normal code review, not this document policy.
 
 For an implementation linked by a verified readiness receipt, evaluate every
 deferred finding against fresh final-implementation evidence before allowing

@@ -77,6 +77,13 @@ test('package contract uses Node 22 and keeps Bash out of npm test', () => {
   assert.equal(manifest.scripts['test:legacy'], 'bash scripts/run-all-tests.sh');
 });
 
+test('dependency-free plugin ignores the local npm lock artifact', () => {
+  const manifest = JSON.parse(read('package.json'));
+  assert.equal(Object.hasOwn(manifest, 'dependencies'), false);
+  assert.equal(Object.hasOwn(manifest, 'devDependencies'), false);
+  assert.match(read('.gitignore'), /^\/package-lock\.json$/mu);
+});
+
 test('bilingual runtime prerequisites disclose the enforced Git floor', () => {
   assert.match(read('README.md'), /Git 2\.45 or newer/u);
   assert.match(read('README.ko.md'), /Git 2\.45 이상/u);
