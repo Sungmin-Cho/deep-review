@@ -77,7 +77,7 @@ export function classifyArtifactPhase(artifacts = []) {
 
 export function classifyDocumentReviewMode(artifacts = []) {
   if (!Array.isArray(artifacts) || artifacts.length === 0) return 'full-readiness';
-  const mode = artifacts.every((artifact) => DESIGN_REVIEW_TARGETS.has(artifact?.target_kind))
+  const mode = Array.from(artifacts).every((artifact) => DESIGN_REVIEW_TARGETS.has(artifact?.target_kind))
     ? 'design-validation'
     : 'full-readiness';
   if (!isDocumentReviewMode(mode)) throw new Error(`unsupported document review mode: ${String(mode)}`);

@@ -81,6 +81,7 @@ test('document review mode is relaxed only for an all-design or ADR scope', asyn
   ]), 'design-validation');
   for (const artifacts of [
     [],
+    new Array(1),
     [{ target_kind: 'implementation-plan' }],
     [{ target_kind: 'requirements-specification' }],
     [{ target_kind: 'test-plan' }],
