@@ -146,6 +146,41 @@ test('inline execution-route fallback authority accepts only boolean true across
       );
     }
   }
+
+  const legacy = parseExecutionRouteJson(JSON.stringify(routeFor('fallback', false)), 'agy');
+  assert.equal(legacy.artifactPhase, null);
+  assert.equal(legacy.risk, null);
+  assert.equal(legacy.documentReviewMode, null);
+
+  const documentRoute = routeFor('fallback', false);
+  Object.assign(documentRoute, {
+    artifact_phase: 'document',
+    risk: 'medium',
+    document_review_mode: 'design-validation',
+  });
+  const parsed = parseExecutionRouteJson(JSON.stringify(documentRoute), 'agy');
+  assert.equal(parsed.documentReviewMode, 'design-validation');
+
+  assert.throws(() => parseExecutionRouteJson(JSON.stringify({
+    ...documentRoute, document_review_mode: 'invented-mode',
+  }), 'agy'), /document_review_mode/);
+  assert.throws(() => parseExecutionRouteJson(JSON.stringify({
+    ...documentRoute, artifact_phase: 'implementation',
+  }), 'agy'), /design-validation requires document artifact phase/);
+
+  const fullDocumentContext = { artifact_phase: 'document', risk: 'medium', document_review_mode: 'design-validation' };
+  for (const kept of [
+    ['artifact_phase'], ['risk'], ['document_review_mode'],
+    ['artifact_phase', 'risk'], ['artifact_phase', 'document_review_mode'], ['risk', 'document_review_mode'],
+  ]) {
+    const partial = routeFor('fallback', false);
+    for (const field of kept) partial[field] = fullDocumentContext[field];
+    assert.throws(
+      () => parseExecutionRouteJson(JSON.stringify(partial), 'agy'),
+      /execution route document context must be complete/,
+      `kept:${kept.join(',')}`,
+    );
+  }
 });
 
 test('routing plan leaf reads both legacy 2.0 and assignment-aware 3.0 documents', async () => {
@@ -208,6 +243,40 @@ test('routing plan leaf reads both legacy 2.0 and assignment-aware 3.0 documents
     ...current,
     routes: [{ ...current.routes[0], assignment_role: 'invented' }],
   }, 'claude-opus'), /assignment role/);
+
+  const legacyDocumentPlan = structuredClone(current);
+  delete legacyDocumentPlan.document_review_mode;
+  const parsedLegacy = parseExecutionPlanDocument(legacyDocumentPlan, 'claude-opus');
+  assert.equal(parsedLegacy.documentReviewMode, 'full-readiness');
+
+  current.document_review_mode = 'design-validation';
+  for (const route of current.routes) {
+    Object.assign(route, {
+      artifact_phase: 'document',
+      risk: 'high',
+      document_review_mode: 'design-validation',
+    });
+  }
+  const parsedCurrent = parseExecutionPlanDocument(current, 'claude-opus');
+  assert.equal(parsedCurrent.artifactPhase, 'document');
+  assert.equal(parsedCurrent.risk, 'high');
+  assert.equal(parsedCurrent.documentReviewMode, 'design-validation');
+
+  assert.throws(() => parseExecutionPlanDocument({
+    ...current, document_review_mode: 'invented-mode',
+  }, 'claude-opus'), /document_review_mode/);
+  assert.throws(() => parseExecutionPlanDocument({
+    ...current, artifact_phase: 'implementation',
+  }, 'claude-opus'), /design-validation requires document artifact phase/);
+  const { risk: _omittedRisk, ...routeWithoutRisk } = current.routes[0];
+  assert.throws(() => parseExecutionPlanDocument({
+    ...current,
+    routes: [routeWithoutRisk],
+  }, 'claude-opus'), /execution route document context must be complete/);
+  assert.throws(() => parseExecutionPlanDocument({
+    ...current,
+    routes: [{ ...current.routes[0], risk: 'low' }],
+  }, 'claude-opus'), /document context mismatch/);
 });
 
 test('routing plan protocol 3.0 rejects malformed global, candidate, and route metadata', async () => {

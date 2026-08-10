@@ -4,6 +4,7 @@ import {
   isAssignmentRole,
   rubricIdForRole,
   validateRubricAssignment,
+  isDocumentReviewMode,
 } from './assignment-rubrics.mjs';
 import { isReviewerId, REVIEWER_PROVIDERS } from './reviewer-ids.mjs';
 
@@ -94,6 +95,46 @@ function validateProtocol3Metadata(document) {
   }
 }
 
+const RISK_VALUES = new Set(['low', 'medium', 'high', 'critical']);
+
+function validateDocumentContext(artifactPhase, risk, documentReviewMode, label) {
+  if (!['document', 'implementation'].includes(artifactPhase)) {
+    throw new Error(`${label} artifact_phase is invalid`);
+  }
+  if (!RISK_VALUES.has(risk)) throw new Error(`${label} risk is invalid`);
+  if (!isDocumentReviewMode(documentReviewMode)) {
+    throw new Error(`${label} document_review_mode is invalid`);
+  }
+  if (artifactPhase !== 'document' && documentReviewMode === 'design-validation') {
+    throw new Error('design-validation requires document artifact phase');
+  }
+  return { artifactPhase, risk, documentReviewMode };
+}
+
+function normalizePlanDocumentContext(document) {
+  return validateDocumentContext(
+    document.artifact_phase,
+    document.risk,
+    document.document_review_mode ?? 'full-readiness',
+    'routing plan',
+  );
+}
+
+function normalizeInlineDocumentContext(route) {
+  const fields = ['artifact_phase', 'risk', 'document_review_mode'];
+  const present = fields.filter((field) => Object.hasOwn(route, field));
+  if (present.length === 0) {
+    return { artifactPhase: null, risk: null, documentReviewMode: null };
+  }
+  if (present.length !== fields.length) throw new Error('execution route document context must be complete');
+  return validateDocumentContext(
+    route.artifact_phase,
+    route.risk,
+    route.document_review_mode,
+    'execution route',
+  );
+}
+
 export function parseExecutionPlanDocument(document, reviewerId) {
   requiredReviewerId(reviewerId);
   if (!document || typeof document !== 'object' || Array.isArray(document)) throw new Error('routing plan must be a JSON object');
@@ -105,8 +146,10 @@ export function parseExecutionPlanDocument(document, reviewerId) {
     : Array.isArray(document.reviewers) ? document.reviewers : null;
   if (!routes) throw new Error('routing plan must contain routes or reviewers');
   let candidateById = null;
+  let planContext = null;
   if (document.protocol_version === '3.0') {
     validateProtocol3Metadata(document);
+    planContext = normalizePlanDocumentContext(document);
     if (!Array.isArray(document.candidate_reviewers)) {
       throw new Error('routing plan protocol 3.0 must contain candidate_reviewers');
     }
@@ -187,6 +230,14 @@ export function parseExecutionPlanDocument(document, reviewerId) {
           || !Object.hasOwn(candidate.resolved, 'model') || !Object.hasOwn(candidate.resolved, 'effort')) {
         throw new Error(`routing plan resolved model/effort is invalid for ${candidate.reviewer_id}`);
       }
+      if (['artifact_phase', 'risk', 'document_review_mode'].some((field) => Object.hasOwn(candidate, field))) {
+        const routeContext = normalizeInlineDocumentContext(candidate);
+        if (routeContext.artifactPhase !== planContext.artifactPhase
+            || routeContext.risk !== planContext.risk
+            || routeContext.documentReviewMode !== planContext.documentReviewMode) {
+          throw new Error(`routing plan route document context mismatch for ${candidate.reviewer_id}`);
+        }
+      }
     }
   }
   if ([...initialReviewerIds].some((reviewerId) => !seen.has(reviewerId))) {
@@ -218,8 +269,9 @@ export function parseExecutionPlanDocument(document, reviewerId) {
     rubricId,
     wave: document.protocol_version === '3.0' ? route.wave : 1,
     required: document.protocol_version === '3.0' ? route.required : false,
-    artifactPhase: document.protocol_version === '3.0' ? document.artifact_phase ?? null : null,
-    risk: document.protocol_version === '3.0' ? document.risk ?? null : null,
+    artifactPhase: planContext ? planContext.artifactPhase : null,
+    risk: planContext ? planContext.risk : null,
+    documentReviewMode: planContext ? planContext.documentReviewMode : null,
   };
 }
 
@@ -265,6 +317,7 @@ export function parseExecutionRoute(route, reviewerId) {
       || !Object.hasOwn(route.resolved, 'model') || !Object.hasOwn(route.resolved, 'effort')) {
     throw new Error(`execution route resolved model/effort is invalid for ${route.reviewer_id}`);
   }
+  const documentContext = normalizeInlineDocumentContext(route);
   const requested = route.requested || route;
   const resolved = route.resolved;
   const source = requested.source || route.source || 'auto';
@@ -284,9 +337,9 @@ export function parseExecutionRoute(route, reviewerId) {
     rubricId: route.rubric_id,
     wave: route.wave,
     required: route.required,
-    // Document-level context by definition: an inline route carries neither.
-    artifactPhase: null,
-    risk: null,
+    artifactPhase: documentContext.artifactPhase,
+    risk: documentContext.risk,
+    documentReviewMode: documentContext.documentReviewMode,
   };
 }
 
