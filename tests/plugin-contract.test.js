@@ -169,13 +169,13 @@ test('both workflows cover every release-relevant path class', () => {
   }
 });
 
-test('release version is exactly 2.4.0 on all three package surfaces', () => {
+test('release version is exactly 2.5.0 on all three package surfaces', () => {
   const versions = [
     JSON.parse(read('.claude-plugin/plugin.json')).version,
     JSON.parse(read('.codex-plugin/plugin.json')).version,
     JSON.parse(read('package.json')).version,
   ];
-  assert.deepEqual(versions, ['2.4.0', '2.4.0', '2.4.0']);
+  assert.deepEqual(versions, ['2.5.0', '2.5.0', '2.5.0']);
 });
 
 test('evergreen bilingual READMEs advertise both native hosts and portable runtime', () => {

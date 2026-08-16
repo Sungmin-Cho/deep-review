@@ -805,7 +805,7 @@ test('document instructions use practical blockers and readiness-owned final ver
   }
 
   for (const relativePath of ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {
-    assert.equal(JSON.parse(read(relativePath)).version, '2.4.0', relativePath);
+    assert.equal(JSON.parse(read(relativePath)).version, '2.5.0', relativePath);
   }
 
   const changelog = read('CHANGELOG.md');
