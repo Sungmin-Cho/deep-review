@@ -4,6 +4,11 @@ import {
   planReviewerAssignments,
 } from './adaptive-review-routing.mjs';
 import { isAssignmentRole, rubricIdForRole } from './assignment-rubrics.mjs';
+import {
+  applySuiteResolution,
+  buildReviewRouteRequest,
+  resolveSuiteOverlay,
+} from './suite-route-adapter.mjs';
 
 export const ROUTING_PROTOCOL_VERSION = '3.0';
 
@@ -238,7 +243,7 @@ function validateConstraints(requested, reviewer, policy, capability) {
   }
 }
 
-export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', policy = {}, overrides = {}, capabilities = [], artifactPhase, documentReviewMode }) {
+export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', policy = {}, overrides = {}, capabilities = [], artifactPhase, documentReviewMode, suiteResolve }) {
   const capability = capabilityFor(reviewer, capabilities);
   if (!capability || capability.available === false) throw new Error(`ERROR_PROVIDER_UNAVAILABLE: ${reviewer.provider}`);
   const routingPolicy = overrides.routing_policy || policy.routing?.policy || 'auto';
@@ -309,7 +314,7 @@ export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', po
   }
   if (fallback.occurred) fallback.applied = { ...resolved };
 
-  return {
+  const localRoute = {
     protocol_version: ROUTING_PROTOCOL_VERSION,
     reviewer_id: reviewer.id,
     provider: reviewer.provider,
@@ -333,6 +338,26 @@ export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', po
       document_review_mode: documentReviewMode,
     } : {}),
   };
+  const explicit = isExplicit(requested.model_source) || isExplicit(requested.effort_source);
+  const suiteEnabled = typeof suiteResolve === 'function' || policy.features?.suite_model_resolver === true;
+  if (explicit || policy.features?.automatic_model_routing === false || !suiteEnabled) {
+    return {
+      ...localRoute,
+      suite_route: {
+        applied: false,
+        reason: explicit ? 'explicit-override'
+          : policy.features?.automatic_model_routing === false ? 'disabled'
+            : 'not-configured',
+      },
+    };
+  }
+  const outcome = typeof suiteResolve === 'function'
+    ? suiteResolve({ risk, provider: reviewer.provider, localRoute })
+    : resolveSuiteOverlay({
+      localBand: String(risk || 'low').toUpperCase(),
+      request: buildReviewRouteRequest({ risk, provider: reviewer.provider }),
+    });
+  return applySuiteResolution(localRoute, outcome, { provider: reviewer.provider });
 }
 
 function maxClass(values, order) {
@@ -349,6 +374,7 @@ export function buildRoutingPlan({
   priorRisk,
   receiptRisk,
   progress,
+  suiteResolve,
 } = {}) {
   // H3: riskFloor is an optional additive override — when the caller has
   // independently derived 'high' risk from the actual change patch (removed
@@ -422,6 +448,7 @@ export function buildRoutingPlan({
       capabilities,
       artifactPhase: assignmentPlan.artifact_phase,
       documentReviewMode: assignmentPlan.document_review_mode,
+      suiteResolve,
     });
   };
   const routes = assignmentPlan.assignments.map(routedAssignment);

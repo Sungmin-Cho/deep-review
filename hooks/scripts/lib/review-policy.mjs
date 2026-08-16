@@ -10,6 +10,7 @@ const KNOWN = Object.freeze({
     adaptive_reviewer_routing: null,
     automatic_model_routing: null,
     routing_shadow_mode: null,
+    suite_model_resolver: null,
   },
   classification: {
     mode: null,
@@ -201,6 +202,7 @@ function validateAdaptivePolicy(policy) {
     'adaptive_reviewer_routing',
     'automatic_model_routing',
     'routing_shadow_mode',
+    'suite_model_resolver',
   ]) {
     if (policy.features?.[key] !== undefined && typeof policy.features[key] !== 'boolean') {
       throw new Error(`review policy features.${key} must be boolean`);
