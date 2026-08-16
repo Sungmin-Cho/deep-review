@@ -10,6 +10,12 @@ All notable changes to deep-review are documented here. Follows [Keep a Changelo
 
 - **Design review readiness modes** — design documents and ADRs now review implementation feasibility and design soundness, while executable plans retain practical full readiness. Neither mode treats prose completeness as blocking, and both hosts receive the same validated inline-route policy.
 
+## [2.5.0] — 2026-08-17
+
+### Added
+
+- **Suite model-router resolver overlay.** After local role, rubric, wave, and admission, an opt-in suite overlay may change the concrete model id, native effort, same-family fallback, and provenance. It must not change seats, families, rubrics, admission, or the critical floor. Enable via `suiteResolve` inject or `features.suite_model_resolver: true`. Explicit CLI model and `automatic_model_routing: false` skip the overlay.
+
 ## [2.4.0] — 2026-08-02
 
 ### Security
