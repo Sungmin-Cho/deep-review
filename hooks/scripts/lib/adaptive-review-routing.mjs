@@ -212,7 +212,7 @@ export function planReviewerAssignments(options = {}) {
   }
   const maximumReviewers = options.maximumReviewers ?? 4;
   if (!Number.isInteger(maximumReviewers) || maximumReviewers < 1 || maximumReviewers > REVIEWER_IDS.length) {
-    throw new Error('maximumReviewers must be an integer from 1 through 4');
+    throw new Error(`maximumReviewers must be an integer from 1 through ${REVIEWER_IDS.length}`);
   }
   const candidates = normalizeCandidates(options.candidates || []);
   const requiredReviewers = new Set(options.requiredReviewers || []);

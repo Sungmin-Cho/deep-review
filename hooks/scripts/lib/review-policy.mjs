@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { isTargetKind, SCOPE_KIND_MIXED } from './target-taxonomy.mjs';
+import { REVIEWER_IDS } from './reviewer-ids.mjs';
 
 const KNOWN = Object.freeze({
   schema_version: null,
@@ -220,8 +221,8 @@ function validateAdaptivePolicy(policy) {
   }
   const maximumReviewers = policy.routing?.maximum_reviewers;
   if (maximumReviewers !== undefined
-      && (!Number.isInteger(maximumReviewers) || maximumReviewers < 1 || maximumReviewers > 4)) {
-    throw new Error('review policy routing.maximum_reviewers must be an integer from 1 through 4');
+      && (!Number.isInteger(maximumReviewers) || maximumReviewers < 1 || maximumReviewers > REVIEWER_IDS.length)) {
+    throw new Error(`review policy routing.maximum_reviewers must be an integer from 1 through ${REVIEWER_IDS.length}`);
   }
   const expansionWaves = policy.routing?.max_expansion_waves;
   if (expansionWaves !== undefined

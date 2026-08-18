@@ -158,7 +158,7 @@ test('adaptive policy enums, booleans, and convergence limits fail closed on mal
     ['routing:\\n  reviewer_strategy: random', /adaptive or static/],
     ['routing:\\n  document_round_limit: 0', /positive integer/],
     ['routing:\\n  high_risk_document_round_limit: 2.5', /positive integer/],
-    ['routing:\\n  maximum_reviewers: 5', /1 through 4/],
+    ['routing:\\n  maximum_reviewers: 6', /1 through 5/],
     ['routing:\\n  max_expansion_waves: 2', /must be 0 or 1/],
   ]) {
     assert.throws(

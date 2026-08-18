@@ -6,7 +6,7 @@ import {
   validateRubricAssignment,
   isDocumentReviewMode,
 } from './assignment-rubrics.mjs';
-import { isReviewerId, REVIEWER_PROVIDERS } from './reviewer-ids.mjs';
+import { isReviewerId, REVIEWER_IDS, REVIEWER_PROVIDERS } from './reviewer-ids.mjs';
 
 function requiredReviewerId(reviewerId) {
   if (!isReviewerId(reviewerId)) throw new Error(`routing plan reviewer-id is not canonical: ${reviewerId}`);
@@ -66,7 +66,12 @@ function validateProtocol3Metadata(document) {
   if (!['initial', 'regression', 'confirmation', 'stalled', 'changed'].includes(document.progress)) {
     throw new Error('routing plan progress is invalid');
   }
-  const maximumReviewers = requiredBoundedInteger(document.maximum_reviewers, 'maximum_reviewers', 1, 4);
+  const maximumReviewers = requiredBoundedInteger(
+    document.maximum_reviewers,
+    'maximum_reviewers',
+    1,
+    REVIEWER_IDS.length,
+  );
   const minimumReviewers = requiredBoundedInteger(
     document.minimum_reviewers,
     'minimum_reviewers',
