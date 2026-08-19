@@ -11,6 +11,7 @@ const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
 const readinessUrl = pathToFileURL(path.join(root, 'hooks/scripts/document-readiness.mjs')).href;
 const payloadUrl = pathToFileURL(path.join(root, 'hooks/scripts/build-reviewer-payload.mjs')).href;
+const synthesisUrl = pathToFileURL(path.join(root, 'hooks/scripts/review-synthesis.mjs')).href;
 
 function repoFixture() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'deep-review-readiness-'));
@@ -149,6 +150,85 @@ function historicalV22Fixture() {
   );
   fs.writeFileSync(receiptPath, `${canonicalJsonV22(receipt)}\n`);
   return { repo, documentPath, reportPath, receiptPath };
+}
+
+// The smallest trusted protocol-3 implementation plan that admits the two
+// reviewers below, so a deferred obligation can be followed from the sealed
+// receipt all the way into round synthesis.
+function implementationRoutingPlan() {
+  const context = {
+    artifact_phase: 'implementation',
+    risk: 'low',
+    document_review_mode: 'full-readiness',
+  };
+  return {
+    protocol_version: '3.0',
+    ...context,
+    reviewer_strategy: 'adaptive',
+    shadow_mode: false,
+    progress: 'initial',
+    minimum_reviewers: 2,
+    planned_reviewers: 2,
+    provider_family_minimum: 2,
+    maximum_reviewers: 4,
+    max_expansion_waves: 1,
+    initial_reviewer_ids: ['claude-opus', 'codex-review'],
+    required_reviewer_ids: [],
+    candidate_reviewers: [
+      {
+        reviewer_id: 'claude-opus',
+        provider: 'claude',
+        adapter_id: 'claude-cli',
+        assignment_roles: ['standard'],
+        last_status: 'success',
+      },
+      {
+        reviewer_id: 'codex-review',
+        provider: 'codex',
+        adapter_id: 'codex-native-generic',
+        assignment_roles: ['traceability'],
+        last_status: 'success',
+      },
+    ],
+    routes: [
+      {
+        reviewer_id: 'claude-opus',
+        provider: 'claude',
+        adapter_id: 'claude-cli',
+        assignment_role: 'standard',
+        rubric_id: 'standard-v1',
+        wave: 1,
+        required: false,
+        selection_reason: 'initial standard route',
+        resolved: { model: null, effort: 'high' },
+        ...context,
+      },
+      {
+        reviewer_id: 'codex-review',
+        provider: 'codex',
+        adapter_id: 'codex-native-generic',
+        assignment_role: 'traceability',
+        rubric_id: 'traceability-v1',
+        wave: 1,
+        required: false,
+        selection_reason: 'initial traceability route',
+        resolved: { model: null, effort: 'high' },
+        ...context,
+      },
+    ],
+  };
+}
+
+function approvingAttempt(reviewerId) {
+  return {
+    reviewer_id: reviewerId,
+    role: reviewerId,
+    output_digest: sha256(`review:${reviewerId}`),
+    included: true,
+    exclusion: null,
+    verdict: 'APPROVE',
+    issues: { critical: 0, warning: 0, info: 0 },
+  };
 }
 
 test('Artifact Gate is singular, structured, and Critical is always pre-implementation', async () => {
@@ -940,4 +1020,185 @@ test('T-READY-7 no authoritative blocker operation keys on a bare local id', asy
     finding_id: 'DOC-1',
     reviewer_id: 'claude-opus',
   });
+});
+
+// Two reviewers, one shared local id, both deferred. Verifying one of them
+// discharges one obligation; the other survives, reviewer-scoped, through the
+// gate and into round synthesis. A carrier that collapses on the bare local id
+// clears both from a single verification — the defect this test exists for.
+test('T-READY-5 verification of one reviewer ref leaves the other pending', async () => {
+  const {
+    createDocumentReadinessReceipt,
+    evaluateDeferredAcceptance,
+    gateImplementationVerdict,
+    verifyReadinessReceipt,
+  } = await import(readinessUrl);
+  const { synthesizeReviewRound } = await import(synthesisUrl);
+  const repo = repoFixture();
+  const claudeReport = writeReport(repo, 'claude-shared-id-review.md', report({
+    findings: [{
+      id: 'DOC-1',
+      severity: 'warning',
+      stage: 'implementation_verification',
+      acceptance_evidence: ['claude: migration dry-run passes'],
+    }],
+  }));
+  const codexReport = writeReport(repo, 'codex-shared-id-review.md', report({
+    findings: [{
+      id: 'DOC-1',
+      severity: 'warning',
+      stage: 'implementation_verification',
+      acceptance_evidence: ['codex: rollback restores the prior schema'],
+    }],
+  }));
+  const created = createDocumentReadinessReceipt({
+    repo,
+    artifacts: [{ path: 'docs/계획 Ω.md', target_kind: 'implementation-plan' }],
+    reports: [
+      { path: claudeReport, reviewer_id: 'claude-opus', provider_family: 'claude' },
+      { path: codexReport, reviewer_id: 'codex-review', provider_family: 'codex' },
+    ],
+    risk: 'low',
+  });
+  const verified = verifyReadinessReceipt({ repo, receiptPath: created.receipt_path });
+  fs.writeFileSync(path.join(repo, 'implementation.js'), 'export const migrated = true;\n');
+  fs.writeFileSync(path.join(repo, 'migration-test.tap'), 'ok 1 - migration rollback roundtrip\n');
+  const implementationArtifacts = [{ path: 'implementation.js' }];
+  const claudeRef = { finding_id: 'DOC-1', reviewer_id: 'claude-opus' };
+  const codexRef = { finding_id: 'DOC-1', reviewer_id: 'codex-review' };
+  const pending = evaluateDeferredAcceptance({
+    receipt: verified.receipt,
+    verifiedItems: [],
+    repo,
+    implementationArtifacts,
+  });
+  const scope = pending.implementation_scope_sha256;
+  const evidenceSha256 = sha256(fs.readFileSync(path.join(repo, 'migration-test.tap')));
+  assert.equal(pending.required_count, 2);
+  assert.equal(pending.complete, false);
+  assert.deepEqual(pending.pending_finding_refs, [claudeRef, codexRef]);
+
+  const verification = (findingRef, criterion) => ({
+    finding_ref: findingRef,
+    implementation_scope_sha256: scope,
+    verification_results: [{
+      criterion,
+      status: 'passed',
+      evidence_path: 'migration-test.tap',
+      evidence_sha256: evidenceSha256,
+    }],
+  });
+  const claudeItem = verification(claudeRef, 'claude: migration dry-run passes');
+  const codexItem = verification(codexRef, 'codex: rollback restores the prior schema');
+  const acceptance = (verifiedItems) => evaluateDeferredAcceptance({
+    receipt: verified.receipt,
+    verifiedItems,
+    repo,
+    implementationArtifacts,
+    implementationScopeSha256: scope,
+  });
+
+  // Verifying either reviewer leaves exactly the other one pending. Both
+  // directions are asserted, so neither a collapse nor a first-wins ordering
+  // can satisfy this by accident.
+  const claudeOnly = acceptance([claudeItem]);
+  assert.equal(claudeOnly.complete, false);
+  assert.equal(claudeOnly.verified_count, 1);
+  assert.deepEqual(claudeOnly.pending_finding_refs, [codexRef]);
+  const codexOnly = acceptance([codexItem]);
+  assert.equal(codexOnly.complete, false);
+  assert.equal(codexOnly.verified_count, 1);
+  assert.deepEqual(codexOnly.pending_finding_refs, [claudeRef]);
+  // The obligations are not interchangeable either: one reviewer's evidence
+  // cannot discharge the other's criterion.
+  assert.throws(
+    () => acceptance([verification(codexRef, 'claude: migration dry-run passes')]),
+    /does not satisfy/,
+  );
+
+  // The surviving obligation stays reviewer-scoped through the gate...
+  const gated = gateImplementationVerdict({
+    status: 'reviewed', verdict: 'APPROVE', phase6_allowed: true,
+  }, claudeOnly);
+  assert.equal(gated.verdict, 'CONCERN');
+  assert.equal(gated.deferred_acceptance_floor, true);
+  assert.deepEqual(gated.pending_deferred_finding_refs, [codexRef]);
+  // ...and into round synthesis, which reads the same structured carrier.
+  const round = synthesizeReviewRound({
+    attempts: [approvingAttempt('claude-opus'), approvingAttempt('codex-review')],
+    consensus: { findings: [] },
+    routingPlan: implementationRoutingPlan(),
+    deferredAcceptance: claudeOnly,
+  });
+  assert.equal(round.status, 'reviewed');
+  assert.equal(round.verdict, 'CONCERN');
+  assert.equal(round.deferred_acceptance_floor, true);
+  assert.deepEqual(round.pending_deferred_finding_refs, [codexRef]);
+
+  // Only both reviewer-scoped verifications complete deferred acceptance.
+  const both = acceptance([claudeItem, codexItem]);
+  assert.equal(both.complete, true);
+  assert.equal(both.verified_count, 2);
+  assert.deepEqual(both.pending_finding_refs, []);
+  assert.deepEqual(both.verified_items.map((item) => item.finding_ref), [claudeRef, codexRef]);
+  const cleared = gateImplementationVerdict({
+    status: 'reviewed', verdict: 'APPROVE', phase6_allowed: true,
+  }, both);
+  assert.equal(cleared.verdict, 'APPROVE');
+  assert.equal(cleared.deferred_acceptance_floor, false);
+  assert.deepEqual(cleared.pending_deferred_finding_refs, []);
+  const clearedRound = synthesizeReviewRound({
+    attempts: [approvingAttempt('claude-opus'), approvingAttempt('codex-review')],
+    consensus: { findings: [] },
+    routingPlan: implementationRoutingPlan(),
+    deferredAcceptance: both,
+  });
+  assert.equal(clearedRound.verdict, 'APPROVE');
+  assert.equal(clearedRound.deferred_acceptance_floor, false);
+
+  // R5 — a reviewer identity that is empty, absent, or not a string is no
+  // identity at all. Admitting such an obligation would make it live and
+  // unattributed, which is exactly the fallback D17 forbids.
+  const obligationReceipt = (reviewerId) => ({
+    deferred_findings: [{
+      finding_ref: { finding_id: 'DOC-1', reviewer_id: reviewerId },
+      severity: 'warning',
+      acceptance_evidence: ['claude: migration dry-run passes'],
+    }],
+  });
+  for (const malformed of ['', null, { a: 1 }, 7]) {
+    assert.throws(
+      () => evaluateDeferredAcceptance({
+        receipt: obligationReceipt(malformed),
+        verifiedItems: [],
+        repo,
+        implementationArtifacts,
+      }),
+      /deferred readiness obligation requires a reviewer-scoped finding_ref/,
+    );
+  }
+  // The same obligation with a real reviewer id is admitted, so each refusal
+  // above is about the reviewer identity and not the surrounding shape.
+  assert.deepEqual(
+    evaluateDeferredAcceptance({
+      receipt: obligationReceipt('claude-opus'),
+      verifiedItems: [],
+      repo,
+      implementationArtifacts,
+    }).pending_finding_refs,
+    [claudeRef],
+  );
+  // The gate holds the same line one layer up: an obligation it cannot attribute
+  // is refused rather than carried into a verdict as an unattributed pending ref.
+  for (const malformed of [
+    { finding_id: 'DOC-1' },
+    { finding_id: 'DOC-1', reviewer_id: '' },
+    { finding_id: 'DOC-1', reviewer_id: null },
+    { finding_id: 'DOC-1', reviewer_id: 'claude-opus', scope: 'legacy_global' },
+  ]) {
+    assert.throws(() => gateImplementationVerdict({
+      status: 'reviewed', verdict: 'APPROVE', phase6_allowed: true,
+    }, { complete: false, pending_finding_refs: [malformed] }),
+    /pending deferred obligation requires a reviewer-scoped finding_ref/);
+  }
 });

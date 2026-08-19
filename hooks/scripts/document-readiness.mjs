@@ -342,11 +342,21 @@ function compareFindingRefs(left, right) {
 
 const FINDING_REF_KEYS = canonicalStringify(['finding_id', 'reviewer_id']);
 
+// The single shape authority for a reviewer-scoped reference. `review-synthesis.mjs`
+// imports it rather than keeping a second copy, so the deferred carrier crossing
+// that boundary is admitted by this definition alone and cannot drift from it —
+// and so shadow and active synthesis cannot end up reading different carriers.
+export function isFindingRef(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    && canonicalStringify(Object.keys(value).sort(utf8Compare)) === FINDING_REF_KEYS
+    // A reference nobody wrote is the unattributed fallback D17 forbids: an empty
+    // or non-string reviewer id names no reviewer, so it names no finding either.
+    && typeof value.reviewer_id === 'string' && value.reviewer_id.length > 0
+    && FINDING_ID.test(value.finding_id || '');
+}
+
 function requireFindingRef(value, label) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-      || canonicalStringify(Object.keys(value).sort(utf8Compare)) !== FINDING_REF_KEYS
-      || typeof value.reviewer_id !== 'string' || value.reviewer_id.length === 0
-      || !FINDING_ID.test(value.finding_id || '')) {
+  if (!isFindingRef(value)) {
     throw new Error(`${label} requires a reviewer-scoped finding_ref`);
   }
   return findingRef(value.reviewer_id, value.finding_id);
@@ -755,18 +765,20 @@ export function gateImplementationVerdict(synthesis, deferredAcceptance) {
   if (!synthesis || typeof synthesis !== 'object' || !deferredAcceptance) {
     throw new TypeError('synthesis and deferred acceptance are required');
   }
-  if (deferredAcceptance.complete || synthesis.verdict !== 'APPROVE') {
-    return {
-      ...synthesis,
-      deferred_acceptance_floor: false,
-      pending_deferred_finding_ids: deferredAcceptance.pending_finding_ids || [],
-    };
-  }
+  // The gate names the obligations it is still holding open, and it names them
+  // the way the arithmetic that produced them did: by reviewer-scoped ref, read
+  // from the structured carrier and never rebuilt from the bare projection.
+  const pendingRefs = (deferredAcceptance.pending_finding_refs || []).map(
+    (ref) => requireFindingRef(ref, 'pending deferred obligation'),
+  );
+  const floored = !deferredAcceptance.complete && synthesis.verdict === 'APPROVE';
   return {
     ...synthesis,
-    verdict: 'CONCERN',
-    deferred_acceptance_floor: true,
-    pending_deferred_finding_ids: deferredAcceptance.pending_finding_ids,
+    ...(floored ? { verdict: 'CONCERN' } : {}),
+    deferred_acceptance_floor: floored,
+    pending_deferred_finding_refs: pendingRefs,
+    // Display projection only, on the same terms as `blocking_finding_ids`.
+    pending_deferred_finding_ids: pendingRefs.map((ref) => ref.finding_id),
   };
 }
 

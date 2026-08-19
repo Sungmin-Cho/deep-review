@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isFindingRef } from './document-readiness.mjs';
 import { rubricIdForRole } from './lib/assignment-rubrics.mjs';
 import { parseExecutionPlanDocument } from './lib/execution-plan.mjs';
 import { REVIEWER_IDS, REVIEWER_PROVIDERS } from './lib/reviewer-ids.mjs';
@@ -495,13 +496,20 @@ export function synthesizeReviewRound({
   const effectiveExpansionWavesUsed = hasMaterializedWave2
     ? Math.max(1, expansionWavesUsed)
     : expansionWavesUsed;
+  // C-DEFERRED-REF (D17) — the deferred carrier crossing this boundary is the
+  // reviewer-scoped ref, in shadow mode and active mode alike. The bare local id
+  // is a display projection this authority never reads back: two reviewers who
+  // each name a finding `DOC-1` are two pending obligations, and a bare-id
+  // carrier delivers one, so verifying either reviewer would lift the floor for
+  // both. `isFindingRef` is imported rather than restated so both modes admit a
+  // carrier by exactly the definition readiness sealed it with.
   if (deferredAcceptance !== null && (
     !deferredAcceptance
     || typeof deferredAcceptance !== 'object'
     || Array.isArray(deferredAcceptance)
     || typeof deferredAcceptance.complete !== 'boolean'
-    || !Array.isArray(deferredAcceptance.pending_finding_ids)
-    || deferredAcceptance.pending_finding_ids.some((id) => typeof id !== 'string' || id.length === 0)
+    || !Array.isArray(deferredAcceptance.pending_finding_refs)
+    || deferredAcceptance.pending_finding_refs.some((ref) => !isFindingRef(ref))
   )) {
     throw new Error('deferredAcceptance is malformed');
   }
@@ -666,7 +674,16 @@ export function synthesizeReviewRound({
     provider_families: providerFamilies,
     ...(shadowMode ? { shadow_mode: true, adaptive_plan_applied: false } : {}),
     ...(deferredAcceptanceFloor
-      ? { pending_deferred_finding_ids: [...deferredAcceptance.pending_finding_ids] }
+      ? {
+        pending_deferred_finding_refs: deferredAcceptance.pending_finding_refs.map((ref) => ({
+          finding_id: ref.finding_id,
+          reviewer_id: ref.reviewer_id,
+        })),
+        // Display projection only: one entry per authoritative ref, same order,
+        // so a local id shared by two reviewers renders twice. Never read back.
+        pending_deferred_finding_ids: deferredAcceptance.pending_finding_refs
+          .map((ref) => ref.finding_id),
+      }
       : {}),
     ...(documentBlocked ? { document_blocked: true } : {}),
     ...(expansionRejected ? { expansion_rejected: expansionRejected } : {}),
