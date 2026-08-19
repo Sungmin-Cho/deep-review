@@ -705,7 +705,7 @@ function grokCapabilities() {
     },
     {
       protocol_version: '2.0', adapter_id: 'grok-cli', provider: 'grok', available: true, roles: ['standard'],
-      model_selection: { supported: true, aliases: ['grok-4.6'], catalog_complete: false, transport: 'flag:--model' },
+      model_selection: { supported: true, aliases: ['grok-4.6', 'grok-4.6', 'grok-4.6', 'grok-4.6'], catalog_complete: true, transport: 'flag:--model' },
       effort_selection: { supported: true, levels: ['low', 'medium', 'high'], transport: 'flag:--reasoning-effort' },
       structured_output: true, read_only_enforcement: 'permission-mode-plan',
     },

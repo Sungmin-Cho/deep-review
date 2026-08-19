@@ -231,6 +231,48 @@ function previousSupportedEffort(requested, supported) {
   return null;
 }
 
+// D11 — the operator authorizes exactly one Grok model. A tier-complete closed
+// catalog is necessary but not sufficient: `providers.grok.model_tiers.balanced`
+// makes the catalog fire while `explicitModel` gates the throw and no
+// replacement differs from the request, landing on the omitted `--model` this
+// rule exists to eliminate. The rule below therefore keys off no source and no
+// fallback flag, and runs before either exists.
+const GROK_AUTHORIZED_MODEL = 'grok-4.6';
+const GROK_DECLARED_EFFORTS = Object.freeze(['low', 'medium', 'high']);
+const GROK_EFFORT_FLOOR = 'low';
+const GROK_EFFORT_CEILING = 'high';
+
+// E2 — the automatic branch, as a total function of the requested effort. It is
+// applied ahead of previousSupportedEffort, so the downward walk can no longer
+// return null on a Grok route. `xhigh` is deliberately unreachable: declaring it
+// would map automatic `max` to `xhigh` and break D6's required mapping.
+function normalizeAutomaticGrokEffort(effort) {
+  if (GROK_DECLARED_EFFORTS.includes(effort)) return effort;
+  return EFFORT_ORDER.indexOf(effort) > EFFORT_ORDER.indexOf(GROK_EFFORT_CEILING)
+    ? GROK_EFFORT_CEILING
+    : GROK_EFFORT_FLOOR;
+}
+
+// Returns the authoritative resolved effort for a Grok route, or null for every
+// other provider — which is what keeps this rule provider-scoped and leaves
+// every other reviewer's routing byte-for-byte unchanged.
+function authorizeGrokSelection(requested, reviewer) {
+  if (reviewer.provider !== 'grok') return null;
+  if (requested.model !== GROK_AUTHORIZED_MODEL) {
+    throw new Error(`ERROR_UNSUPPORTED_MODEL: ${requested.model}`);
+  }
+  // E1 — the split is genuine `auto` versus every other source, not `cli-`
+  // versus the rest: a project- or user-policy effort is an operator request
+  // too, and naming the one exempt source also covers sources added later.
+  if (requested.effort_source !== 'auto') {
+    if (!GROK_DECLARED_EFFORTS.includes(requested.effort)) {
+      throw new Error(`ERROR_UNSUPPORTED_EFFORT: ${requested.effort}`);
+    }
+    return { effort: requested.effort };
+  }
+  return { effort: normalizeAutomaticGrokEffort(requested.effort) };
+}
+
 function validateConstraints(requested, reviewer, policy, capability) {
   const constraints = (policy.project || policy).constraints || policy.constraints || {};
   if (constraints.allowed_providers && !constraints.allowed_providers.includes(reviewer.provider)) throw new Error('ERROR_PROVIDER_DENIED');
@@ -241,6 +283,7 @@ function validateConstraints(requested, reviewer, policy, capability) {
       && (!capability.read_only_enforcement || capability.read_only_enforcement === 'none')) {
     throw new Error('ERROR_READ_ONLY_UNAVAILABLE');
   }
+  return authorizeGrokSelection(requested, reviewer);
 }
 
 export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', policy = {}, overrides = {}, capabilities = [], artifactPhase, documentReviewMode, suiteResolve }) {
@@ -262,9 +305,11 @@ export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', po
     model_source: selected.model_source === 'auto' ? tierResolution.source : selected.model_source,
     effort_source: selected.effort_source,
   };
-  validateConstraints(requested, reviewer, policy, capability);
+  const grokAuthorization = validateConstraints(requested, reviewer, policy, capability);
 
-  const resolved = { model: requested.model, effort: requested.effort };
+  // Non-Grok routes read `requested.effort` exactly as they always have.
+  const resolutionEffort = grokAuthorization ? grokAuthorization.effort : requested.effort;
+  const resolved = { model: requested.model, effort: resolutionEffort };
   const fallback = { allowed: Boolean(overrides.allow_fallback), occurred: false, requested: { model: requested.model, effort: requested.effort }, applied: null, reason: null };
   const modelCapability = capability.model_selection || {};
   const effortCapability = capability.effort_selection || {};
@@ -294,10 +339,10 @@ export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', po
   if (explicitEffort && effortCapability.supported === 'unknown' && ['none', 'unknown', undefined].includes(effortCapability.transport)) {
     throw new Error('ERROR_EFFORT_TRANSPORT_UNAVAILABLE');
   }
-  const effortSupported = effortCapability.supported === true && effortCapability.levels?.includes(requested.effort);
+  const effortSupported = effortCapability.supported === true && effortCapability.levels?.includes(resolutionEffort);
   if (!effortSupported) {
     if (explicitEffort && !fallback.allowed) throw new Error(`ERROR_UNSUPPORTED_EFFORT: ${requested.effort}`);
-    const replacement = previousSupportedEffort(requested.effort, effortCapability.levels || []);
+    const replacement = previousSupportedEffort(resolutionEffort, effortCapability.levels || []);
     if (replacement) {
       resolved.effort = replacement;
       fallback.occurred = true;
@@ -312,6 +357,10 @@ export function routeReviewer({ unit, reviewer, risk = 'low', size = 'small', po
       fallback.reason ||= 'automatic effort omitted because adapter transport is unsupported or unknown';
     }
   }
+  // A capability that under-declares the Grok effort band is a registry defect,
+  // not a licence to omit the flag: `resolved.effort === null` stays unreachable
+  // on a Grok route whatever the adapter says.
+  if (grokAuthorization && resolved.effort === null) resolved.effort = grokAuthorization.effort;
   if (fallback.occurred) fallback.applied = { ...resolved };
 
   const localRoute = {
@@ -523,6 +572,12 @@ export function renderRoutingExplanation(plan) {
   }
   return `${lines.join('\n')}\n`;
 }
+
+// The E2 table must be total, including the `null`, `undefined` and unknown
+// rows today's matrix cannot produce. Those rows are the ones a future profile
+// change would reach first, so they are testable at the unit that owns them
+// rather than only where they happen to be reachable.
+export const __testing = Object.freeze({ normalizeAutomaticGrokEffort });
 
 // Keep imports live and enforce canonical vocabulary ownership at module load.
 if (!MODEL_TIERS.length || !EFFORT_LEVELS.length) throw new Error('routing vocabulary unavailable');
