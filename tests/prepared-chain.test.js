@@ -4,7 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   chmodSync,
+  existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } = require('node:fs');
@@ -33,6 +35,21 @@ function executable(root, name, source) {
   writeFileSync(path, source, { mode: 0o700 });
   chmodSync(path, 0o700);
   return path;
+}
+
+// A launcher that records one line per invocation. The log file existing at all
+// is the observable proof that a child ran; its absence is the zero-child proof.
+function loggingLauncher(root, name, log, marker) {
+  return executable(root, name, [
+    `#!${process.execPath}`,
+    "'use strict';",
+    `require('node:fs').appendFileSync(${JSON.stringify(log)}, ${JSON.stringify(marker)} + '\\n');`,
+    '',
+  ].join('\n'));
+}
+
+function childCount(log) {
+  return existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).length : 0;
 }
 
 function assertMember(member, purpose) {
@@ -221,6 +238,174 @@ test('chain_sha256 is the canonical seal of the complete chain without its hash 
     .update(Buffer.from(__testing.canonicalStringify(body), 'utf8'))
     .digest('hex');
   assert.equal(seal, expected);
+});
+
+test('a launcher replaced between seal and spawn reaches zero child in runProcess', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('the POSIX shebang replacement polarity is not observable on native Windows');
+    return;
+  }
+  const root = workspace('runner-swap-async');
+  const log = join(root, 'children.log');
+  const launcher = loggingLauncher(root, 'grok', log, 'sealed');
+  const { prepareSpawnChain, runProcess } = await runtimePromise;
+  const sealed = prepareSpawnChain(launcher, ['--version'], { cwd: root, env: process.env });
+  assert.equal(sealed.ok, true, sealed.reason);
+
+  // The replacement is already present before the final identity comparison.
+  loggingLauncher(root, 'grok', log, 'replacement');
+  const result = await runProcess(launcher, ['--version'], {
+    cwd: root,
+    env: process.env,
+    expectedPreparedSpawnChain: sealed.prepared_spawn_chain,
+  });
+
+  assert.equal(result.preparedChainMismatch, true, result.stderr.toString('utf8'));
+  assert.notEqual(result.code, 0);
+  assert.equal(childCount(log), 0, 'a replaced launcher must reach zero child');
+});
+
+test('a launcher replaced between seal and spawn reaches zero child in runProcessSync', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('the POSIX shebang replacement polarity is not observable on native Windows');
+    return;
+  }
+  const root = workspace('runner-swap-sync');
+  const log = join(root, 'children.log');
+  const launcher = loggingLauncher(root, 'grok', log, 'sealed');
+  const { prepareSpawnChain, runProcessSync } = await runtimePromise;
+  const sealed = prepareSpawnChain(launcher, ['--version'], { cwd: root, env: process.env });
+  assert.equal(sealed.ok, true, sealed.reason);
+
+  loggingLauncher(root, 'grok', log, 'replacement');
+  const result = runProcessSync(launcher, ['--version'], {
+    cwd: root,
+    env: process.env,
+    expectedPreparedSpawnChain: sealed.prepared_spawn_chain,
+  });
+
+  assert.equal(result.preparedChainMismatch, true, result.stderr.toString('utf8'));
+  assert.notEqual(result.code, 0);
+  assert.equal(childCount(log), 0, 'a replaced launcher must reach zero child');
+});
+
+test('an unchanged sealed chain spawns, and no supplied chain keeps today\'s behaviour', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('the POSIX shebang chain positive is not observable on native Windows');
+    return;
+  }
+  const root = workspace('runner-gate-positive');
+  const log = join(root, 'children.log');
+  const launcher = loggingLauncher(root, 'grok', log, 'ran');
+  const { prepareSpawnChain, runProcess, runProcessSync } = await runtimePromise;
+  const sealed = prepareSpawnChain(launcher, [], { cwd: root, env: process.env });
+  assert.equal(sealed.ok, true, sealed.reason);
+
+  const supervised = await runProcess(launcher, [], {
+    cwd: root,
+    env: process.env,
+    expectedPreparedSpawnChain: sealed.prepared_spawn_chain,
+  });
+  assert.equal(supervised.code, 0, supervised.stderr.toString('utf8'));
+  assert.equal(supervised.preparedChainMismatch, undefined);
+
+  const unsupervised = await runProcess(launcher, [], { cwd: root, env: process.env });
+  assert.equal(unsupervised.code, 0, unsupervised.stderr.toString('utf8'));
+  assert.equal(unsupervised.preparedChainMismatch, undefined);
+
+  const supervisedSync = runProcessSync(launcher, [], {
+    cwd: root,
+    env: process.env,
+    expectedPreparedSpawnChain: sealed.prepared_spawn_chain,
+  });
+  assert.equal(supervisedSync.code, 0, supervisedSync.stderr.toString('utf8'));
+  const unsupervisedSync = runProcessSync(launcher, [], { cwd: root, env: process.env });
+  assert.equal(unsupervisedSync.code, 0, unsupervisedSync.stderr.toString('utf8'));
+  assert.equal(childCount(log), 4);
+});
+
+test('a supplied chain that is not the freshly prepared chain reaches zero child', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('the POSIX shebang chain polarity is not observable on native Windows');
+    return;
+  }
+  const root = workspace('runner-gate-negative');
+  const log = join(root, 'children.log');
+  const launcher = loggingLauncher(root, 'grok', log, 'ran');
+  const other = loggingLauncher(root, 'other', join(root, 'other.log'), 'other');
+  const { prepareSpawnChain, runProcess, runProcessSync } = await runtimePromise;
+  const sealed = prepareSpawnChain(launcher, [], { cwd: root, env: process.env });
+  const foreign = prepareSpawnChain(other, [], { cwd: root, env: process.env });
+  assert.equal(sealed.ok, true, sealed.reason);
+  assert.equal(foreign.ok, true, foreign.reason);
+
+  const rejected = [
+    ['not an object', 'not-even-an-object'],
+    ['null chain', null],
+    ['empty chain', {}],
+    ['another launcher\'s chain', foreign.prepared_spawn_chain],
+    ['forged seal', { ...sealed.prepared_spawn_chain, chain_sha256: 'd'.repeat(64) }],
+    ['doctored launcher digest', {
+      ...sealed.prepared_spawn_chain,
+      launcher: { ...sealed.prepared_spawn_chain.launcher, sha256: 'e'.repeat(64) },
+    }],
+  ];
+  for (const [name, expectedPreparedSpawnChain] of rejected) {
+    const asynchronous = await runProcess(launcher, [], {
+      cwd: root, env: process.env, expectedPreparedSpawnChain,
+    });
+    assert.equal(asynchronous.preparedChainMismatch, true, name);
+    assert.notEqual(asynchronous.code, 0, name);
+    const synchronous = runProcessSync(launcher, [], {
+      cwd: root, env: process.env, expectedPreparedSpawnChain,
+    });
+    assert.equal(synchronous.preparedChainMismatch, true, name);
+    assert.notEqual(synchronous.code, 0, name);
+  }
+  assert.equal(childCount(log), 0, 'no mismatching chain may reach a child');
+  assert.equal(childCount(join(root, 'other.log')), 0);
+});
+
+test('sealing a member rejects a file that changed after it was classified', async (t) => {
+  if (process.platform !== 'darwin' && process.platform !== 'linux') {
+    t.skip('the closed POSIX prepared chain supports macOS and Linux');
+    return;
+  }
+  const root = workspace('seal-binding-identity');
+  const target = executable(root, 'grok', `#!${process.execPath}\n`);
+  const { __testing } = await runtimePromise;
+
+  const observation = __testing.observePreparedMember(target, 'launcher');
+  assert.equal(observation.ok, true, observation.reason);
+  const unchanged = __testing.sealObservedMember(target, 'launcher', observation);
+  assert.equal(unchanged.ok, true, unchanged.reason);
+
+  // The replacement lands between the classifier's open and the seal's open.
+  executable(root, 'grok', `#!${process.execPath}\n# replaced\n`);
+  const replaced = __testing.sealObservedMember(target, 'launcher', observation);
+  assert.equal(replaced.ok, false);
+  assert.match(replaced.reason, /changed_between_classification_and_seal/u);
+});
+
+test('sealing a member rejects bytes that contradict the classification they carry', async (t) => {
+  if (process.platform !== 'darwin' && process.platform !== 'linux') {
+    t.skip('the closed POSIX prepared chain supports macOS and Linux');
+    return;
+  }
+  const root = workspace('seal-binding-bytes');
+  const target = executable(root, 'grok', `#!${process.execPath}\n`);
+  const { __testing } = await runtimePromise;
+  const observation = __testing.observePreparedMember(target, 'launcher');
+  assert.equal(observation.ok, true, observation.reason);
+
+  const nativeType = process.platform === 'darwin' ? 'native-macho' : 'native-elf';
+  const doctored = {
+    ...observation,
+    classification: { ...observation.classification, type: nativeType },
+  };
+  const sealed = __testing.sealObservedMember(target, 'launcher', doctored);
+  assert.equal(sealed.ok, false);
+  assert.match(sealed.reason, /bytes_contradict_classification/u);
 });
 
 test('native-Windows prepared chain seals launcher, selected shim, and interpreter', {

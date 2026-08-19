@@ -151,6 +151,26 @@ test('v2 policy schema recognizes adaptive reviewer routing and convergence limi
   assert.equal(merged.routing.reviewer_strategy, 'static');
 });
 
+// The rejection polarity alone stays green under a cap of four, so the ceiling
+// needs its own positive: five reviewers is exactly REVIEWER_IDS.length.
+test('the reviewer ceiling admits every canonical reviewer and rejects one more', async () => {
+  const { parseReviewPolicy } = await import(policyUrl);
+  const { REVIEWER_IDS } = await import(
+    pathToFileURL(path.join(root, 'hooks/scripts/lib/reviewer-ids.mjs')).href
+  );
+  assert.equal(REVIEWER_IDS.length, 5);
+
+  for (let ceiling = 1; ceiling <= REVIEWER_IDS.length; ceiling += 1) {
+    const parsed = parseReviewPolicy(`schema_version: 2\nrouting:\n  maximum_reviewers: ${ceiling}\n`);
+    assert.equal(parsed.policy.routing.maximum_reviewers, ceiling, `maximum_reviewers: ${ceiling}`);
+    assert.deepEqual(parsed.warnings, [], `maximum_reviewers: ${ceiling}`);
+  }
+  assert.throws(
+    () => parseReviewPolicy(`schema_version: 2\nrouting:\n  maximum_reviewers: ${REVIEWER_IDS.length + 1}\n`),
+    new RegExp(`1 through ${REVIEWER_IDS.length}`),
+  );
+});
+
 test('adaptive policy enums, booleans, and convergence limits fail closed on malformed values', async () => {
   const { parseReviewPolicy } = await import(policyUrl);
   for (const [body, message] of [

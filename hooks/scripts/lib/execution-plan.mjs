@@ -7,6 +7,30 @@ import {
   isDocumentReviewMode,
 } from './assignment-rubrics.mjs';
 import { isReviewerId, REVIEWER_IDS, REVIEWER_PROVIDERS } from './reviewer-ids.mjs';
+import { validateGrokCompatibilityCarrier } from './grok-compatibility-carrier.mjs';
+
+const GROK_EVIDENCE_FIELD = 'grok_compatibility_evidence';
+
+// A protocol-3 Grok route is admissible only while carrying the sealed D18
+// compatibility evidence. Absent, malformed, or seal-mismatched evidence is an
+// incompatible Grok CLI, and no other reviewer may carry that evidence at all.
+function grokCompatibilityEvidence(route, reviewerId, label) {
+  const present = Object.hasOwn(route, GROK_EVIDENCE_FIELD);
+  if (REVIEWER_PROVIDERS[reviewerId] !== 'grok') {
+    if (present) {
+      throw new Error(`${label} ${reviewerId} must not carry Grok compatibility evidence`);
+    }
+    return null;
+  }
+  if (!present || route[GROK_EVIDENCE_FIELD] === null) {
+    throw new Error(`${label} ${reviewerId} requires sealed Grok compatibility evidence`);
+  }
+  try {
+    return validateGrokCompatibilityCarrier(route[GROK_EVIDENCE_FIELD]);
+  } catch (error) {
+    throw new Error(`${label} ${reviewerId} carries invalid Grok compatibility evidence: ${error.message}`);
+  }
+}
 
 function requiredReviewerId(reviewerId) {
   if (!isReviewerId(reviewerId)) throw new Error(`routing plan reviewer-id is not canonical: ${reviewerId}`);
@@ -196,6 +220,7 @@ export function parseExecutionPlanDocument(document, reviewerId) {
     }
   }
   const seen = new Set();
+  const validatedEvidence = new Map();
   const initialReviewerIds = new Set(document.initial_reviewer_ids || []);
   const requiredReviewerIds = new Set(document.required_reviewer_ids || []);
   for (const candidate of routes) {
@@ -252,6 +277,12 @@ export function parseExecutionPlanDocument(document, reviewerId) {
         throw new Error(`routing plan route document context mismatch for ${candidate.reviewer_id}`);
       }
     }
+    // Outside the protocol-3 branch: declaring an older protocol must not be a
+    // way to route Grok without sealed evidence.
+    validatedEvidence.set(
+      candidate.reviewer_id,
+      grokCompatibilityEvidence(candidate, candidate.reviewer_id, 'routing plan route'),
+    );
   }
   if ([...initialReviewerIds].some((reviewerId) => !seen.has(reviewerId))) {
     throw new Error('routing plan initial reviewer set contains a reviewer without a route');
@@ -282,6 +313,7 @@ export function parseExecutionPlanDocument(document, reviewerId) {
     rubricId,
     wave: document.protocol_version === '3.0' ? route.wave : 1,
     required: document.protocol_version === '3.0' ? route.required : false,
+    grokCompatibilityEvidence: validatedEvidence.get(reviewerId) ?? null,
     artifactPhase: planContext ? planContext.artifactPhase : null,
     risk: planContext ? planContext.risk : null,
     documentReviewMode: planContext ? planContext.documentReviewMode : null,
@@ -331,6 +363,7 @@ export function parseExecutionRoute(route, reviewerId) {
     throw new Error(`execution route resolved model/effort is invalid for ${route.reviewer_id}`);
   }
   const documentContext = normalizeInlineDocumentContext(route);
+  const evidence = grokCompatibilityEvidence(route, route.reviewer_id, 'execution route');
   const requested = route.requested || route;
   const resolved = route.resolved;
   const source = requested.source || route.source || 'auto';
@@ -350,6 +383,7 @@ export function parseExecutionRoute(route, reviewerId) {
     rubricId: route.rubric_id,
     wave: route.wave,
     required: route.required,
+    grokCompatibilityEvidence: evidence,
     artifactPhase: documentContext.artifactPhase,
     risk: documentContext.risk,
     documentReviewMode: documentContext.documentReviewMode,

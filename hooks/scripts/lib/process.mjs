@@ -36,6 +36,8 @@ const WINDOWS_TASKKILL_FALLBACK_DIAGNOSTIC =
   'Windows taskkill failed; sent direct SIGKILL fallback\n';
 const WINDOWS_BATCH_UNSAFE_ARGUMENT_DIAGNOSTIC =
   'Windows batch arguments containing quotes or line breaks require a sibling PowerShell shim\n';
+const PREPARED_CHAIN_MISMATCH_DIAGNOSTIC =
+  'prepared spawn chain identity mismatch; no child was invoked\n';
 const POSIX_EXECUTABLE_PREFIX_BYTES = 256;
 const POSIX_EXECUTABLE_METADATA_BYTES = 8192;
 const POSIX_EXECUTABLE_MAX_READS = 3;
@@ -112,6 +114,7 @@ class BoundedFileReader {
     try {
       const stat = fstatSync(this.fd, { bigint: true });
       if (!stat.isFile()) throw new ClassificationError('not_regular_file');
+      this.stat = stat;
       this.sizeBigInt = stat.size;
       this.size = bigintToSafeNumber(stat.size, 'file_too_large');
       this.reads = 0;
@@ -156,7 +159,7 @@ class BoundedFileReader {
 
 class BufferReader {
   constructor(bytes) {
-    this.bytes = Buffer.from(bytes);
+    this.bytes = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
     this.size = this.bytes.length;
     this.sizeBigInt = BigInt(this.size);
     this.prefix = this.bytes.subarray(0, POSIX_EXECUTABLE_PREFIX_BYTES);
@@ -357,7 +360,10 @@ function parseThinMacho(reader, sliceOffset, sliceSize, context, expectedArch = 
     if (cursor + 8 > commandsEnd) throw new ClassificationError('invalid_macho_load_command_table');
     const commandType = image.readUInt32LE(cursor);
     const commandSize = image.readUInt32LE(cursor + 4);
-    if (commandSize < 8 || commandSize % 4 !== 0 || cursor + commandSize > commandsEnd) {
+    // 64-bit load commands are eight-byte aligned; only 32-bit images are four.
+    const commandAlignment = is64 ? 8 : 4;
+    if (commandSize < 8 || commandSize % commandAlignment !== 0
+        || cursor + commandSize > commandsEnd) {
       throw new ClassificationError('invalid_macho_load_command');
     }
     const command = image.subarray(cursor, cursor + commandSize);
@@ -700,12 +706,30 @@ export function discoverArm64PointerAuthVersion() {
   return discoverArm64PointerAuthVersionFromPaths([process.execPath, '/usr/bin/env']);
 }
 
-function classifyNativeFile(filePath, position) {
-  const purpose = purposeForMemberPosition(position);
-  validatePurpose(purpose);
+function readerIdentity(reader, realPath) {
+  const stat = reader.stat;
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mode: stat.mode,
+    uid: stat.uid,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+    realPath,
+  };
+}
+
+// The classifier's own view of the file it read: the result, the inode it read
+// it from, and the pointer-auth authority it judged it against. `sealPreparedMember`
+// binds all three to the bytes it seals, so no replacement can slip into the
+// window between the classifier's open and the seal's open.
+function observeNativeFile(filePath, position) {
   if (IS_WINDOWS) return reject('unsupported_posix_platform');
   let reader;
   try {
+    const purpose = purposeForMemberPosition(position);
+    validatePurpose(purpose);
     if (typeof filePath !== 'string' || !isAbsolute(filePath)) {
       throw new ClassificationError('executable_path_must_be_absolute');
     }
@@ -714,11 +738,20 @@ function classifyNativeFile(filePath, position) {
     if (!stat.isFile()) throw new ClassificationError('not_regular_file');
     accessSync(normalizedPath, constants.X_OK);
     reader = new BoundedFileReader(normalizedPath);
+    const identity = readerIdentity(reader, normalize(realpathSync(normalizedPath)));
+    const observed = (result, acceptedPointerAuthVersions = []) => ({
+      ok: true,
+      classification: result,
+      identity,
+      acceptedPointerAuthVersions,
+    });
     const prefix = reader.prefix;
     if (prefix.length === 0) throw new ClassificationError('empty_file');
     if (prefix[0] === 0x23 && prefix[1] === 0x21) {
       if (purpose !== 'effective-executable') throw new ClassificationError('nested_shebang');
-      return { ok: true, type: 'shebang', classification_purpose: purpose, native_loader_path: null };
+      return observed({
+        ok: true, type: 'shebang', classification_purpose: purpose, native_loader_path: null,
+      });
     }
     if (process.platform === 'linux') {
       if (startsWith(prefix, MACHO_THIN_32_MAGIC) || startsWith(prefix, MACHO_THIN_64_MAGIC)
@@ -732,7 +765,7 @@ function classifyNativeFile(filePath, position) {
           throw new ClassificationError('invalid_elf_native_loader');
         }
       }
-      return result;
+      return observed(result);
     }
     if (process.platform === 'darwin') {
       if (startsWith(prefix, ELF_MAGIC)) throw new ClassificationError('foreign_platform_elf');
@@ -750,13 +783,46 @@ function classifyNativeFile(filePath, position) {
           throw new ClassificationError('invalid_macho_native_loader');
         }
       }
-      return result;
+      return observed(result, discovery.accepted_versions);
     }
     throw new ClassificationError('unsupported_posix_platform');
   } catch (error) {
     return reject(error instanceof ClassificationError ? error.reason : 'unreadable_file');
   } finally {
     reader?.close();
+  }
+}
+
+function classifyNativeFile(filePath, position) {
+  const observation = observeNativeFile(filePath, position);
+  return observation.ok ? observation.classification : observation;
+}
+
+// The same judgement, re-run over the exact bytes the seal read under its own
+// retained descriptor. Anything the classifier never saw fails here.
+function classifySealedBytes(bytes, purpose, acceptedPointerAuthVersions) {
+  try {
+    validatePurpose(purpose);
+    if (bytes.length === 0) throw new ClassificationError('empty_file');
+    if (bytes[0] === 0x23 && bytes[1] === 0x21) {
+      if (purpose !== 'effective-executable') throw new ClassificationError('nested_shebang');
+      return { ok: true, type: 'shebang', classification_purpose: purpose, native_loader_path: null };
+    }
+    const reader = new BufferReader(bytes);
+    if (process.platform === 'linux') {
+      return parseElf(reader, { arch: process.arch, purpose });
+    }
+    if (process.platform === 'darwin') {
+      return parseMacho(reader, {
+        arch: process.arch,
+        purpose,
+        acceptedPointerAuthVersions: new Set(acceptedPointerAuthVersions),
+        discovery: false,
+      });
+    }
+    throw new ClassificationError('unsupported_posix_platform');
+  } catch (error) {
+    return reject(error instanceof ClassificationError ? error.reason : 'unreadable_file');
   }
 }
 
@@ -867,7 +933,7 @@ function windowsIdentity(stat, realPath) {
   };
 }
 
-function sealPreparedMember(filePath, position, classification = null, posix = true) {
+function sealPreparedMember(filePath, position, observation = null, posix = true) {
   const selectedPath = normalize(resolve(filePath));
   const realPath = normalize(realpathSync(selectedPath));
   const fd = openSync(realPath, 'r');
@@ -888,8 +954,30 @@ function sealPreparedMember(filePath, position, classification = null, posix = t
       throw new ClassificationError('prepared_member_changed_during_seal');
     }
     const purpose = posix ? purposeForMemberPosition(position) : null;
-    if (posix && classification?.classification_purpose !== purpose) {
-      throw new ClassificationError('member_inconsistent_classification_purpose');
+    if (posix) {
+      const classification = observation?.classification;
+      if (classification?.classification_purpose !== purpose) {
+        throw new ClassificationError('member_inconsistent_classification_purpose');
+      }
+      // One inode, observed by the classifier and by this seal.
+      const seen = observation.identity;
+      if (!seen || seen.realPath !== realPath
+          || seen.dev !== before.dev || seen.ino !== before.ino || seen.size !== before.size
+          || seen.mode !== before.mode || seen.uid !== before.uid
+          || seen.mtimeNs !== before.mtimeNs || seen.ctimeNs !== before.ctimeNs) {
+        throw new ClassificationError('prepared_member_changed_between_classification_and_seal');
+      }
+      // And the bytes being sealed must still earn the classification they carry.
+      const resealed = classifySealedBytes(
+        bytes,
+        purpose,
+        observation.acceptedPointerAuthVersions,
+      );
+      if (!resealed.ok || resealed.type !== classification.type
+          || resealed.classification_purpose !== purpose
+          || (resealed.native_loader_path ?? null) !== (classification.native_loader_path ?? null)) {
+        throw new ClassificationError('prepared_member_bytes_contradict_classification');
+      }
     }
     return {
       path: selectedPath,
@@ -910,9 +998,9 @@ function sealNativeLoader(loaderPaths, posix) {
   ))];
   if (paths.length === 0) return null;
   if (paths.length !== 1) throw new ClassificationError('conflicting_native_loader');
-  const classification = classifyNativeFile(paths[0], 'native-loader');
-  if (!classification.ok) throw new ClassificationError(classification.reason);
-  return sealPreparedMember(paths[0], 'native-loader', classification, posix);
+  const observation = observeNativeFile(paths[0], 'native-loader');
+  if (!observation.ok) throw new ClassificationError(observation.reason);
+  return sealPreparedMember(paths[0], 'native-loader', observation, posix);
 }
 
 export function prepareSpawnChain(command, args = [], options = {}) {
@@ -961,12 +1049,13 @@ export function prepareSpawnChain(command, args = [], options = {}) {
       };
     }
 
-    const launcherClassification = classifyNativeFile(launcherPath, 'launcher');
-    if (!launcherClassification.ok) throw new ClassificationError(launcherClassification.reason);
+    const launcherObservation = observeNativeFile(launcherPath, 'launcher');
+    if (!launcherObservation.ok) throw new ClassificationError(launcherObservation.reason);
+    const launcherClassification = launcherObservation.classification;
     const launcher = sealPreparedMember(
       launcherPath,
       'launcher',
-      launcherClassification,
+      launcherObservation,
       true,
     );
     let shebang = null;
@@ -974,31 +1063,35 @@ export function prepareSpawnChain(command, args = [], options = {}) {
     if (launcherClassification.type === 'shebang') {
       const parsed = parsePosixShebang(launcherPath, env, cwd);
       if (!parsed.ok) throw new ClassificationError(parsed.reason);
-      const interpreterClassification = classifyNativeFile(
+      const interpreterObservation = observeNativeFile(
         parsed.interpreter_path,
         'shebang-interpreter',
       );
-      if (!interpreterClassification.ok || interpreterClassification.type === 'shebang') {
-        throw new ClassificationError(interpreterClassification.reason || 'nested_shebang');
+      if (!interpreterObservation.ok) throw new ClassificationError(interpreterObservation.reason);
+      const interpreterClassification = interpreterObservation.classification;
+      if (interpreterClassification.type === 'shebang') {
+        throw new ClassificationError('nested_shebang');
       }
       loaderPaths.push(interpreterClassification.native_loader_path);
       const interpreter = sealPreparedMember(
         parsed.interpreter_path,
         'shebang-interpreter',
-        interpreterClassification,
+        interpreterObservation,
         true,
       );
       let pathTarget = null;
       if (parsed.path_target_path) {
-        const targetClassification = classifyNativeFile(parsed.path_target_path, 'path-target');
-        if (!targetClassification.ok || targetClassification.type === 'shebang') {
-          throw new ClassificationError(targetClassification.reason || 'nested_shebang');
+        const targetObservation = observeNativeFile(parsed.path_target_path, 'path-target');
+        if (!targetObservation.ok) throw new ClassificationError(targetObservation.reason);
+        const targetClassification = targetObservation.classification;
+        if (targetClassification.type === 'shebang') {
+          throw new ClassificationError('nested_shebang');
         }
         loaderPaths.push(targetClassification.native_loader_path);
         pathTarget = sealPreparedMember(
           parsed.path_target_path,
           'path-target',
-          targetClassification,
+          targetObservation,
           true,
         );
       }
@@ -1031,6 +1124,104 @@ export function prepareSpawnChain(command, args = [], options = {}) {
   } catch (error) {
     return reject(error instanceof ClassificationError ? error.reason : 'prepared_chain_failed');
   }
+}
+
+const PREPARED_CHAIN_MEMBER_FIELDS = Object.freeze([
+  'path',
+  'real_path',
+  'sha256',
+  'size',
+  'classification_purpose',
+]);
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function safeCanonicalStringify(value) {
+  try {
+    return canonicalStringify(value);
+  } catch {
+    return null;
+  }
+}
+
+function comparePreparedMember(expected, actual, slot) {
+  if (expected === null && actual === null) return null;
+  if (expected === null || actual === null) return `prepared_chain_${slot}_presence_mismatch`;
+  if (!isPlainObject(expected)) return `prepared_chain_${slot}_shape_mismatch`;
+  for (const field of PREPARED_CHAIN_MEMBER_FIELDS) {
+    if (expected[field] !== actual[field]) return `prepared_chain_${slot}_${field}_mismatch`;
+  }
+  const expectedIdentity = safeCanonicalStringify(expected.platform_identity);
+  if (expectedIdentity === null
+      || expectedIdentity !== safeCanonicalStringify(actual.platform_identity)) {
+    return `prepared_chain_${slot}_platform_identity_mismatch`;
+  }
+  return null;
+}
+
+function comparePreparedShebang(expected, actual) {
+  if (expected === null && actual === null) return null;
+  if (expected === null || actual === null) return 'prepared_chain_shebang_presence_mismatch';
+  if (!isPlainObject(expected)) return 'prepared_chain_shebang_shape_mismatch';
+  if (expected.shebang_form !== actual.shebang_form) return 'prepared_chain_shebang_form_mismatch';
+  return comparePreparedMember(expected.interpreter, actual.interpreter, 'shebang_interpreter')
+    || comparePreparedMember(expected.path_target, actual.path_target, 'shebang_path_target');
+}
+
+// Returns null when the freshly prepared chain is the sealed one, or the named
+// first difference. Every member slot is compared for presence, normalized
+// paths, platform identity, size and digest, and the whole body is compared
+// canonically so no unnamed field can differ unnoticed.
+function comparePreparedSpawnChains(expected, actual) {
+  if (!isPlainObject(expected)) return 'prepared_chain_is_not_an_object';
+  for (const field of ['schema_version', 'prepared_kind', 'posix_executable_type']) {
+    if (expected[field] !== actual[field]) return `prepared_chain_${field}_mismatch`;
+  }
+  const memberMismatch = comparePreparedMember(expected.launcher, actual.launcher, 'launcher')
+    || comparePreparedMember(expected.shim, actual.shim, 'shim')
+    || comparePreparedMember(expected.interpreter, actual.interpreter, 'interpreter')
+    || comparePreparedMember(expected.native_loader, actual.native_loader, 'native_loader')
+    || comparePreparedShebang(expected.shebang, actual.shebang);
+  if (memberMismatch) return memberMismatch;
+  if (expected.chain_sha256 !== actual.chain_sha256) return 'prepared_chain_sha256_mismatch';
+  const { chain_sha256: expectedSeal, ...expectedBody } = expected;
+  const { chain_sha256: actualSeal, ...actualBody } = actual;
+  const canonicalExpected = safeCanonicalStringify(expectedBody);
+  if (canonicalExpected === null || canonicalExpected !== safeCanonicalStringify(actualBody)) {
+    return 'prepared_chain_body_mismatch';
+  }
+  if (sha256(Buffer.from(canonicalExpected, 'utf8')) !== expectedSeal) {
+    return 'prepared_chain_seal_mismatch';
+  }
+  return null;
+}
+
+// The load-bearing pre-spawn control. Callers that supply no expected chain get
+// exactly today's behaviour; a caller that supplies one has the chain reprepared
+// in this same call, so a replacement already present here reaches no child.
+function preparedChainMismatchReason(command, args, options, env) {
+  if (options.expectedPreparedSpawnChain === undefined) return null;
+  const reprepared = prepareSpawnChain(command, args, { cwd: options.cwd, env });
+  if (!reprepared.ok) return reprepared.reason;
+  return comparePreparedSpawnChains(
+    options.expectedPreparedSpawnChain,
+    reprepared.prepared_spawn_chain,
+  );
+}
+
+function closedPreparedChainResult(reason, captureFields) {
+  return {
+    code: 2,
+    signal: undefined,
+    timedOut: false,
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.from(`${PREPARED_CHAIN_MISMATCH_DIAGNOSTIC}${reason}\n`),
+    preparedChainMismatch: true,
+    preparedChainMismatchReason: reason,
+    ...captureFields,
+  };
 }
 
 export const __testing = Object.freeze({
@@ -1066,6 +1257,19 @@ export const __testing = Object.freeze({
     }
   },
   canonicalStringify,
+  observePreparedMember(filePath, position) {
+    return observeNativeFile(filePath, position);
+  },
+  sealObservedMember(filePath, position, observation) {
+    try {
+      return { ok: true, member: sealPreparedMember(filePath, position, observation, true) };
+    } catch (error) {
+      return reject(
+        error instanceof ClassificationError ? error.reason : 'prepared_member_seal_failed',
+      );
+    }
+  },
+  comparePreparedSpawnChains,
 });
 
 function environmentValue(env, name) {
@@ -1361,6 +1565,12 @@ export function runProcess(command, args = [], options = {}) {
       stderrBytes = appendCaptured(stderr, chunk, stderrBytes);
     };
 
+    const mismatch = preparedChainMismatchReason(command, args, options, env);
+    if (mismatch) {
+      resolveResult(closedPreparedChainResult(mismatch, { captureOverflow: false }));
+      return;
+    }
+
     const child = spawn(prepared.command, prepared.args, {
       cwd: options.cwd,
       env: prepared.env || env,
@@ -1481,6 +1691,9 @@ export function runProcessSync(command, args = [], options = {}) {
       stderr: Buffer.from(prepared.rejectedReason),
     };
   }
+  const mismatch = preparedChainMismatchReason(command, args, options, env);
+  if (mismatch) return closedPreparedChainResult(mismatch);
+
   const result = spawnSync(prepared.command, prepared.args, {
     cwd: options.cwd,
     env: prepared.env || env,

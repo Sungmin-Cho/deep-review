@@ -58,7 +58,7 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function canonicalStringify(value) {
+export function canonicalStringify(value) {
   if (value === null || typeof value === 'boolean' || typeof value === 'string') {
     return JSON.stringify(value);
   }
@@ -102,9 +102,11 @@ function requireSize(value, name) {
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${name} must be a non-negative safe integer`);
 }
 
+// Native Windows seals emit drive paths with backslash separators, which is what
+// the producer's `normalize(resolve(...))` actually returns on that platform.
 function requireAbsolutePath(value, name) {
   requireString(value, name);
-  if (!/^(?:\/|[A-Za-z]:\/)/u.test(value)) throw new TypeError(`${name} must be absolute`);
+  if (!/^(?:\/|[A-Za-z]:[\\/])/u.test(value)) throw new TypeError(`${name} must be absolute`);
 }
 
 function validatePlatformIdentity(identity, name) {
@@ -162,6 +164,49 @@ function validateShebang(shebang) {
   );
 }
 
+function chainMembers(chain) {
+  const members = [chain.launcher, chain.shim, chain.interpreter, chain.native_loader];
+  if (chain.shebang) members.push(chain.shebang.interpreter, chain.shebang.path_target);
+  return members.filter((member) => member !== null && member !== undefined);
+}
+
+// Field-by-field shape admits chains the producer cannot emit: a POSIX chain
+// whose members carry Windows identities, a Windows chain claiming a POSIX
+// executable type, a purpose that belongs to the other platform. One producer
+// seals one chain on one platform, so the identity kind decides the rest.
+function validateChainIdentityMatrix(chain) {
+  const members = chainMembers(chain);
+  const identityKinds = new Set(members.map((member) => member.platform_identity.kind));
+  if (identityKinds.size !== 1) {
+    throw new TypeError('prepared_spawn_chain members mix platform_identity kinds');
+  }
+  const [identityKind] = identityKinds;
+  if (identityKind === 'win32-file-id-v1') {
+    for (const member of members) {
+      if (member.platform_identity.fields.final_path !== member.real_path) {
+        throw new TypeError('prepared_spawn_chain member platform_identity.fields.final_path is not its sealed real_path');
+      }
+      if (member.classification_purpose !== null) {
+        throw new TypeError('a Windows-identity prepared_spawn_chain member classification_purpose must be null');
+      }
+    }
+    if (chain.posix_executable_type !== null || chain.shebang !== null
+        || chain.native_loader !== null) {
+      throw new TypeError('a Windows-identity prepared_spawn_chain must not carry posix_executable_type, shebang, or native_loader');
+    }
+    return;
+  }
+  if (chain.prepared_kind !== 'direct') {
+    throw new TypeError('a POSIX-identity prepared_spawn_chain prepared_kind must be direct');
+  }
+  if (!['shebang', 'native-elf', 'native-macho'].includes(chain.posix_executable_type)) {
+    throw new TypeError('a POSIX-identity prepared_spawn_chain must carry a POSIX posix_executable_type');
+  }
+  if (chain.launcher.classification_purpose !== 'effective-executable') {
+    throw new TypeError('a POSIX-identity prepared_spawn_chain launcher classification_purpose must be effective-executable');
+  }
+}
+
 function validatePreparedSpawnChain(chain) {
   requireExactKeys(chain, CHAIN_KEYS, 'prepared_spawn_chain');
   if (chain.schema_version !== '1.0') throw new TypeError('prepared_spawn_chain.schema_version is invalid');
@@ -197,10 +242,33 @@ function validatePreparedSpawnChain(chain) {
     validateMember(chain.interpreter, 'prepared_spawn_chain.interpreter', [null]);
   }
 
+  validateChainIdentityMatrix(chain);
+
   requireDigest(chain.chain_sha256, 'prepared_spawn_chain.chain_sha256');
   const { chain_sha256: chainSha256, ...body } = chain;
   if (sha256(Buffer.from(canonicalStringify(body), 'utf8')) !== chainSha256) {
     throw new TypeError('prepared_spawn_chain.chain_sha256 does not match sealed members');
+  }
+}
+
+// The top-level executable fields and the sealed launcher are two views of one
+// file. A recomputed seal over disagreeing views is still a contradiction, so
+// they are bound before either hash is accepted.
+function bindCarrierToSealedLauncher(carrier) {
+  const launcher = carrier.prepared_spawn_chain.launcher;
+  for (const [carrierField, memberField] of [
+    ['launcher_path', 'path'],
+    ['real_path', 'real_path'],
+    ['executable_sha256', 'sha256'],
+    ['executable_size', 'size'],
+  ]) {
+    if (carrier[carrierField] !== launcher[memberField]) {
+      throw new TypeError(`carrier.${carrierField} is not the sealed prepared_spawn_chain.launcher.${memberField}`);
+    }
+  }
+  if (canonicalStringify(carrier.platform_identity)
+      !== canonicalStringify(launcher.platform_identity)) {
+    throw new TypeError('carrier.platform_identity is not the sealed prepared_spawn_chain.launcher.platform_identity');
   }
 }
 
@@ -268,6 +336,7 @@ export function validateGrokCompatibilityCarrier(carrier) {
       || carrier.required_help_flags.some((flag, index) => flag !== GROK_REQUIRED_HELP_FLAGS[index])) {
     throw new TypeError('carrier.required_help_flags is incomplete or malformed');
   }
+  bindCarrierToSealedLauncher(carrier);
   requireDigest(carrier.evidence_sha256, 'carrier.evidence_sha256');
   const { evidence_sha256: evidenceSha256, ...body } = carrier;
   if (sha256(Buffer.from(canonicalStringify(body), 'utf8')) !== evidenceSha256) {

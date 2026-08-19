@@ -52,6 +52,25 @@ function isolatedEnvironment(bin, overrides = {}) {
   };
 }
 
+function grokProbeSource(log, marker = '') {
+  return [
+    "'use strict';",
+    "const fs = require('node:fs');",
+    `const log = ${JSON.stringify(log)};`,
+    "fs.appendFileSync(log, `${JSON.stringify(process.argv.slice(2))}\\n`);",
+    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
+    `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${GROK_HELP}\n`)});`,
+    "else process.exitCode = 2;",
+    marker ? `// ${marker}` : '',
+    '',
+  ].join('\n');
+}
+
+function writeGrokLauncher(launcher, log, marker = '') {
+  writeFileSync(launcher, `#!/usr/bin/env node\n${grokProbeSource(log, marker)}`);
+  chmodSync(launcher, 0o755);
+}
+
 function makeGrokFixture(name) {
   const fixtureRoot = temporaryDirectory(`${name}-`);
   const bin = join(fixtureRoot, 'bin');
@@ -60,30 +79,10 @@ function makeGrokFixture(name) {
   const launcher = join(bin, process.platform === 'win32' ? 'grok.cmd' : 'grok');
   if (process.platform === 'win32') {
     const program = join(fixtureRoot, 'grok-probe.js');
-    writeFileSync(program, [
-      "'use strict';",
-      "const fs = require('node:fs');",
-      `const log = ${JSON.stringify(log)};`,
-      "fs.appendFileSync(log, `${JSON.stringify(process.argv.slice(2))}\\n`);",
-      "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
-      `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${GROK_HELP}\n`)});`,
-      "else process.exitCode = 2;",
-      '',
-    ].join('\n'));
+    writeFileSync(program, grokProbeSource(log));
     writeFileSync(launcher, `@echo off\r\n"${process.execPath}" "${program}" %*\r\n`);
   } else {
-    writeFileSync(launcher, [
-      '#!/usr/bin/env node',
-      "'use strict';",
-      "const fs = require('node:fs');",
-      `const log = ${JSON.stringify(log)};`,
-      "fs.appendFileSync(log, `${JSON.stringify(process.argv.slice(2))}\\n`);",
-      "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
-      `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${GROK_HELP}\n`)});`,
-      "else process.exitCode = 2;",
-      '',
-    ].join('\n'));
-    chmodSync(launcher, 0o755);
+    writeGrokLauncher(launcher, log);
   }
   return { fixtureRoot, bin, launcher, log };
 }
@@ -149,12 +148,18 @@ test('candidate/carrier flag pairing fails closed before any Grok probe', () => 
   assert.equal(existsSync(fixture.log), false);
 });
 
-test('detector-to-classifier production pipeline spawns exactly two compatibility children', async () => {
+// The sole producer is `detect-environment.mjs`. The classifier consumer side of
+// the private carrier channel does not exist yet: `classify-artifacts.mjs` owns
+// no `--grok-carrier-fd` grammar and is not in this slice's change surface. This
+// test therefore proves only the producer half plus the standing "consumers must
+// not re-probe" invariant, and asserts the missing consumer so that the slice
+// that lands it has to come back and widen this test.
+test('the sole carrier producer frames one carrier on fd 3, keeps stdout carrier-free, and no consumer re-probes', async () => {
   const {
     parseGrokCompatibilityCarrierFrame,
     validateGrokCompatibilityCarrier,
   } = await import(carrierUrl);
-  const fixture = makeGrokFixture('grok-production-pipeline');
+  const fixture = makeGrokFixture('grok-carrier-producer');
   const repo = temporaryDirectory('grok-classifier-repo-');
   initializeGitRepository(repo);
   const env = isolatedEnvironment(fixture.bin);
@@ -172,15 +177,29 @@ test('detector-to-classifier production pipeline spawns exactly two compatibilit
     stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
   });
   assert.equal(detection.status, 0, detection.stderr.toString('utf8'));
-  const environment = JSON.parse(detection.stdout.toString('utf8'));
-  const carrier = validateGrokCompatibilityCarrier(
-    parseGrokCompatibilityCarrierFrame(detection.output[3]),
+  const frame = detection.output[3];
+  // The evidence object is a designed part of the detector's JSON; the *frame*
+  // is the private channel and must appear on fd 3 only. Checked before the
+  // JSON is parsed, so it is this assertion that fails on a leak.
+  assert.equal(frame.readUInt32BE(0), frame.length - 4);
+  assert.equal(detection.stdout.includes(frame), false, 'stdout must carry no framed carrier');
+  assert.equal(
+    detection.stdout.includes(frame.subarray(0, 4)),
+    false,
+    'stdout must carry no frame length prefix',
   );
+
+  const environment = JSON.parse(detection.stdout.toString('utf8'));
+  const carrier = validateGrokCompatibilityCarrier(parseGrokCompatibilityCarrierFrame(frame));
   assert.equal(environment.grok_cli, true);
   assert.equal(environment.grok_compatibility_verified, true);
   assert.deepEqual(environment.grok_compatibility_evidence, carrier);
-  assert.equal(detection.stdout.subarray(0, 4).equals(detection.output[3].subarray(0, 4)), false);
+  assert.equal(carrier.prepared_spawn_chain.chain_sha256.length, 64);
 
+  const producerCalls = readFileSync(fixture.log, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(producerCalls, [['--version'], ['--help']]);
+
+  // The classifier is a consumer: it must add no compatibility child of its own.
   const classification = spawnSync(process.execPath, [
     classifierPath,
     '--repo', repo,
@@ -189,10 +208,22 @@ test('detector-to-classifier production pipeline spawns exactly two compatibilit
     '--format', 'json',
   ], { env, encoding: 'utf8', shell: false });
   assert.equal(classification.status, 0, classification.stderr);
+  assert.deepEqual(
+    readFileSync(fixture.log, 'utf8').trim().split('\n').map(JSON.parse),
+    producerCalls,
+    'a consumer must spawn no additional compatibility child',
+  );
 
-  const calls = readFileSync(fixture.log, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(calls, [['--version'], ['--help']]);
-  assert.equal(carrier.prepared_spawn_chain.chain_sha256.length, 64);
+  // Recorded gap: the consumer half of the private channel is unimplemented.
+  const unconsumed = spawnSync(process.execPath, [
+    classifierPath,
+    '--repo', repo,
+    '--change-state', 'untracked-only',
+    '--review-base', 'HEAD',
+    '--grok-carrier-fd', '3',
+  ], { env, encoding: 'utf8', shell: false, stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+  assert.notEqual(unconsumed.status, 0);
+  assert.match(unconsumed.stderr, /unknown argument: --grok-carrier-fd/u);
 });
 
 test('both compatibility probes use one identity-stable prepared-chain seal', async () => {
@@ -227,6 +258,66 @@ test('both compatibility probes use one identity-stable prepared-chain seal', as
     result.grok_compatibility_evidence.prepared_spawn_chain.chain_sha256,
     calls[0].options.expectedPreparedSpawnChain.chain_sha256,
   );
+});
+
+// The seal-identity test above can only observe that the option was handed to the
+// runner. This one observes the enforcement itself, through the production runner.
+test('a launcher replaced after the detector sealed it reaches zero Grok child', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('the POSIX shebang replacement polarity is not observable on native Windows');
+    return;
+  }
+  const { detectEnvironment } = await import(detectorUrl);
+  const { runProcess } = await import(pathToFileURL(
+    join(root, 'hooks', 'scripts', 'lib', 'process.mjs'),
+  ).href);
+  const fixture = makeGrokFixture('grok-replaced-launcher');
+  let replaced = false;
+  const detected = await detectEnvironment({
+    cwd: fixture.fixtureRoot,
+    env: isolatedEnvironment(fixture.bin),
+    grokCandidate: true,
+    processRunner: async (command, args, options) => {
+      if (!replaced) {
+        // Present before the runner's final identity comparison, after the seal.
+        writeGrokLauncher(fixture.launcher, fixture.log, 'replacement');
+        replaced = true;
+      }
+      return runProcess(command, args, options);
+    },
+  });
+
+  assert.equal(replaced, true);
+  assert.equal(existsSync(fixture.log), false, 'a replaced launcher must reach zero child');
+  assert.equal(detected.grok_cli, false);
+  assert.equal(detected.grok_compatibility_verified, false);
+  assert.equal(detected.grok_compatibility_evidence, null);
+  assert.equal(detected.grok_unavailable_reason, 'incompatible_grok_cli');
+});
+
+test('a prepared-chain mismatch result is incompatible even when the child reported success', async () => {
+  const { detectEnvironment } = await import(detectorUrl);
+  const fixture = makeGrokFixture('grok-mismatch-mapping');
+  const detected = await detectEnvironment({
+    cwd: fixture.fixtureRoot,
+    env: isolatedEnvironment(fixture.bin),
+    grokCandidate: true,
+    processRunner: async (_command, args) => ({
+      code: 0,
+      timedOut: false,
+      captureOverflow: false,
+      preparedChainMismatch: true,
+      preparedChainMismatchReason: 'prepared_chain_launcher_sha256_mismatch',
+      stdout: Buffer.from(args[0] === '--version'
+        ? 'grok 1.0.4 (d846eb93d94d) [stable]\n'
+        : `${GROK_HELP}\n`),
+      stderr: Buffer.alloc(0),
+    }),
+  });
+
+  assert.equal(detected.grok_cli, false);
+  assert.equal(detected.grok_compatibility_verified, false);
+  assert.equal(detected.grok_unavailable_reason, 'incompatible_grok_cli');
 });
 
 test('grok-cli advertises prevention only for a detected, compatibility-verified executable', async () => {

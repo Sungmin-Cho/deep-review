@@ -51,6 +51,7 @@ function incompleteFatHeader() {
 
 const CPU_TYPE_X86_64 = 0x01000007;
 const CPU_TYPE_ARM64 = 0x0100000c;
+const CPU_TYPE_I386 = 7;
 
 function elf64Fixture({
   type = 2,
@@ -191,6 +192,61 @@ function thinMacho({
   return bytes;
 }
 
+// A load command the classifier has no branch for: it is skipped, so the only
+// thing that can reject it is the load-command table's size/alignment rule.
+function unknownLoadCommand(commandSize) {
+  const command = Buffer.alloc(commandSize);
+  command.writeUInt32LE(0x7fff0001, 0);
+  command.writeUInt32LE(commandSize, 4);
+  return command;
+}
+
+function segment32({
+  vmaddr = 0x1000,
+  vmsize = 1024,
+  fileoff = 0,
+  filesize = 1024,
+  maxprot = 5,
+  initprot = 5,
+} = {}) {
+  const command = Buffer.alloc(56);
+  command.writeUInt32LE(0x1, 0);
+  command.writeUInt32LE(56, 4);
+  Buffer.from('__TEXT').copy(command, 8);
+  command.writeUInt32LE(vmaddr, 24);
+  command.writeUInt32LE(vmsize, 28);
+  command.writeUInt32LE(fileoff, 32);
+  command.writeUInt32LE(filesize, 36);
+  command.writeInt32LE(maxprot, 40);
+  command.writeInt32LE(initprot, 44);
+  command.writeUInt32LE(0, 48);
+  return command;
+}
+
+function thinMacho32({
+  subtype = 3,
+  filetype = 2,
+  commands = null,
+  fileSize = 1024,
+} = {}) {
+  const loadCommands = commands || [segment32(), lcMain(), dylinkerCommand()];
+  const sizeofcmds = loadCommands.reduce((total, command) => total + command.length, 0);
+  assert.ok(28 + sizeofcmds <= fileSize, 'fixture commands must fit');
+  const bytes = Buffer.alloc(fileSize);
+  bytes.writeUInt32LE(0xfeedface, 0);
+  bytes.writeInt32LE(CPU_TYPE_I386, 4);
+  bytes.writeUInt32LE(subtype >>> 0, 8);
+  bytes.writeUInt32LE(filetype, 12);
+  bytes.writeUInt32LE(loadCommands.length, 16);
+  bytes.writeUInt32LE(sizeofcmds, 20);
+  let cursor = 28;
+  for (const command of loadCommands) {
+    command.copy(bytes, cursor);
+    cursor += command.length;
+  }
+  return bytes;
+}
+
 function fatMacho(thin, { align = 12, offset = 4096, subtype = 0 } = {}) {
   const bytes = Buffer.alloc(offset + thin.length);
   bytes.writeUInt32BE(0xcafebabe, 0);
@@ -207,9 +263,10 @@ function fatMacho(thin, { align = 12, offset = 4096, subtype = 0 } = {}) {
 function repeatedUnixThread(pcs, { includeOtherFlavor = false } = {}) {
   const triples = [];
   if (includeOtherFlavor) {
-    const other = Buffer.alloc(12);
+    // Two state words, so the whole LC_UNIXTHREAD stays eight-byte aligned.
+    const other = Buffer.alloc(16);
     other.writeUInt32LE(99, 0);
-    other.writeUInt32LE(1, 4);
+    other.writeUInt32LE(2, 4);
     triples.push(other);
   }
   for (const pc of pcs) {
@@ -555,7 +612,9 @@ test('synthetic Mach-O requires exact LC_LOAD_DYLINKER bytes and exclusive entry
   const embeddedNul = dylinkerCommand();
   embeddedNul[16] = 0;
   const malformedSize = dylinkerCommand();
-  malformedSize.writeUInt32LE(28, 4);
+  // Eight-byte aligned but not the exact 32 LC_LOAD_DYLINKER requires, so the
+  // dylinker rule rejects it rather than the load-command alignment rule.
+  malformedSize.writeUInt32LE(24, 4);
   const badNameOffset = dylinkerCommand();
   badNameOffset.writeUInt32LE(16, 8);
   const missingFinalNul = dylinkerCommand();
@@ -620,7 +679,7 @@ test('arm64 LC_UNIXTHREAD uses state byte 256 and never cpsr/pad byte 264', asyn
     ],
   });
   const invalidCount = thinMacho({
-    commands: [segment64(), unixThread({ count: 67 }), dylinkerCommand(), buildVersion()],
+    commands: [segment64(), unixThread({ count: 66 }), dylinkerCommand(), buildVersion()],
   });
 
   assert.equal(__testing.classifyMachoBytes(valid, { arch: 'arm64' }).ok, true);
@@ -704,7 +763,7 @@ test('Mach-O validates filesize, version command sizes, and repeated thread trip
     commands: [segment64({ vmsize: 512n, filesize: 1024n }), lcMain(), dylinkerCommand(), buildVersion()],
   });
   const badVersionMin = thinMacho({
-    commands: [segment64(), lcMain(), dylinkerCommand(), versionMinMacos(12)],
+    commands: [segment64(), lcMain(), dylinkerCommand(), versionMinMacos(24)],
   });
   const badBuildVersion = thinMacho({
     commands: [segment64(), lcMain(), dylinkerCommand(), buildVersion({ ntools: 1, commandSize: 24 })],
@@ -847,6 +906,36 @@ test('native-loader profile rejects missing platform, no executable segment, for
     assert.equal(result.ok, false, name);
     assert.match(result.reason, reason, name);
   }
+});
+
+test('64-bit load commands require eight-byte alignment and 32-bit ones require four', async () => {
+  const { __testing } = await runtimePromise;
+  const misaligned64 = thinMacho({
+    commands: [segment64(), lcMain(), dylinkerCommand(), buildVersion(), unknownLoadCommand(12)],
+  });
+  const aligned64 = thinMacho({
+    commands: [segment64(), lcMain(), dylinkerCommand(), buildVersion(), unknownLoadCommand(16)],
+  });
+  const misaligned32 = thinMacho32({
+    commands: [segment32(), lcMain(), dylinkerCommand(), unknownLoadCommand(10)],
+  });
+  const aligned32 = thinMacho32({
+    commands: [segment32(), lcMain(), dylinkerCommand(), unknownLoadCommand(12)],
+  });
+
+  for (const [name, bytes, options] of [
+    ['thin arm64 twelve-byte load command', misaligned64, { arch: 'arm64' }],
+    ['fat-wrapped arm64 twelve-byte load command', fatMacho(misaligned64), { arch: 'arm64' }],
+    ['thin i386 ten-byte load command', misaligned32, { arch: 'ia32' }],
+  ]) {
+    const result = __testing.classifyMachoBytes(bytes, options);
+    assert.equal(result.ok, false, name);
+    assert.match(result.reason, /invalid_macho_load_command$/u, name);
+  }
+  const wide = __testing.classifyMachoBytes(aligned64, { arch: 'arm64' });
+  assert.equal(wide.ok, true, wide.reason);
+  const narrow = __testing.classifyMachoBytes(aligned32, { arch: 'ia32' });
+  assert.equal(narrow.ok, true, narrow.reason);
 });
 
 test('fat compatible-slice grading is ARM64E then V8 then ALL with lowest-index ties', async () => {

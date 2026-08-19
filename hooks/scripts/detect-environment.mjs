@@ -14,6 +14,7 @@ import {
   PROBE_MAX_CAPTURE_BYTES_TOTAL,
 } from './lib/probe-limits.mjs';
 import {
+  canonicalStringify,
   encodeGrokCompatibilityCarrierFrame,
   parseGrokCompatibilityStdout,
   validateGrokCompatibilityCarrier,
@@ -47,21 +48,6 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function canonicalStringify(value) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
-    return JSON.stringify(value);
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new TypeError('canonical JSON numbers must be finite');
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(',')}]`;
-  if (!value || typeof value !== 'object') throw new TypeError('unsupported canonical JSON value');
-  return `{${Object.keys(value).sort().map(
-    (key) => `${JSON.stringify(key)}:${canonicalStringify(value[key])}`,
-  ).join(',')}}`;
-}
-
 function incompatibleGrok() {
   return {
     grok_cli: false,
@@ -78,6 +64,10 @@ function successfulProbe(result) {
     && result.code === 0
     && result.timedOut !== true
     && result.captureOverflow !== true;
+}
+
+function mismatchedPreparedChain(result) {
+  return Boolean(result) && result.preparedChainMismatch === true;
 }
 
 function probeStdout(result) {
@@ -130,10 +120,15 @@ async function detectGrokCompatibility(cwd, env, processRunner) {
     } catch {
       helpResult = null;
     }
+    // The runner reprepares the sealed chain in the same call as its spawn. A
+    // replacement present before that comparison reaches no child, and its
+    // closed result maps here — and only here — to an incompatible Grok CLI.
+    if (mismatchedPreparedChain(versionResult) || mismatchedPreparedChain(helpResult)) {
+      return incompatibleGrok();
+    }
     if (!successfulProbe(versionResult) || !successfulProbe(helpResult)) {
       return incompatibleGrok();
     }
-    if (versionChain.chain_sha256 !== helpChain.chain_sha256) return incompatibleGrok();
 
     const versionOutput = probeStdout(versionResult);
     const helpOutput = probeStdout(helpResult);

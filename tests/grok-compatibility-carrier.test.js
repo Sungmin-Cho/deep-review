@@ -106,6 +106,74 @@ function validCarrier() {
   };
 }
 
+function windowsIdentity(finalPath) {
+  return {
+    kind: 'win32-file-id-v1',
+    fields: {
+      final_path: finalPath,
+      volume: '3',
+      file_id: '4',
+    },
+  };
+}
+
+function windowsMember(path) {
+  return {
+    path,
+    real_path: path,
+    platform_identity: windowsIdentity(path),
+    sha256: 'a'.repeat(64),
+    size: 12,
+    classification_purpose: null,
+  };
+}
+
+function validWindowsCarrier() {
+  const chain = {
+    schema_version: '1.0',
+    prepared_kind: 'powershell-shim',
+    launcher: windowsMember('C:\\tools\\grok.cmd'),
+    shim: windowsMember('C:\\tools\\grok.ps1'),
+    interpreter: windowsMember('C:\\Windows\\System32\\pwsh.exe'),
+    shebang: null,
+    posix_executable_type: null,
+    native_loader: null,
+  };
+  return seal({
+    schema_version: '1.0',
+    launcher_path: 'C:\\tools\\grok.cmd',
+    real_path: 'C:\\tools\\grok.cmd',
+    platform_identity: windowsIdentity('C:\\tools\\grok.cmd'),
+    executable_sha256: 'a'.repeat(64),
+    executable_size: 12,
+    prepared_spawn_chain: chain,
+    version: '1.0.4',
+    version_build: 'd846eb93d94d',
+    version_banner_sha256: 'b'.repeat(64),
+    help_sha256: 'c'.repeat(64),
+    help_size: 1024,
+    required_help_flags: [...REQUIRED_FLAGS],
+  });
+}
+
+// Recomputes both seals so every polarity below is a *sealed* contradiction:
+// the hashes agree with the bytes and only the cross-field semantics conflict.
+function seal(carrier) {
+  const { chain_sha256: _chainSeal, ...chainBody } = carrier.prepared_spawn_chain;
+  const body = {
+    ...carrier,
+    prepared_spawn_chain: {
+      ...chainBody,
+      chain_sha256: sha256(Buffer.from(canonicalStringify(chainBody), 'utf8')),
+    },
+  };
+  delete body.evidence_sha256;
+  return {
+    ...body,
+    evidence_sha256: sha256(Buffer.from(canonicalStringify(body), 'utf8')),
+  };
+}
+
 function frame(payload) {
   const body = Buffer.from(payload, 'utf8');
   const header = Buffer.alloc(4);
@@ -178,6 +246,68 @@ test('a validly framed carrier still fails closed unless its compatibility evide
       pattern,
       name,
     );
+  }
+});
+
+test('a resealed carrier is still rejected when its fields contradict the sealed chain', async () => {
+  const { validateGrokCompatibilityCarrier } = await runtimePromise;
+  const posix = validCarrier();
+  const windows = validWindowsCarrier();
+
+  assert.deepEqual(validateGrokCompatibilityCarrier(seal(structuredClone(posix))), posix);
+  assert.deepEqual(validateGrokCompatibilityCarrier(windows), windows);
+
+  const contradictions = [
+    ['launcher_path is not the sealed launcher path', (carrier) => {
+      carrier.launcher_path = '/opt/other-grok';
+    }, /launcher_path/u],
+    ['real_path is not the sealed launcher real path', (carrier) => {
+      carrier.real_path = '/opt/other-grok';
+    }, /real_path/u],
+    ['executable_sha256 is not the sealed launcher digest', (carrier) => {
+      carrier.executable_sha256 = 'f'.repeat(64);
+    }, /executable_sha256/u],
+    ['executable_size is not the sealed launcher size', (carrier) => {
+      carrier.executable_size = 13;
+    }, /executable_size/u],
+    ['platform_identity is not the sealed launcher identity', (carrier) => {
+      carrier.platform_identity.fields.ino = '99';
+    }, /platform_identity/u],
+    ['a POSIX chain carrying a null launcher purpose', (carrier) => {
+      carrier.prepared_spawn_chain.launcher.classification_purpose = null;
+    }, /classification_purpose/u],
+    ['a POSIX chain with no POSIX executable type', (carrier) => {
+      carrier.prepared_spawn_chain.posix_executable_type = null;
+      carrier.prepared_spawn_chain.native_loader = null;
+    }, /posix_executable_type/u],
+    ['mixed platform identity kinds across members', (carrier) => {
+      carrier.prepared_spawn_chain.native_loader.platform_identity = windowsIdentity('C:\\ld.dll');
+    }, /platform_identity/u],
+  ];
+  for (const [name, contradict, pattern] of contradictions) {
+    const carrier = structuredClone(posix);
+    contradict(carrier);
+    assert.throws(() => validateGrokCompatibilityCarrier(seal(carrier)), pattern, name);
+  }
+
+  const windowsContradictions = [
+    ['a Windows chain carrying a POSIX executable purpose', (carrier) => {
+      carrier.prepared_spawn_chain.launcher.classification_purpose = 'effective-executable';
+    }, /classification_purpose/u],
+    ['a Windows identity whose final path is not the sealed real path', (carrier) => {
+      carrier.prepared_spawn_chain.launcher.platform_identity.fields.final_path = 'C:\\other.cmd';
+    }, /final_path/u],
+    ['a Windows-identity chain claiming a POSIX executable type', (carrier) => {
+      carrier.prepared_spawn_chain.prepared_kind = 'direct';
+      carrier.prepared_spawn_chain.shim = null;
+      carrier.prepared_spawn_chain.interpreter = null;
+      carrier.prepared_spawn_chain.posix_executable_type = 'native-elf';
+    }, /posix_executable_type/u],
+  ];
+  for (const [name, contradict, pattern] of windowsContradictions) {
+    const carrier = structuredClone(windows);
+    contradict(carrier);
+    assert.throws(() => validateGrokCompatibilityCarrier(seal(carrier)), pattern, name);
   }
 });
 
