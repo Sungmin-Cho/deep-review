@@ -6,14 +6,29 @@ import { patchTopLevelConfig, readTopLevelConfig } from './config.mjs';
 import { stableDigest, walkRepositoryFiles } from './fingerprint.mjs';
 import { createSensitiveFileScanner } from './sensitive-files.mjs';
 
-const ACK_FINGERPRINT = 'agy_sensitive_acked_fingerprint';
-const ACK_AT = 'agy_sensitive_acked_at';
+const KNOWN_PROVIDERS = new Set(['agy', 'grok']);
 
 function requiredString(value, name) {
   if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
     throw new TypeError(`${name} must be a non-empty NUL-free string`);
   }
   return value;
+}
+
+function requiredProvider(value) {
+  requiredString(value, 'provider');
+  if (!KNOWN_PROVIDERS.has(value)) {
+    throw new TypeError(`provider must be one of: ${[...KNOWN_PROVIDERS].join(', ')}`);
+  }
+  return value;
+}
+
+function ackFingerprintKey(provider) {
+  return `${provider}_sensitive_acked_fingerprint`;
+}
+
+function ackAtKey(provider) {
+  return `${provider}_sensitive_acked_at`;
 }
 
 function patternData(pluginRoot) {
@@ -25,15 +40,16 @@ function patternData(pluginRoot) {
   return data;
 }
 
-function privacyFingerprint(patternBytes, hitEntries) {
+function privacyFingerprint(provider, patternBytes, hitEntries) {
   const patternVersion = createHash('sha256').update(patternBytes).digest('hex');
   return stableDigest(
     hitEntries.map((entry) => ({ path: entry.relative, value: Buffer.from('sensitive') })),
-    `deep-review-agy-privacy-v1\0${patternVersion}`,
+    `deep-review-${provider}-privacy-v1\0${patternVersion}`,
   );
 }
 
-export function scanAgyPrivacy({ repo, pluginRoot }) {
+export function scanExternalPrivacy({ provider, repo, pluginRoot }) {
+  requiredProvider(provider);
   const root = realpathSync(resolve(requiredString(repo, 'repo')));
   const rootPlugin = resolve(requiredString(pluginRoot, 'pluginRoot'));
   const patterns = patternData(rootPlugin);
@@ -46,12 +62,19 @@ export function scanAgyPrivacy({ repo, pluginRoot }) {
   const hitEntries = entries.filter((entry) => matched.has(entry.display));
   return {
     hits: hitEntries.map((entry) => entry.display),
-    fingerprint: privacyFingerprint(patterns, hitEntries),
+    fingerprint: privacyFingerprint(provider, patterns, hitEntries),
     patternVersion: createHash('sha256').update(patterns).digest('hex'),
   };
 }
 
-export async function prepareAgyPrivacy(options = {}) {
+export function scanAgyPrivacy(options = {}) {
+  return scanExternalPrivacy({ ...options, provider: 'agy' });
+}
+
+export async function prepareExternalPrivacy(options = {}) {
+  const provider = requiredProvider(options.provider);
+  const ackFingerprint = ackFingerprintKey(provider);
+  const ackAt = ackAtKey(provider);
   const repo = resolve(requiredString(options.repo, 'repo'));
   const pluginRoot = resolve(requiredString(options.pluginRoot, 'pluginRoot'));
   const configPath = resolve(requiredString(options.configPath, 'configPath'));
@@ -62,7 +85,7 @@ export async function prepareAgyPrivacy(options = {}) {
 
   let scan;
   try {
-    scan = scanAgyPrivacy({ repo, pluginRoot });
+    scan = scanExternalPrivacy({ provider, repo, pluginRoot });
   } catch (error) {
     return {
       hits: [],
@@ -81,15 +104,15 @@ export async function prepareAgyPrivacy(options = {}) {
       error: `${error.code || error.name || 'ERROR'}: ${error.message}`,
     };
   }
-  const stored = typeof config[ACK_FINGERPRINT] === 'string' ? config[ACK_FINGERPRINT] : '';
+  const stored = typeof config[ackFingerprint] === 'string' ? config[ackFingerprint] : '';
   const now = typeof options.now === 'function' ? options.now() : new Date().toISOString();
 
   if (scan.hits.length === 0) {
-    if (stored !== scan.fingerprint || typeof config[ACK_AT] !== 'string' || config[ACK_AT] === '') {
+    if (stored !== scan.fingerprint || typeof config[ackAt] !== 'string' || config[ackAt] === '') {
       try {
         patchTopLevelConfig(configPath, {
-          [ACK_FINGERPRINT]: scan.fingerprint,
-          [ACK_AT]: now,
+          [ackFingerprint]: scan.fingerprint,
+          [ackAt]: now,
         });
       } catch (error) {
         return {
@@ -107,8 +130,8 @@ export async function prepareAgyPrivacy(options = {}) {
   if (approval === 'approve') {
     try {
       patchTopLevelConfig(configPath, {
-        [ACK_FINGERPRINT]: scan.fingerprint,
-        [ACK_AT]: now,
+        [ackFingerprint]: scan.fingerprint,
+        [ackAt]: now,
       });
     } catch (error) {
       return {
@@ -121,4 +144,8 @@ export async function prepareAgyPrivacy(options = {}) {
   }
   if (approval === 'decline') return { ...scan, outcome: 'declined', error: null };
   return { ...scan, outcome: 'needs_approval', error: null };
+}
+
+export function prepareAgyPrivacy(options = {}) {
+  return prepareExternalPrivacy({ ...options, provider: 'agy' });
 }
