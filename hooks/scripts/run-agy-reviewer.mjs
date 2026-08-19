@@ -6,20 +6,20 @@ import { pathToFileURL } from 'node:url';
 
 import { prepareAgyPrivacy } from './lib/agy-privacy.mjs';
 import { captureFingerprint } from './lib/fingerprint.mjs';
+import { resolveExecutable, runProcess } from './lib/process.mjs';
+// D8: the host command-budget estimators are shared, not agy's own. agy
+// re-exports them unchanged and keeps its truncating policy below.
 import {
-  estimateWindowsBatchCommandUnits,
-  resolveExecutable,
-  runProcess,
-} from './lib/process.mjs';
+  POSIX_PROMPT_ARGUMENT_LIMIT,
+  WINDOWS_COMMAND_HEADROOM,
+  estimateWindowsCommandUnits,
+  windowsCommandLimit,
+} from './lib/prompt-transport.mjs';
 import { atomicWriteFile, resolvePluginRoot } from './lib/runtime-context.mjs';
 import { loadExecutionPlan, parseExecutionRouteJson } from './lib/execution-plan.mjs';
 import { parseReviewerReport } from './review-synthesis.mjs';
 
 const BODY_LIMIT = 198_000;
-const WINDOWS_CREATE_PROCESS_LIMIT = 32_767;
-const WINDOWS_CMD_LIMIT = 8_191;
-const WINDOWS_COMMAND_HEADROOM = 512;
-const POSIX_PROMPT_ARGUMENT_LIMIT = 120 * 1024;
 const READONLY_PREAMBLE = `READ-ONLY REVIEW MODE - ABSOLUTE, NON-NEGOTIABLE CONSTRAINT
 ============================================================
 You are a code reviewer running in STRICT READ-ONLY mode. You MUST NOT modify
@@ -178,21 +178,7 @@ function processArguments({ promptContent, projectRoot, timeoutSeconds, model })
   return args;
 }
 
-export function windowsCommandLimit(binary) {
-  return /\.(?:cmd|bat)$/iu.test(String(binary))
-    ? WINDOWS_CMD_LIMIT
-    : WINDOWS_CREATE_PROCESS_LIMIT;
-}
-
-export function estimateWindowsCommandUnits(binary, args) {
-  if (/\.(?:cmd|bat)$/iu.test(String(binary))) {
-    return estimateWindowsBatchCommandUnits(String(binary), args.map(String));
-  }
-  return (String(binary).length * 2) + 2 + args.reduce(
-    (total, argument) => total + (String(argument).length * 2) + 3,
-    0,
-  );
-}
+export { estimateWindowsCommandUnits, windowsCommandLimit };
 
 function preparePromptTransport({ binary, body, projectRoot, timeoutSeconds, model, platform }) {
   const ordinaryLimit = Math.min(body.length, BODY_LIMIT);
