@@ -569,7 +569,8 @@ test('public-route review grammar accepts an optional --prior-rounds-file=PATH t
     cwd,
   });
   assert.equal(combinedWithCodexOnly.ok, true);
-  assert.deepEqual(combinedWithCodexOnly.argv, ['--codex', '--no-opus', '--no-agy', '--prior-rounds-file=/tmp/x.md']);
+  // D5: --codex-only expands to include --no-grok.
+  assert.deepEqual(combinedWithCodexOnly.argv, ['--codex', '--no-opus', '--no-agy', '--no-grok', '--prior-rounds-file=/tmp/x.md']);
 
   // A value-less token is still rejected — the flag requires `=PATH`.
   const valueless = parsePublicRoute({ entry: 'review', argv: ['--prior-rounds-file'], host: 'claude', cwd });
@@ -646,7 +647,8 @@ test('public-route review grammar accepts the artifact-aware --dry-run and --exp
     entry: 'review', argv: ['--codex-only', '--dry-run', '--explain-routing'], host: 'claude', cwd,
   });
   assert.equal(combined.ok, true);
-  assert.deepEqual(combined.argv, ['--codex', '--no-opus', '--no-agy', '--dry-run', '--explain-routing']);
+  // D5: --codex-only expands to include --no-grok.
+  assert.deepEqual(combined.argv, ['--codex', '--no-opus', '--no-agy', '--no-grok', '--dry-run', '--explain-routing']);
   assert.equal(combined.dryRun, true);
   assert.equal(combined.explainRouting, true);
 

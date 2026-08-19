@@ -177,7 +177,9 @@ test('loop grammar preserves literal codex-only provenance after expansion', asy
   });
   assert.equal(result.ok, true);
   assert.equal(result.overrides.codex_only, true);
-  assert.deepEqual(result.overrides.disabled_providers, ['agy', 'claude']);
+  // D5: --codex-only expands to include --no-grok, so grok joins the closed
+  // disabled_providers expectation.
+  assert.deepEqual(result.overrides.disabled_providers, ['agy', 'claude', 'grok']);
 });
 
 test('reviewer strategy and readiness receipt are validated without ambiguous duplicates', async () => {
@@ -395,7 +397,9 @@ test('G2: literal --codex-only preserves canonical provenance and yields both Co
   });
   assert.equal(route.ok, true);
   assert.equal(route.overrides.codex_only, true);
-  assert.deepEqual(route.overrides.disabled_providers, ['agy', 'claude']);
+  // D5: --codex-only expands to include --no-grok, so grok joins the closed
+  // disabled_providers expectation.
+  assert.deepEqual(route.overrides.disabled_providers, ['agy', 'claude', 'grok']);
 
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'deep-review-g2-codex-only-'));
   fs.writeFileSync(path.join(repo, 'notes.md'), 'plain review notes');
