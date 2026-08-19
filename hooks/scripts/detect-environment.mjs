@@ -2,19 +2,27 @@ import {
   existsSync,
   readdirSync,
   statSync,
+  writeSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { detectRuntimeHost, resolvePluginRoot } from './lib/runtime-context.mjs';
-import { resolveExecutable, runProcess } from './lib/process.mjs';
+import { prepareSpawnChain, resolveExecutable, runProcess } from './lib/process.mjs';
 import {
   PROBE_MAX_CAPTURE_BYTES_PER_STREAM,
   PROBE_MAX_CAPTURE_BYTES_TOTAL,
 } from './lib/probe-limits.mjs';
+import {
+  encodeGrokCompatibilityCarrierFrame,
+  parseGrokCompatibilityStdout,
+  validateGrokCompatibilityCarrier,
+} from './lib/grok-compatibility-carrier.mjs';
 import { git, parsePorcelainV1Z } from './lib/git.mjs';
 
 const AGY_VERSION_TIMEOUT_MS = 3000;
 const AGY_VERSION_MAX_CHARS = 256;
+const GROK_COMPATIBILITY_TIMEOUT_MS = 3000;
 const EMPTY_GIT_FIELDS = Object.freeze({
   staged: 0,
   unstaged: 0,
@@ -33,6 +41,134 @@ function boundedProbeVersion(buffer) {
   return firstLine(buffer)
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu, '')
     .slice(0, AGY_VERSION_MAX_CHARS);
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function canonicalStringify(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('canonical JSON numbers must be finite');
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(',')}]`;
+  if (!value || typeof value !== 'object') throw new TypeError('unsupported canonical JSON value');
+  return `{${Object.keys(value).sort().map(
+    (key) => `${JSON.stringify(key)}:${canonicalStringify(value[key])}`,
+  ).join(',')}}`;
+}
+
+function incompatibleGrok() {
+  return {
+    grok_cli: false,
+    grok_cli_path: '',
+    grok_version: '',
+    grok_compatibility_verified: false,
+    grok_compatibility_evidence: null,
+    grok_unavailable_reason: 'incompatible_grok_cli',
+  };
+}
+
+function successfulProbe(result) {
+  return result
+    && result.code === 0
+    && result.timedOut !== true
+    && result.captureOverflow !== true;
+}
+
+function probeStdout(result) {
+  const bytes = Buffer.isBuffer(result.stdout)
+    ? Buffer.from(result.stdout)
+    : Buffer.from(result.stdout || '');
+  return {
+    bytes,
+    text: new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+  };
+}
+
+async function detectGrokCompatibility(cwd, env, processRunner) {
+  const grokPath = resolveExecutable('grok', env) || '';
+  if (!grokPath) return incompatibleGrok();
+
+  try {
+    const versionPreparation = prepareSpawnChain(grokPath, ['--version'], { cwd, env });
+    const helpPreparation = prepareSpawnChain(grokPath, ['--help'], { cwd, env });
+    if (!versionPreparation.ok || !helpPreparation.ok) return incompatibleGrok();
+    const versionChain = versionPreparation.prepared_spawn_chain;
+    const helpChain = helpPreparation.prepared_spawn_chain;
+    if (versionChain.chain_sha256 !== helpChain.chain_sha256) return incompatibleGrok();
+
+    const optionsFor = (preparedSpawnChain) => ({
+      cwd,
+      env,
+      timeoutMs: GROK_COMPATIBILITY_TIMEOUT_MS,
+      maxCaptureBytesPerStream: PROBE_MAX_CAPTURE_BYTES_PER_STREAM,
+      maxCaptureBytesTotal: PROBE_MAX_CAPTURE_BYTES_TOTAL,
+      expectedPreparedSpawnChain: preparedSpawnChain,
+    });
+    let versionResult;
+    let helpResult;
+    try {
+      versionResult = await processRunner(
+        grokPath,
+        ['--version'],
+        optionsFor(versionChain),
+      );
+    } catch {
+      versionResult = null;
+    }
+    try {
+      helpResult = await processRunner(
+        grokPath,
+        ['--help'],
+        optionsFor(helpChain),
+      );
+    } catch {
+      helpResult = null;
+    }
+    if (!successfulProbe(versionResult) || !successfulProbe(helpResult)) {
+      return incompatibleGrok();
+    }
+    if (versionChain.chain_sha256 !== helpChain.chain_sha256) return incompatibleGrok();
+
+    const versionOutput = probeStdout(versionResult);
+    const helpOutput = probeStdout(helpResult);
+    const parsedVersion = parseGrokCompatibilityStdout(versionOutput.text, 'version');
+    const parsedHelp = parseGrokCompatibilityStdout(helpOutput.text, 'help');
+    const launcher = versionChain.launcher;
+    const evidenceBody = {
+      schema_version: '1.0',
+      launcher_path: launcher.path,
+      real_path: launcher.real_path,
+      platform_identity: launcher.platform_identity,
+      executable_sha256: launcher.sha256,
+      executable_size: launcher.size,
+      prepared_spawn_chain: versionChain,
+      version: parsedVersion.version,
+      version_build: parsedVersion.version_build,
+      version_banner_sha256: sha256(versionOutput.bytes),
+      help_sha256: sha256(helpOutput.bytes),
+      help_size: helpOutput.bytes.length,
+      required_help_flags: parsedHelp.required_help_flags,
+    };
+    const evidence = validateGrokCompatibilityCarrier({
+      ...evidenceBody,
+      evidence_sha256: sha256(Buffer.from(canonicalStringify(evidenceBody), 'utf8')),
+    });
+    return {
+      grok_cli: true,
+      grok_cli_path: evidence.launcher_path,
+      grok_version: evidence.version,
+      grok_compatibility_verified: true,
+      grok_compatibility_evidence: evidence,
+    };
+  } catch {
+    return incompatibleGrok();
+  }
 }
 
 function isRegularFile(filePath) {
@@ -104,7 +240,7 @@ function findCodexCompanion(env) {
   return candidates.at(-1)?.path || '';
 }
 
-async function detectAvailability(cwd, env, processRunner) {
+async function detectAvailability(cwd, env, processRunner, grokCandidate) {
   const claudePath = resolveExecutable('claude', env) || '';
   const codexPath = resolveExecutable('codex', env) || '';
   let agyPath = resolveExecutable('agy', env) || '';
@@ -123,6 +259,9 @@ async function detectAvailability(cwd, env, processRunner) {
     }
     if (version.captureOverflow === true) agyPath = '';
   }
+  const grok = grokCandidate
+    ? await detectGrokCompatibility(cwd, env, processRunner)
+    : {};
   return {
     node_available: true,
     node_path: process.execPath,
@@ -136,6 +275,7 @@ async function detectAvailability(cwd, env, processRunner) {
     agy_cli: Boolean(agyPath),
     agy_cli_path: agyPath,
     agy_version: agyVersion,
+    ...grok,
   };
 }
 
@@ -216,12 +356,13 @@ export async function detectEnvironment({
   cwd = process.cwd(),
   env = process.env,
   processRunner = runProcess,
+  grokCandidate = false,
 } = {}) {
   const workingDirectory = resolve(cwd);
   const common = {
     runtime_host: detectRuntimeHost(env),
     plugin_root: resolvePluginRoot({ env }),
-    ...(await detectAvailability(workingDirectory, env, processRunner)),
+    ...(await detectAvailability(workingDirectory, env, processRunner, grokCandidate === true)),
   };
 
   if (!(await hasGitWorktree(workingDirectory, env))) {
@@ -266,6 +407,8 @@ export async function detectEnvironment({
 function parseArguments(argv) {
   let cwd = process.cwd();
   let format = 'json';
+  let grokCandidate = false;
+  let grokCarrierFd;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--cwd') {
@@ -276,12 +419,29 @@ function parseArguments(argv) {
       if (!argv[index + 1]) throw new Error('--format requires a value');
       format = argv[index + 1];
       index += 1;
+    } else if (argument === '--grok-candidate') {
+      grokCandidate = true;
+    } else if (argument === '--grok-carrier-fd') {
+      const rawFd = argv[index + 1];
+      if (!rawFd) throw new Error('--grok-carrier-fd requires a value');
+      if (!/^\d+$/u.test(rawFd)) throw new Error('--grok-carrier-fd must be an integer greater than 2');
+      grokCarrierFd = Number(rawFd);
+      if (!Number.isSafeInteger(grokCarrierFd) || grokCarrierFd <= 2) {
+        throw new Error('--grok-carrier-fd must be an integer greater than 2');
+      }
+      index += 1;
     } else {
       throw new Error(`unknown argument: ${argument}`);
     }
   }
   if (!['json', 'kv'].includes(format)) throw new Error('--format must be json or kv');
-  return { cwd, format };
+  if (grokCandidate && grokCarrierFd === undefined) {
+    throw new Error('--grok-candidate requires --grok-carrier-fd <n>');
+  }
+  if (!grokCandidate && grokCarrierFd !== undefined) {
+    throw new Error('--grok-carrier-fd requires --grok-candidate');
+  }
+  return { cwd, format, grokCandidate, grokCarrierFd };
 }
 
 function formatKv(result) {
@@ -292,7 +452,19 @@ function formatKv(result) {
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
-  const result = await detectEnvironment({ cwd: options.cwd, env: process.env });
+  const result = await detectEnvironment({
+    cwd: options.cwd,
+    env: process.env,
+    grokCandidate: options.grokCandidate,
+  });
+  if (options.grokCandidate && result.grok_compatibility_verified === true) {
+    const carrier = validateGrokCompatibilityCarrier(result.grok_compatibility_evidence);
+    const frame = encodeGrokCompatibilityCarrierFrame(carrier);
+    let offset = 0;
+    while (offset < frame.length) {
+      offset += writeSync(options.grokCarrierFd, frame, offset, frame.length - offset);
+    }
+  }
   process.stdout.write(options.format === 'json'
     ? `${JSON.stringify(result)}\n`
     : formatKv(result));

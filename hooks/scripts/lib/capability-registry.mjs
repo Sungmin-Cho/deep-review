@@ -9,7 +9,7 @@ import { readContainedFile, writeContainedFile } from './runtime-context.mjs';
 import { ASSIGNMENT_ROLES } from './assignment-rubrics.mjs';
 
 export const CAPABILITY_PROTOCOL_VERSION = '2.0';
-export const CAPABILITY_CACHE_REVISION = '4';
+export const CAPABILITY_CACHE_REVISION = '5';
 export const MAX_PERSISTED_VERSION_CHARS = 256;
 export const MAX_PERSISTED_HELP_CHARS = 4096;
 export const MAX_CAPABILITY_CACHE_BYTES = 64 * 1024;
@@ -140,6 +140,9 @@ export function buildCapabilities({ detected = {}, hostAssertions = {}, probes =
   const codexProbe = rawCodexProbe.ok === true && !codexExecHelpSupported(rawCodexProbe.help)
     ? { ...rawCodexProbe, ok: false }
     : rawCodexProbe;
+  const grokAvailable = detected.grok_cli === true
+    && isAbsolute(String(detected.grok_cli_path || ''))
+    && detected.grok_compatibility_verified === true;
   return [
     baseCapability({
       adapterId: 'claude-native-agent', provider: 'claude',
@@ -202,6 +205,33 @@ export function buildCapabilities({ detected = {}, hostAssertions = {}, probes =
       effortSelection: { supported: false, levels: [], transport: 'none' },
       structuredOutput: false, readOnlyEnforcement: 'privacy-preflight',
     }),
+    {
+      ...baseCapability({
+        adapterId: 'grok-cli', provider: 'grok', available: grokAvailable,
+        version: parseVersion(detected.grok_version), invocationModes: ['generic-review'],
+        roles: ['standard', 'adversarial'],
+        modelSelection: {
+          supported: true,
+          aliases: ['grok-4.6', 'grok-4.6', 'grok-4.6', 'grok-4.6'],
+          catalog_complete: true,
+          transport: 'flag:--model',
+        },
+        effortSelection: {
+          supported: true,
+          levels: ['low', 'medium', 'high'],
+          transport: 'flag:--reasoning-effort',
+        },
+        structuredOutput: false,
+        readOnlyEnforcement: grokAvailable ? 'permission-mode-plan' : 'none',
+      }),
+      grok_compatibility_evidence: grokAvailable
+        ? detected.grok_compatibility_evidence ?? null
+        : null,
+      ...(typeof detected.grok_unavailable_reason === 'string'
+        && detected.grok_unavailable_reason.length > 0
+        ? { unavailable_reason: detected.grok_unavailable_reason }
+        : {}),
+    },
   ];
 }
 
@@ -281,15 +311,19 @@ export function capabilityCacheKeys(detected = {}, probes = {}) {
     ['claude', 'claude_cli_path', 'claude'],
     ['codex', 'codex_cli_path', 'codex'],
     ['agy', 'agy_cli_path', 'agy'],
+    ['grok', 'grok_cli_path', 'grok'],
   ]) {
     const executable = detected[pathKey];
     if (!executable) continue;
     let mtimeMs = null;
     try { mtimeMs = statSync(executable).mtimeMs; } catch { /* invalidates against a prior real file */ }
+    const version = name === 'grok'
+      ? probes.grok?.version || detected.grok_version
+      : probes[probeKey]?.version || (name === 'agy' ? detected.agy_version : '');
     entries[name] = {
       path: resolve(executable),
       mtime_ms: mtimeMs,
-      version: parseVersion(probes[probeKey]?.version || (name === 'agy' ? detected.agy_version : '')),
+      version: parseVersion(version),
     };
   }
   return entries;
@@ -308,7 +342,7 @@ function hasExactKeys(value, expected) {
 
 function validInvalidationKeys(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const allowed = new Set(['claude', 'codex', 'agy']);
+  const allowed = new Set(['claude', 'codex', 'agy', 'grok']);
   return Object.entries(value).every(([name, key]) => (
     allowed.has(name)
     && hasExactKeys(key, ['mtime_ms', 'path', 'version'])

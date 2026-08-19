@@ -473,7 +473,7 @@ test('the classify-artifacts CLI prints the listing, writes provenance JSON, and
 
   // The dry-run path must be structurally incapable of running a reviewer.
   const cliSource = fs.readFileSync(classifyCliPath, 'utf8');
-  assert.doesNotMatch(cliSource, /run-(?:claude|codex|agy)-reviewer/);
+  assert.doesNotMatch(cliSource, /run-(?:claude|codex|agy|grok)-reviewer/);
 });
 
 test('discovery never re-ingests its own provenance output or deep-suite runtime state', async () => {
