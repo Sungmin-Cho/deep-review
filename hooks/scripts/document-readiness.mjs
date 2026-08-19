@@ -33,6 +33,25 @@ const RISK_VALUES = new Set(['low', 'medium', 'high', 'critical']);
 const FINDING_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const RECEIPT_SCHEMA = '1.0';
 const RECEIPT_ERROR = 'ERROR_READINESS_RECEIPT_STALE';
+
+// C-GATE-PARSER (SLICE-008) — stable codes for the six malformed-gate classes
+// `parseArtifactGate` can reject. Any caller that needs to distinguish why a
+// document-phase report failed reads `error.code`, not the message text: the
+// message stays human-readable and may still change independently.
+export const ARTIFACT_GATE_ERROR_CODES = Object.freeze({
+  MISSING_GATE: 'ERROR_ARTIFACT_GATE_MISSING',
+  DUPLICATE_GATE: 'ERROR_ARTIFACT_GATE_DUPLICATE',
+  INVALID_SCHEMA: 'ERROR_ARTIFACT_GATE_INVALID_SCHEMA',
+  INVALID_STAGE: 'ERROR_ARTIFACT_GATE_INVALID_STAGE',
+  MISSING_ACCEPTANCE_EVIDENCE: 'ERROR_ARTIFACT_GATE_MISSING_ACCEPTANCE_EVIDENCE',
+  COUNT_MISMATCH: 'ERROR_ARTIFACT_GATE_COUNT_MISMATCH',
+});
+
+function gateError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
 const REVIEWER_PROVIDERS = new Map([
   ['claude-opus', 'claude'],
   ['codex-review', 'codex'],
@@ -116,29 +135,32 @@ function repositoryIdentity(repo) {
 
 function validateFinding(value, index, { allowLegacyAdvisoryWarnings = false } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`Artifact Gate finding ${index} must be an object`);
+    throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_SCHEMA, `Artifact Gate finding ${index} must be an object`);
   }
   if (!FINDING_ID.test(value.id || '')) {
-    throw new Error(`Artifact Gate finding ${index} has an invalid id`);
+    throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_SCHEMA, `Artifact Gate finding ${index} has an invalid id`);
   }
   if (!FINDING_SEVERITIES.has(value.severity)) {
-    throw new Error(`Artifact Gate finding ${value.id} has an invalid severity`);
+    throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_SCHEMA, `Artifact Gate finding ${value.id} has an invalid severity`);
   }
   if (!FINDING_STAGES.has(value.stage)) {
-    throw new Error(`Artifact Gate finding ${value.id} has an invalid stage`);
+    throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_STAGE, `Artifact Gate finding ${value.id} has an invalid stage`);
   }
   if (value.severity === 'critical' && value.stage !== 'pre_implementation') {
-    throw new Error(`Critical finding ${value.id} must be pre_implementation`);
+    throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_STAGE, `Critical finding ${value.id} must be pre_implementation`);
   }
   if (value.stage === 'advisory'
       && value.severity !== 'info'
       && !allowLegacyAdvisoryWarnings) {
-    throw new Error(`advisory finding ${value.id} must have info severity`);
+    throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_STAGE, `advisory finding ${value.id} must have info severity`);
   }
   if (!Array.isArray(value.acceptance_evidence)
       || value.acceptance_evidence.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)
       || (value.severity !== 'info' && value.acceptance_evidence.length === 0)) {
-    throw new Error(`Artifact Gate finding ${value.id} has invalid acceptance_evidence`);
+    throw gateError(
+      ARTIFACT_GATE_ERROR_CODES.MISSING_ACCEPTANCE_EVIDENCE,
+      `Artifact Gate finding ${value.id} has invalid acceptance_evidence`,
+    );
   }
   return {
     id: value.id,
@@ -155,17 +177,20 @@ function parseArtifactGateInternal(reportText, { allowLegacyAdvisoryWarnings = f
     /^## Artifact Gate[ \t]*\r?\n(?:[ \t]*\r?\n)*```json[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?=\r?\n|$)/gmu,
   )];
   if (headings.length !== 1 || blocks.length !== 1) {
-    throw new Error('review report must contain exactly one Artifact Gate JSON block');
+    const code = headings.length === 0 || blocks.length === 0
+      ? ARTIFACT_GATE_ERROR_CODES.MISSING_GATE
+      : ARTIFACT_GATE_ERROR_CODES.DUPLICATE_GATE;
+    throw gateError(code, 'review report must contain exactly one Artifact Gate JSON block');
   }
   let parsed;
   try {
     parsed = JSON.parse(blocks[0][1]);
   } catch (error) {
-    throw new Error(`Artifact Gate JSON is invalid: ${error.message}`);
+    throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_SCHEMA, `Artifact Gate JSON is invalid: ${error.message}`);
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
       || parsed.schema_version !== 1 || !Array.isArray(parsed.findings)) {
-    throw new Error('Artifact Gate schema is invalid');
+    throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_SCHEMA, 'Artifact Gate schema is invalid');
   }
   const findings = parsed.findings.map((finding, index) => validateFinding(
     finding,
@@ -174,11 +199,13 @@ function parseArtifactGateInternal(reportText, { allowLegacyAdvisoryWarnings = f
   ));
   const ids = new Set();
   for (const finding of findings) {
-    if (ids.has(finding.id)) throw new Error(`Artifact Gate contains duplicate finding id ${finding.id}`);
+    if (ids.has(finding.id)) {
+      throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_SCHEMA, `Artifact Gate contains duplicate finding id ${finding.id}`);
+    }
     ids.add(finding.id);
   }
   const issueMatch = /\*\*Issues\*\*\s*:\s*[^\n]*?🔴\s*(\d+)[^\n]*?🟡\s*(\d+)[^\n]*?ℹ(?:️)?\s*(\d+)/u.exec(reportText);
-  if (!issueMatch) throw new Error('review report has no valid Issues summary');
+  if (!issueMatch) throw gateError(ARTIFACT_GATE_ERROR_CODES.COUNT_MISMATCH, 'review report has no valid Issues summary');
   const expected = {
     critical: Number(issueMatch[1]),
     warning: Number(issueMatch[2]),
@@ -189,7 +216,7 @@ function parseArtifactGateInternal(reportText, { allowLegacyAdvisoryWarnings = f
     return counts;
   }, { critical: 0, warning: 0, info: 0 });
   if (canonicalStringify(actual) !== canonicalStringify(expected)) {
-    throw new Error('Artifact Gate finding counts do not match the report Issues summary');
+    throw gateError(ARTIFACT_GATE_ERROR_CODES.COUNT_MISMATCH, 'Artifact Gate finding counts do not match the report Issues summary');
   }
   return { schema_version: 1, findings };
 }

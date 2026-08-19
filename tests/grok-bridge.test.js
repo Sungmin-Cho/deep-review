@@ -869,3 +869,149 @@ test('build-reviewer-payload.mjs gains no Artifact Gate injection', () => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// D16 / I16 (SLICE-008b) — the bridge's returned-report validation wired to
+// the canonical `parseArtifactGate`. Zero, two, and count-mismatched gates
+// on a document-phase report all fail closed; a single count-matched gate is
+// accepted; and any gate on a code-phase report is rejected because the
+// document parser is not applicable there.
+// ---------------------------------------------------------------------------
+
+const GATE_FINDING = Object.freeze({
+  id: 'DOC-1', severity: 'warning', stage: 'implementation_verification', acceptance_evidence: ['evidence'],
+});
+
+function gateSectionLines(findings, { schemaVersion = 1 } = {}) {
+  return [
+    '## Artifact Gate',
+    '```json',
+    JSON.stringify({ schema_version: schemaVersion, findings }, null, 2),
+    '```',
+  ];
+}
+
+function gateBearingReport({ warning = 1, gates = [] } = {}) {
+  const verdict = warning > 0 ? 'CONCERN' : 'APPROVE';
+  return [
+    '# Deep Review Report — 2026-08-19',
+    '',
+    '## Summary',
+    '',
+    `- **Verdict**: ${verdict}`,
+    '- **Review Mode**: 5-way',
+    `- **Issues**: 🔴 0건, 🟡 ${warning}건, ℹ️ 0건`,
+    '',
+    ...gates,
+    '',
+    '## Code Review',
+    '',
+    '### 🔴 Critical',
+    '',
+    'None.',
+    '',
+    '### 🟡 Warning',
+    '',
+    warning > 0 ? Array.from({ length: warning }, (_, i) => `- Finding ${i + 1}.`).join('\n') : 'None.',
+    '',
+    '### ℹ️ Info',
+    '',
+    'None.',
+    '',
+    '### 🟢 Passed',
+    '',
+    '- Contract valid.',
+    '',
+  ].join('\n');
+}
+
+function documentHarness(label, reportBody, overrides = {}) {
+  const fixture = harness(label);
+  fixture.seams.executionPlan = plannedRoute(fixture.binary, {
+    artifact_phase: 'document',
+    document_review_mode: 'full-readiness',
+    ...overrides,
+  });
+  fixture.seams.processRunner = async (command, args, options) => {
+    fixture.calls.push({ command, args, options });
+    return {
+      code: 0,
+      timedOut: false,
+      stdout: Buffer.from(reportBody, 'utf8'),
+      stderr: Buffer.alloc(0),
+    };
+  };
+  return fixture;
+}
+
+test('T-GATE-1: a returned document report with zero gates is failed', async () => {
+  const fixture = documentHarness('grok-gate-missing', gateBearingReport({ warning: 1, gates: [] }));
+  const result = await runGrokReviewer(fixture.seams);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.report, null);
+  assert.equal(result.contributes_vote, false);
+});
+
+test('T-GATE-2: a returned document report with two gates is failed', async () => {
+  const fixture = documentHarness('grok-gate-duplicate', gateBearingReport({
+    warning: 1,
+    gates: [
+      ...gateSectionLines([GATE_FINDING]),
+      '',
+      ...gateSectionLines([{ ...GATE_FINDING, id: 'DOC-2' }]),
+    ],
+  }));
+  const result = await runGrokReviewer(fixture.seams);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.report, null);
+});
+
+test('T-GATE-6: a returned document report whose gate JSON finding counts differ from the Summary Issues counts is failed', async () => {
+  const fixture = documentHarness('grok-gate-count-mismatch', gateBearingReport({
+    warning: 1,
+    gates: gateSectionLines([GATE_FINDING, { ...GATE_FINDING, id: 'DOC-2' }]),
+  }));
+  const result = await runGrokReviewer(fixture.seams);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.report, null);
+});
+
+test('a returned document report with one count-matched gate is accepted', async () => {
+  const fixture = documentHarness('grok-gate-accepted', gateBearingReport({
+    warning: 1,
+    gates: gateSectionLines([GATE_FINDING]),
+  }));
+  const result = await runGrokReviewer(fixture.seams);
+  assert.equal(result.status, 'success');
+  assert.notEqual(result.report, null);
+  assert.equal(result.contributes_vote, true);
+});
+
+test('a code-phase report carrying a gate is failed', async () => {
+  const fixture = harness('grok-gate-code-phase');
+  // The default fixture route is artifact_phase: 'implementation'.
+  fixture.seams.processRunner = async () => ({
+    code: 0,
+    timedOut: false,
+    stdout: Buffer.from(gateBearingReport({ warning: 1, gates: gateSectionLines([GATE_FINDING]) }), 'utf8'),
+    stderr: Buffer.alloc(0),
+  });
+  const result = await runGrokReviewer(fixture.seams);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.report, null);
+});
+
+test('the composed Grok prompt contains exactly one gate because exactly one layer injects it', async () => {
+  const fixture = documentHarness('grok-gate-single-injection', gateBearingReport({
+    warning: 1,
+    gates: gateSectionLines([GATE_FINDING]),
+  }));
+  const result = await runGrokReviewer(fixture.seams);
+  assert.equal(result.status, 'success');
+  const { args } = fixture.calls[0];
+  const promptBytes = args.includes('--single')
+    ? Buffer.from(args[args.indexOf('--single') + 1], 'utf8')
+    : readFileSync(args[args.indexOf('--prompt-file') + 1]);
+  const gateHeadings = [...promptBytes.toString('utf8').matchAll(/^## Artifact Gate[ \t]*$/gmu)];
+  assert.equal(gateHeadings.length, 1);
+});

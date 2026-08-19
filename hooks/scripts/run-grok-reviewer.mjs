@@ -15,10 +15,14 @@
 //   D8/D18  lossless prompt transport through the shared module, over a sealed
 //           protocol-3 compatibility carrier that is consumed, never re-probed.
 //
-// Two things this file deliberately does not own. The D16 Artifact Gate is
-// injected by exactly one layer (SLICE-008b) through the `reportContract`
-// seam below, and containment/process-tree lifecycle (SLICE-008c) enters
-// through `containmentToken` and the injectable `processRunner`.
+// D16 (SLICE-008b): the Artifact Gate is injected by exactly one layer, here,
+// through `buildReportContract` — the canonical source in
+// `lib/report-contract.mjs`. Returned document-phase reports are validated
+// against the canonical `parseArtifactGate` imported from
+// `document-readiness.mjs`; the bridge never reimplements a heading counter
+// or a partial schema. Containment/process-tree lifecycle (SLICE-008c)
+// remains a separate seam, entering through `containmentToken` and the
+// injectable `processRunner`.
 
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
@@ -26,6 +30,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { prepareExternalPrivacy } from './lib/agy-privacy.mjs';
+import { ARTIFACT_GATE_ERROR_CODES, parseArtifactGate } from './document-readiness.mjs';
 import { loadExecutionPlan, parseExecutionRouteJson } from './lib/execution-plan.mjs';
 import { captureFingerprint } from './lib/fingerprint.mjs';
 import { validateGrokCompatibilityCarrier } from './lib/grok-compatibility-carrier.mjs';
@@ -38,6 +43,7 @@ import {
   selectPromptTransport,
   verifyPromptIdentity,
 } from './lib/prompt-transport.mjs';
+import { buildReportContract } from './lib/report-contract.mjs';
 import { atomicWriteFile, resolvePluginRoot } from './lib/runtime-context.mjs';
 import { parseReviewerReport } from './review-synthesis.mjs';
 
@@ -128,39 +134,9 @@ The review request follows below.
 
 `;
 
-// The canonical outer contract. The phase-aware D16 contract — the one that
-// carries `## Artifact Gate` — replaces this through the `reportContract`
-// option and is owned by SLICE-008b's `lib/report-contract.mjs`.
-const GROK_REPORT_CONTRACT = `OUTPUT CONTRACT - REQUIRED
-============================================================
-Your entire response MUST use the canonical outer report contract below.
-Do not use an alternative title, security-audit title, or free-form verdict.
-
-# Deep Review Report — YYYY-MM-DD
-
-## Summary
-
-- **Verdict**: APPROVE | CONCERN | REQUEST_CHANGES
-- **Review Mode**: N-way
-- **Issues**: 🔴 N건, 🟡 N건, ℹ️ N건
-
-## Code Review
-
-### 🔴 Critical
-### 🟡 Warning
-### ℹ️ Info
-### 🟢 Passed
-
-Use REQUEST_CHANGES when any Critical exists, CONCERN when only Warnings exist,
-and APPROVE only when both Critical and Warning counts are zero. The issue
-counts MUST equal the findings in the sections. Missing or malformed contract
-fields cause this reviewer output to be excluded.
-Under each severity heading, write exactly one single-line \`- \` bullet per
-finding, with its evidence and remediation on that same bullet. For an empty
-severity section, write exactly \`None.\`. Keep Passed entries as \`- \` bullets.
-============================================================
-
-`;
+// I16: any gate in a code-phase result is invalid because the document
+// parser is not applicable there — that phase-only rule stays at the bridge.
+const GATE_HEADING_PATTERN = /^## Artifact Gate[ \t]*$/mu;
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -439,9 +415,10 @@ function terminalStatus({ mutation, processResult }) {
   return 'success';
 }
 
-// SEAM (SLICE-008b): `artifactGateValidator` receives the strict-parsed report
-// and the artifact phase. 008b supplies the canonical `parseArtifactGate`
-// codes; here it defaults to no additional gate requirement.
+// `artifactGateValidator` receives the strict-parsed report and the artifact
+// phase, and returns whether it passes. Production always supplies
+// `makeDefaultArtifactGateValidator` below; a caller-supplied override exists
+// only for tests exercising `normalizeGrokReport` in isolation.
 function normalizeGrokReport(output, { artifactPhase = null, artifactGateValidator = null } = {}) {
   const parsed = parseReviewerReport(output, { strict: true });
   if (parsed === null) return null;
@@ -449,6 +426,31 @@ function normalizeGrokReport(output, { artifactPhase = null, artifactGateValidat
     return artifactGateValidator({ output, parsed, artifactPhase }) ? parsed : null;
   }
   return parsed;
+}
+
+// D16's one canonical validation path. Document-phase reports go through the
+// same `parseArtifactGate` that `document-readiness.mjs` uses, so a
+// malformed gate is rejected identically wherever it is checked — no local
+// heading counter or partial schema. The phase-only rule (I16: a gate is
+// document-scope only) is the one thing the canonical parser can't tell us,
+// because it isn't applicable outside document phase, so it stays local.
+function makeDefaultArtifactGateValidator(warnings) {
+  return function defaultArtifactGateValidator({ output, artifactPhase }) {
+    if (artifactPhase === 'document') {
+      try {
+        parseArtifactGate(output);
+        return true;
+      } catch (error) {
+        warnings.push(`${error.code ?? ARTIFACT_GATE_ERROR_CODES.INVALID_SCHEMA}: ${error.message}`);
+        return false;
+      }
+    }
+    if (GATE_HEADING_PATTERN.test(output)) {
+      warnings.push('ERROR_GROK_GATE_UNEXPECTED_PHASE: an Artifact Gate is document-scope only');
+      return false;
+    }
+    return true;
+  };
 }
 
 function publishTerminalFiles(outputFile, processResult, status, warnings, mutationReason) {
@@ -560,7 +562,10 @@ export async function runGrokReviewer(options = {}) {
   // byte length and its digest, before `randomUUID` is called at all.
   const promptBytes = composeGrokPrompt({
     body: readFileSync(promptFile),
-    reportContract: options.reportContract ?? GROK_REPORT_CONTRACT,
+    reportContract: options.reportContract ?? buildReportContract({
+      artifactPhase: plan.artifactPhase ?? null,
+      documentReviewMode: plan.documentReviewMode ?? null,
+    }),
   });
   const promptSha256 = sha256(promptBytes);
   const sessionId = freshSessionId(uuidGenerator);
@@ -628,7 +633,7 @@ export async function runGrokReviewer(options = {}) {
     const report = status === 'success'
       ? normalizeGrokReport(rawStdout, {
         artifactPhase: plan.artifactPhase ?? null,
-        artifactGateValidator: options.artifactGateValidator ?? null,
+        artifactGateValidator: options.artifactGateValidator ?? makeDefaultArtifactGateValidator(warnings),
       })
       : null;
     if (status === 'success' && report === null) status = 'failed';
@@ -760,11 +765,11 @@ export const __testing = Object.freeze({
   FORBIDDEN_ARGV_TOKENS,
   FORBIDDEN_SESSION_OPTIONS,
   GROK_READONLY_PREAMBLE,
-  GROK_REPORT_CONTRACT,
   VALUE_FLAGS,
   childEnvironment,
   composeGrokPrompt,
   fingerprintChanged,
+  makeDefaultArtifactGateValidator,
   normalizeGrokReport,
   terminalStatus,
 });
