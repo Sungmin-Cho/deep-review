@@ -1,14 +1,14 @@
 # Contributing to deep-review
 
 Thanks for your interest in improving **deep-review** — the independent Evaluator
-plugin of the [claude-deep-suite](https://github.com/Sungmin-Cho/claude-deep-suite),
+plugin of the [deep-suite](https://github.com/Sungmin-Cho/deep-suite),
 providing cross-model code review for AI coding agents on Claude Code and Codex.
 
 ## Getting started
 
 ```bash
-git clone https://github.com/Sungmin-Cho/claude-deep-review.git
-cd claude-deep-review
+git clone https://github.com/Sungmin-Cho/deep-review.git
+cd deep-review
 npm install
 ```
 

@@ -4,7 +4,7 @@
 /**
  * wrap-recurring-findings-envelope.js — CLI to wrap deep-review's
  * recurring-findings payload in the M3 cross-plugin envelope (cf.
- * claude-deep-suite/docs/envelope-migration.md §1).
+ * deep-suite/docs/envelope-migration.md §1).
  *
  * Designed to be called from review-execution.md Stage 5.5 precheck / recurring-findings-export.md ("Recurring
  * Findings Export") through Node. The agent synthesises the taxonomy
