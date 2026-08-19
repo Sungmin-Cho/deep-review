@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { rubricIdForRole } from './lib/assignment-rubrics.mjs';
 import { parseExecutionPlanDocument } from './lib/execution-plan.mjs';
 import { REVIEWER_IDS, REVIEWER_PROVIDERS } from './lib/reviewer-ids.mjs';
+import { UNSUPPORTED_GROK_CONTAINMENT } from './lib/grok-process-supervisor.mjs';
 
 const VERDICTS = new Set(['APPROVE', 'CONCERN', 'REQUEST_CHANGES']);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
@@ -447,6 +448,9 @@ export function synthesizeReviewRound({
     throw new Error('expansionWavesUsed must be a non-negative integer');
   }
   if (routingPlan.operational_failure === true) {
+    const routingShortfalls = Array.isArray(routingPlan.shortfalls)
+      ? [...routingPlan.shortfalls]
+      : [];
     return {
       status: 'operational_failure',
       needs_expansion: false,
@@ -455,9 +459,14 @@ export function synthesizeReviewRound({
       phase6_allowed: false,
       exclusions: [],
       error: 'routing_plan_operational_failure',
-      routing_shortfalls: Array.isArray(routingPlan.shortfalls)
-        ? [...routingPlan.shortfalls]
-        : [],
+      routing_shortfalls: routingShortfalls,
+      // D21 / I41 — the terminal reader of the containment carrier. A `--grok`
+      // review on a host with no enforceable containment fails the *entire*
+      // review here, with `n_actual: 0`; it is never degraded to a four-voice
+      // round.
+      operational_failure_reason: routingShortfalls.includes(UNSUPPORTED_GROK_CONTAINMENT)
+        ? UNSUPPORTED_GROK_CONTAINMENT
+        : null,
     };
   }
   if (routingIdentityError(routingPlan)) {

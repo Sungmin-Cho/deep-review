@@ -413,6 +413,23 @@ function maxClass(values, order) {
   return values.reduce((highest, value) => order.indexOf(value) > order.indexOf(highest) ? value : highest, order[0]);
 }
 
+// D21 / I41 — the second owner of the shortfall-to-reason carrier. The registry
+// seals *why* a provider is unavailable; this carries that map, unread and
+// untranslated, into the assignment planner, which owns the translation. The
+// first reason wins so the map is deterministic when a provider has several
+// adapters.
+function collectProviderUnavailability(capabilities) {
+  const reasons = {};
+  for (const capability of capabilities) {
+    const reason = capability?.unavailable_reason;
+    if (typeof reason !== 'string' || reason.length === 0) continue;
+    const provider = capability.provider;
+    if (typeof provider !== 'string' || Object.hasOwn(reasons, provider)) continue;
+    reasons[provider] = reason;
+  }
+  return reasons;
+}
+
 export function buildRoutingPlan({
   artifacts = [],
   reviewers = [],
@@ -478,6 +495,7 @@ export function buildRoutingPlan({
     requiredReviewers,
     requiredProviders: overrides.required_providers || [],
     providerOverrides: overrides.providers || {},
+    providerUnavailability: collectProviderUnavailability(capabilities),
     codexOnly: overrides.codex_only === true,
   });
   const reviewerById = new Map(reviewers.map((reviewer) => [reviewer.id, reviewer]));

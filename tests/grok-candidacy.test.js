@@ -323,8 +323,15 @@ test('a prepared-chain mismatch result is incompatible even when the child repor
 test('grok-cli advertises prevention only for a detected, compatibility-verified executable', async () => {
   const { buildCapabilities } = await import(registryUrl);
   const evidence = Object.freeze({ sealed: true });
-  const grok = (detected) => buildCapabilities({ detected })
-    .find((capability) => capability.adapter_id === 'grok-cli');
+  // D21 folds the containment platform/arch gate into this same `available`
+  // decision, and `containment` defaults to the live host. Pin a containment
+  // platform so this test keeps testing compatibility verification — which is
+  // what it is for — identically on every host, instead of passing on a Linux
+  // runner and failing on a macOS one.
+  const grok = (detected) => buildCapabilities({
+    detected,
+    containment: { platform: 'linux', arch: 'x64' },
+  }).find((capability) => capability.adapter_id === 'grok-cli');
 
   const admitted = grok({
     grok_cli: true,

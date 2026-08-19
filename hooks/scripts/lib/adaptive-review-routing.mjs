@@ -1,5 +1,6 @@
 import { rubricIdForRole, isDocumentReviewMode } from './assignment-rubrics.mjs';
 import { REVIEWER_IDS, REVIEWER_PROVIDERS } from './reviewer-ids.mjs';
+import { UNSUPPORTED_GROK_CONTAINMENT } from './grok-process-supervisor.mjs';
 
 const DOCUMENT_TARGETS = new Set([
   'design-document',
@@ -217,6 +218,10 @@ export function planReviewerAssignments(options = {}) {
   const candidates = normalizeCandidates(options.candidates || []);
   const requiredReviewers = new Set(options.requiredReviewers || []);
   const requiredProviders = new Set(options.requiredProviders || []);
+  // The provider-unavailability map carried in by `model-router.mjs`.
+  const providerUnavailability = options.providerUnavailability && typeof options.providerUnavailability === 'object'
+    ? options.providerUnavailability
+    : {};
   const progressState = options.progress?.state || 'initial';
   const usedReviewers = new Set(options.progress?.used_reviewers || []);
   const baseFloor = routingFloor({
@@ -241,9 +246,20 @@ export function planReviewerAssignments(options = {}) {
       missingHardConstraints.push(`required_reviewer:${reviewerId}`);
     }
   }
+  // D21 / I41 — the translation owner. An absent required provider whose
+  // sealed unavailability reason is the containment gate becomes the canonical
+  // `unsupported_grok_containment` shortfall rather than the generic one. The
+  // generic `required_provider:<p>` form stays correct for every other absence
+  // cause, so a provider that is simply not installed still reads that way.
+  const sealedContainmentProviders = new Set();
   for (const provider of requiredProviders) {
     if (!candidates.some((item) => item.provider === provider)) {
-      missingHardConstraints.push(`required_provider:${provider}`);
+      if (providerUnavailability[provider] === UNSUPPORTED_GROK_CONTAINMENT) {
+        sealedContainmentProviders.add(provider);
+        missingHardConstraints.push(UNSUPPORTED_GROK_CONTAINMENT);
+      } else {
+        missingHardConstraints.push(`required_provider:${provider}`);
+      }
     }
   }
   const providersCoveredByRequiredReviewers = new Set(
@@ -365,7 +381,14 @@ export function planReviewerAssignments(options = {}) {
   if (providerFamilies < providerFamilyMinimum) shortfalls.push('provider_families');
   if (assignments.length < targetCount) shortfalls.push('planned_reviewers');
   shortfalls.push(...missingHardConstraints);
-  const uniqueShortfalls = [...new Set(shortfalls)];
+  // The sealed containment reason may not be overwritten by, or shadowed
+  // alongside, the generic form for the same provider: one absent required
+  // provider yields exactly one reason, and when the cause is the containment
+  // gate that reason is the containment-specific one.
+  const uniqueShortfalls = [...new Set(shortfalls)]
+    .filter((shortfall) => !sealedContainmentProviders.has(
+      shortfall.startsWith('required_provider:') ? shortfall.slice('required_provider:'.length) : null,
+    ));
   const operationalFailure = missingHardConstraints.length > 0
     || (criticalImplementation && (
       assignments.length < 3 || providerFamilies < 2

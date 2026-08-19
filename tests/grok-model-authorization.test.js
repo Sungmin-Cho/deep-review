@@ -55,6 +55,13 @@ function grokCapabilities() {
       grok_compatibility_verified: true,
       grok_version: 'grok 1.0.4 (d846eb93d94d) [stable]',
     },
+    // This file's subject is Grok model/effort authorization, not containment.
+    // `containment` defaults to the live host, so without an explicit pin the
+    // capability would be unavailable on any host with no inventoried
+    // containment helper and every case here would fail before reaching a
+    // model or effort. The D21 uncontainable-host behaviour has its own
+    // coverage in tests/grok-containment.test.js.
+    containment: { platform: 'linux', arch: 'x64' },
   }));
   return capabilitiesPromise;
 }

@@ -1,7 +1,13 @@
 // SLICE-008a — the Grok bridge core: argv construction (D11/D12/E3), session
 // isolation (I26), prompt transport (D8) and sealed compatibility evidence
-// (D18). The D16 Artifact Gate and the containment lifecycle are owned by
-// SLICE-008b and SLICE-008c and are deliberately not asserted here.
+// (D18). The D16 Artifact Gate is owned by SLICE-008b.
+//
+// SLICE-008c added the bridge's half of the containment contract: it consumes
+// the owner-bound `containment_ready_token` and never establishes readiness,
+// and it admits a post-fingerprint or a sibling only behind the retained
+// owner's proof of whole-tree termination. Containment itself — the platform
+// gate, the preflight, the owner and the reason carrier — lives in
+// `tests/grok-containment.test.js`.
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -19,6 +25,10 @@ import test from 'node:test';
 
 import { canonicalStringify } from '../hooks/scripts/lib/grok-compatibility-carrier.mjs';
 import { parseExecutionRoute } from '../hooks/scripts/lib/execution-plan.mjs';
+import {
+  GROK_INVALID_LIFECYCLE,
+  __testing as supervisorTesting,
+} from '../hooks/scripts/lib/grok-process-supervisor.mjs';
 import {
   GROK_AUTHORIZED_MODEL,
   GROK_SUPPORTED_EFFORTS,
@@ -186,10 +196,42 @@ function plannedRoute(binary, overrides) {
 }
 
 // ---------------------------------------------------------------------------
+// Containment (SLICE-008c). The bridge consumes an owner-bound
+// `containment_ready_token` issued one layer up and never establishes
+// `containment_ready` itself, so every harness carries one — and every runner
+// result carries the owner-bound `termination_report` the serial gate needs.
+// ---------------------------------------------------------------------------
+
+const CONTAINMENT_OWNER = 'grok-bridge-test-owner';
+const CONTAINMENT_TOKEN = supervisorTesting.mintOwnerToken({
+  platform: 'linux', arch: 'x64', ownerId: CONTAINMENT_OWNER, generation: 1, startedAt: 1_700_000_000_000,
+});
+
+function terminationReport(overrides = {}) {
+  return {
+    owner_id: CONTAINMENT_OWNER,
+    generation: 1,
+    live_members: 0,
+    member_pids: [],
+    observed_at: 1_700_000_000_100,
+    ...overrides,
+  };
+}
+
+function contained(result, overrides = {}) {
+  return {
+    ...result,
+    termination_confirmed: true,
+    termination_report: terminationReport(),
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Seams. Every one counts its calls so an ordering polarity can assert zero.
 // ---------------------------------------------------------------------------
 
-function harness(label, { body = 'review this diff\n', behavior = 'success' } = {}) {
+function harness(label, { body = 'review this diff\n', behavior = 'success', lifecycleOverride = {} } = {}) {
   const root = workspace(label);
   const binary = launcherPath(root);
   writeFileSync(binary, 'not a real CLI');
@@ -209,6 +251,7 @@ function harness(label, { body = 'review this diff\n', behavior = 'success' } = 
     outputFile,
     binary,
     executionPlan: plannedRoute(binary),
+    containmentToken: CONTAINMENT_TOKEN,
     async privacyPreparer(options) {
       privacyCalls.push(options);
       return { outcome: 'auto_ack', fingerprint: 'privacy-1', hits: [], error: null };
@@ -226,27 +269,27 @@ function harness(label, { body = 'review this diff\n', behavior = 'success' } = 
     async processRunner(command, args, options) {
       calls.push({ command, args, options });
       if (behavior === 'unsupported-model') {
-        return {
+        return contained({
           code: 2,
           timedOut: false,
           stdout: Buffer.alloc(0),
           stderr: Buffer.from('unsupported model value grok-4.6\n'),
-        };
+        });
       }
       if (behavior === 'malformed') {
-        return {
+        return contained({
           code: 0,
           timedOut: false,
           stdout: Buffer.from('not a report at all\n'),
           stderr: Buffer.alloc(0),
-        };
+        });
       }
-      return {
+      return contained({
         code: 0,
         timedOut: false,
         stdout: Buffer.from(REPORT, 'utf8'),
         stderr: Buffer.alloc(0),
-      };
+      }, lifecycleOverride);
     },
   };
 
@@ -346,7 +389,7 @@ test('argv construction throws when the resolved model is not exactly grok-4.6, 
     ' grok-4.6',
     'grok-4.6\n',
     'grok-4.6;rm -rf /',
-    'grok-4.6 ',
+    'grok-4.6\0',
     'GROK-4.6',
     'grok',
   ]) {
@@ -804,6 +847,114 @@ test('a declined privacy outcome stops before fingerprint, prompt, session and s
 });
 
 // ---------------------------------------------------------------------------
+// D21 / I41 (SLICE-008c) — the bridge consumes the owner-bound containment
+// token and never establishes readiness itself.
+// ---------------------------------------------------------------------------
+
+function zeroDownstream(fixture, label) {
+  assert.equal(fixture.privacyCalls.length, 0, `${label}: zero privacy/config work`);
+  assert.equal(fixture.fingerprints.length, 0, `${label}: zero fingerprint`);
+  assert.equal(fixture.uuids.length, 0, `${label}: zero UUID`);
+  assert.equal(fixture.calls.length, 0, `${label}: zero provider-child calls`);
+  assert.equal(existsSync(fixture.outputFile), false, `${label}: no output is published`);
+}
+
+test('missing or unsupported containment produces zero privacy, fingerprint, UUID, prompt and provider-child calls', async () => {
+  const cases = [
+    ['no token at all', undefined, /missing_containment_ready_token/u],
+    ['an explicitly absent token', null, /missing_containment_ready_token/u],
+    ['a token that is not ready', { ...CONTAINMENT_TOKEN, containment_ready: false }, /containment_not_ready/u],
+    ['a forged owner binding', { ...CONTAINMENT_TOKEN, owner_id: 'someone-else' }, /foreign_containment_owner/u],
+    ['an unsupported containment platform', { ...CONTAINMENT_TOKEN, platform: 'darwin', arch: 'arm64' }, /unsupported_grok_containment/u],
+    ['a census mechanism that is not containment', { ...CONTAINMENT_TOKEN, mechanism: 'setsid-census' }, /unsupported_grok_containment/u],
+  ];
+  for (const [label, containmentToken, expected] of cases) {
+    const fixture = harness(`grok-containment-${label.replaceAll(/[^a-z]+/gu, '-')}`);
+    fixture.seams.containmentToken = containmentToken;
+    await assert.rejects(() => runGrokReviewer(fixture.seams), expected, label);
+    zeroDownstream(fixture, label);
+  }
+});
+
+test('the bridge refuses before it even consumes the sealed compatibility carrier', async () => {
+  const fixture = harness('grok-containment-precedes-carrier');
+  fixture.seams.containmentToken = null;
+  fixture.seams.executionPlan = { ...fixture.seams.executionPlan, grokCompatibilityEvidence: null };
+  await assert.rejects(() => runGrokReviewer(fixture.seams), /ERROR_GROK_CONTAINMENT/u);
+  zeroDownstream(fixture, 'containment precedes the carrier');
+});
+
+test('the owner-bound token reaches the contained runner unchanged', async () => {
+  const fixture = harness('grok-containment-token-forwarded');
+  await runGrokReviewer(fixture.seams);
+  assert.equal(fixture.calls.length, 1);
+  assert.deepEqual(fixture.calls[0].options.containmentToken, CONTAINMENT_TOKEN);
+});
+
+test('the Grok provider tree is launched only through the contained runner, never the shared one', async () => {
+  const source = readFileSync(join(pluginRoot, 'hooks', 'scripts', 'run-grok-reviewer.mjs'), 'utf8');
+  const code = source.split('\n').filter((line) => !line.trimStart().startsWith('//')).join('\n');
+  assert.match(code, /options\.processRunner \?\? runGrokContainedProcess/u);
+  assert.equal(/\brunProcess\b/u.test(code), false,
+    'the bridge does not reach the shared runner, whose semantics stay unchanged for its own callers');
+
+  // And behaviourally: with no runner injected, the default is the contained
+  // one, which refuses on a host that cannot contain a Grok tree. The shared
+  // runner would instead return a result and the attempt would merely fail.
+  const fixture = harness('grok-containment-default-runner');
+  delete fixture.seams.processRunner;
+  await assert.rejects(() => runGrokReviewer(fixture.seams), /ERROR_GROK_CONTAINMENT/u);
+});
+
+// ---------------------------------------------------------------------------
+// D19 / I36 — post-fingerprint and sibling dispatch wait for the owner's proof.
+// ---------------------------------------------------------------------------
+
+test('an unconfirmed process-tree lifecycle is round-terminal and never captures a post-fingerprint', async () => {
+  const cases = [
+    ['no evidence at all', { termination_confirmed: undefined, termination_report: undefined }],
+    ['a false claim', { termination_confirmed: false, termination_report: terminationReport() }],
+    ['a claim with no owner-bound report', { termination_confirmed: true, termination_report: null }],
+    ['a report from a foreign owner', { termination_confirmed: true, termination_report: terminationReport({ owner_id: 'other' }) }],
+    ['a report from another generation', { termination_confirmed: true, termination_report: terminationReport({ generation: 7 }) }],
+    ['surviving members', { termination_confirmed: true, termination_report: terminationReport({ live_members: 2, member_pids: [9, 10] }) }],
+    ['a lost handshake', { termination_confirmed: true, termination_report: terminationReport({ handshake: 'lost' }) }],
+    ['a deadline', { termination_confirmed: true, termination_report: terminationReport({ deadline_exceeded: true }) }],
+  ];
+  for (const [label, lifecycleOverride] of cases) {
+    const fixture = harness(`grok-lifecycle-${label.replaceAll(/[^a-z]+/gu, '-')}`, { lifecycleOverride });
+    const result = await runGrokReviewer(fixture.seams);
+    assert.equal(result.status, 'failed', label);
+    assert.equal(result.error_code, GROK_INVALID_LIFECYCLE, label);
+    assert.equal(result.report, null, label);
+    assert.equal(result.contributes_vote, false, label);
+    assert.equal(result.containment.termination_confirmed, false, label);
+    assert.equal(result.containment.diagnostic, 'lifecycle_unconfirmed', label);
+    // The gate must stop the round: no sibling, no retry, no resume.
+    assert.equal(result.containment.sibling_dispatch_allowed, false, label);
+    assert.equal(result.containment.retry_allowed, false, label);
+    assert.equal(result.containment.resume_allowed, false, label);
+    // One fingerprint only — the pre-snapshot. The post-fingerprint is behind
+    // the proof that never arrived.
+    assert.equal(fixture.fingerprints.length, 1, `${label}: post-fingerprint must not run`);
+    assert.equal(result.after, null, label);
+  }
+});
+
+test('a confirmed owner-bound termination admits the post-fingerprint and a sibling', async () => {
+  const fixture = harness('grok-lifecycle-confirmed');
+  const result = await runGrokReviewer(fixture.seams);
+  assert.equal(result.status, 'success');
+  assert.equal(result.containment.termination_confirmed, true);
+  assert.equal(result.containment.sibling_dispatch_allowed, true);
+  assert.equal(result.containment.owner_id, CONTAINMENT_OWNER);
+  assert.equal(result.containment.mechanism, 'pid-namespace');
+  assert.equal(result.containment.process_tree_termination.state, 'confirmed');
+  assert.equal(result.containment.process_tree_termination.live_members, 0);
+  assert.equal(fixture.fingerprints.length, 2);
+});
+
+// ---------------------------------------------------------------------------
 // CLI contract and the SLICE-008 absence conditions.
 // ---------------------------------------------------------------------------
 
@@ -934,12 +1085,12 @@ function documentHarness(label, reportBody, overrides = {}) {
   });
   fixture.seams.processRunner = async (command, args, options) => {
     fixture.calls.push({ command, args, options });
-    return {
+    return contained({
       code: 0,
       timedOut: false,
       stdout: Buffer.from(reportBody, 'utf8'),
       stderr: Buffer.alloc(0),
-    };
+    });
   };
   return fixture;
 }
@@ -990,7 +1141,7 @@ test('a returned document report with one count-matched gate is accepted', async
 test('a code-phase report carrying a gate is failed', async () => {
   const fixture = harness('grok-gate-code-phase');
   // The default fixture route is artifact_phase: 'implementation'.
-  fixture.seams.processRunner = async () => ({
+  fixture.seams.processRunner = async () => contained({
     code: 0,
     timedOut: false,
     stdout: Buffer.from(gateBearingReport({ warning: 1, gates: gateSectionLines([GATE_FINDING]) }), 'utf8'),

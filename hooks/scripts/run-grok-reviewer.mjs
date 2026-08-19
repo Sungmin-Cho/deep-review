@@ -20,9 +20,18 @@
 // `lib/report-contract.mjs`. Returned document-phase reports are validated
 // against the canonical `parseArtifactGate` imported from
 // `document-readiness.mjs`; the bridge never reimplements a heading counter
-// or a partial schema. Containment/process-tree lifecycle (SLICE-008c)
-// remains a separate seam, entering through `containmentToken` and the
-// injectable `processRunner`.
+// or a partial schema.
+//
+// D19/D21 (SLICE-008c): the bridge *consumes* the owner-bound
+// `containment_ready_token` and never establishes `containment_ready` itself —
+// `grok-containment-preflight.mjs` owns that, one layer up, before privacy.
+// A missing or unsupported token stops the attempt here, before privacy,
+// fingerprint, UUID, prompt composition and provider launch, so an
+// uncontainable host makes zero downstream calls. On the way out,
+// `termination_confirmed` is re-derived from the owner-bound
+// `termination_report` rather than believed: post-fingerprint and sibling
+// dispatch are blocked until the retained owner proves zero live members, and
+// missing or false evidence is round-terminal with no retry or resume.
 
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
@@ -34,7 +43,13 @@ import { ARTIFACT_GATE_ERROR_CODES, parseArtifactGate } from './document-readine
 import { loadExecutionPlan, parseExecutionRouteJson } from './lib/execution-plan.mjs';
 import { captureFingerprint } from './lib/fingerprint.mjs';
 import { validateGrokCompatibilityCarrier } from './lib/grok-compatibility-carrier.mjs';
-import { runProcess } from './lib/process.mjs';
+import {
+  GROK_INVALID_LIFECYCLE,
+  GROK_LIFECYCLE_UNCONFIRMED,
+  assertContainmentReadyToken,
+  evaluateTerminationReport,
+  runGrokContainedProcess,
+} from './lib/grok-process-supervisor.mjs';
 // D8: the host argument budget lives in one place. The bridge never restates
 // a platform limit, so a Windows ceiling can never drift between the two.
 import {
@@ -406,6 +421,45 @@ function fingerprintChanged(before, after) {
   return { changed: false, reason: '' };
 }
 
+// D19 / I36 / I41 — the serial admission predicate. Two independent things must
+// hold: the contained runner must *say* the tree terminated, and the retained
+// owner must *prove* it through an owner-bound `termination_report` of zero
+// live members. A runner that sets the flag without the report, a report from
+// a foreign owner, a lost handshake, or any surviving member all land in the
+// same terminal `lifecycle_unconfirmed` state, and none of them may reach the
+// post-fingerprint or release a sibling.
+function readContainmentLifecycle(processResult, containmentToken) {
+  const evaluation = evaluateTerminationReport({
+    token: containmentToken,
+    report: processResult?.termination_report ?? null,
+  });
+  const claimed = processResult?.termination_confirmed === true;
+  const confirmed = claimed && evaluation.termination_confirmed;
+  const reason = evaluation.termination_confirmed && !claimed
+    ? 'runner_did_not_report_termination_confirmed'
+    : evaluation.reason;
+  return {
+    termination_confirmed: confirmed,
+    reason,
+    containment: {
+      containment_ready: true,
+      owner_id: containmentToken.owner_id,
+      mechanism: containmentToken.mechanism,
+      termination_confirmed: confirmed,
+      process_tree_termination: confirmed
+        ? evaluation.process_tree_termination
+        : { ...evaluation.process_tree_termination, state: 'unconfirmed' },
+      diagnostic: confirmed ? null : GROK_LIFECYCLE_UNCONFIRMED,
+      // Sibling dispatch and post-fingerprint are blocked until the proof
+      // arrives, and there is no retry or resume fallback for a round that
+      // ends here.
+      sibling_dispatch_allowed: confirmed,
+      retry_allowed: false,
+      resume_allowed: false,
+    },
+  };
+}
+
 function terminalStatus({ mutation, processResult }) {
   if (mutation) return 'mutated';
   if (processResult.code === 124 || processResult.timedOut) return 'timeout';
@@ -488,7 +542,11 @@ async function releasePromptFile(derived) {
 export async function runGrokReviewer(options = {}) {
   rejectForbiddenSessionOptions(options);
 
-  // D18 first: missing, malformed or seal-mismatched evidence fails before
+  // D21 first of all: the owner-bound containment admission. It is consumed,
+  // never established here, and a refusal precedes every downstream call.
+  const containmentToken = assertContainmentReadyToken(options.containmentToken ?? null);
+
+  // D18 next: missing, malformed or seal-mismatched evidence fails before
   // privacy, prompt composition, fingerprinting, session creation and spawn.
   const plan = options.executionPlan ?? null;
   const carrier = consumeCompatibilityEvidence(plan);
@@ -513,9 +571,10 @@ export async function runGrokReviewer(options = {}) {
   const privacyPreparer = options.privacyPreparer
     ?? ((request) => prepareExternalPrivacy({ ...request, provider: 'grok' }));
   const fingerprintCapturer = options.fingerprintCapturer ?? captureFingerprint;
-  // SEAM (SLICE-008c): the contained runner replaces this default, and the
-  // post-fingerprint below moves behind its confirmed whole-tree termination.
-  const processRunner = options.processRunner ?? runProcess;
+  // D19/D20: the Grok provider-content tree is launched only through the
+  // contained runner. Shared `runProcess` keeps its semantics and its own
+  // callers untouched.
+  const processRunner = options.processRunner ?? runGrokContainedProcess;
   const uuidGenerator = options.uuidGenerator ?? randomUUID;
 
   const compatibility = {
@@ -597,9 +656,7 @@ export async function runGrokReviewer(options = {}) {
       // The chain sealed at detection is re-prepared and compared inside the
       // runner, in this same call, before any child is spawned.
       expectedPreparedSpawnChain: carrier.prepared_spawn_chain,
-      ...(options.containmentToken === undefined
-        ? {}
-        : { containmentToken: options.containmentToken }),
+      containmentToken,
     });
 
     let identityFailure = null;
@@ -608,8 +665,49 @@ export async function runGrokReviewer(options = {}) {
       if (!postChild.ok) identityFailure = postChild.reason;
     }
 
-    // SEAM (SLICE-008c): the post-fingerprint moves behind confirmed
-    // whole-tree termination once the contained runner reports it.
+    // D19/I36: the serial gate. A runner may claim `termination_confirmed`,
+    // but the claim is only as good as the owner-bound `termination_report`
+    // behind it, so the supervisor re-derives it here. Anything short of an
+    // owner-bound zero-live-member proof is `lifecycle_unconfirmed`, and the
+    // post-fingerprint below never runs on that path — the round stops.
+    const lifecycle = readContainmentLifecycle(processResult, containmentToken);
+    if (!lifecycle.termination_confirmed) {
+      warnings.push(`${GROK_INVALID_LIFECYCLE}: ${lifecycle.reason}`);
+      publishTerminalFiles(outputFile, processResult, 'failed', warnings, '');
+      result = {
+        status: 'failed',
+        attempted: true,
+        contributes_vote: false,
+        privacyOutcome: finalPrivacy.outcome,
+        code: processResult.code ?? null,
+        timedOut: Boolean(processResult.timedOut),
+        stdout: '',
+        raw_stdout: processResult.stdout.toString('utf8'),
+        stderr: processResult.stderr.toString('utf8'),
+        report: null,
+        mutation: false,
+        mutationReason: '',
+        before,
+        after: null,
+        argv: construction.args,
+        argv_sha256: construction.argvSha256,
+        prompt_transport: construction.transport,
+        prompt_bytes: promptBytes.length,
+        prompt_sha256: promptSha256,
+        truncated: construction.truncated,
+        session_isolation: {
+          session_id: sessionId, fresh: true, memory: 'disabled', subagents: 'disabled',
+        },
+        compatibility,
+        resolved_model: model,
+        resolved_effort: effort,
+        error_code: GROK_INVALID_LIFECYCLE,
+        warnings,
+        containment: lifecycle.containment,
+      };
+      return result;
+    }
+
     const after = await fingerprintCapturer({ repo: projectRoot, pluginRoot, mode });
     if (after.warning && after.warning !== before.warning) warnings.push(after.warning);
     const mutation = fingerprintChanged(before, after);
@@ -672,6 +770,7 @@ export async function runGrokReviewer(options = {}) {
       resolved_effort: effort,
       error_code: errorCode,
       warnings,
+      containment: lifecycle.containment,
     };
   } finally {
     const cleanup = await releasePromptFile(derived);
