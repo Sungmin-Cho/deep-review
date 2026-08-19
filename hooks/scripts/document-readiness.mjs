@@ -31,7 +31,16 @@ const FINDING_STAGES = new Set([
 const FINDING_SEVERITIES = new Set(['critical', 'warning', 'info']);
 const RISK_VALUES = new Set(['low', 'medium', 'high', 'critical']);
 const FINDING_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-const RECEIPT_SCHEMA = '1.0';
+// The label identifies the shape. `2.0` carries the reviewer-scoped
+// `finding_ref` deferred body and the D17 admission provenance; `1.0` carries a
+// bare global `finding_id` and no admission at all. They are mutually
+// unreadable, so one label could never have named both.
+const RECEIPT_SCHEMA = '2.0';
+const LEGACY_RECEIPT_SCHEMA = '1.0';
+const ACCEPTED_RECEIPT_SCHEMAS = new Set([LEGACY_RECEIPT_SCHEMA, RECEIPT_SCHEMA]);
+const READINESS_ADMISSION_SCHEMA = '1.0';
+const LEGACY_SCOPE = 'legacy_global';
+const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const RECEIPT_ERROR = 'ERROR_READINESS_RECEIPT_STALE';
 
 // C-GATE-PARSER (SLICE-008) — stable codes for the six malformed-gate classes
@@ -51,6 +60,19 @@ function gateError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+const GATE_ERROR_CODES = new Set(Object.values(ARTIFACT_GATE_ERROR_CODES));
+
+// A local Artifact Gate id is a *string* before it is a pattern. `RegExp.test`
+// coerces its argument, so a pattern check alone admits `7`, `true`, `false`
+// and `['DOC-1']` — every one of which stringifies into the allowed alphabet —
+// while refusing `0` only by the falsy accident of `0 || ''`. The type is
+// checked first everywhere the id enters or is read back, because a
+// verification input spelling `"7"` never matches an obligation carrying `7`,
+// and that round fails quiet rather than loud.
+function isFindingId(value) {
+  return typeof value === 'string' && FINDING_ID.test(value);
 }
 const REVIEWER_PROVIDERS = new Map([
   ['claude-opus', 'claude'],
@@ -137,7 +159,7 @@ function validateFinding(value, index, { allowLegacyAdvisoryWarnings = false } =
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_SCHEMA, `Artifact Gate finding ${index} must be an object`);
   }
-  if (!FINDING_ID.test(value.id || '')) {
+  if (!isFindingId(value.id)) {
     throw gateError(ARTIFACT_GATE_ERROR_CODES.INVALID_SCHEMA, `Artifact Gate finding ${index} has an invalid id`);
   }
   if (!FINDING_SEVERITIES.has(value.severity)) {
@@ -275,14 +297,120 @@ function isReadinessReportPath(relativePath) {
   );
 }
 
-function reportRecords(repo, reports) {
+// C-REPORT-IDENTITY (D17) — report identity is the pair
+// `(reviewer_id, trusted_report_path)`. SHA-256 is an integrity binding only:
+// equal digests across two distinct report identities are valid, and neither
+// `reportDigests` here nor `seenReportDigests` in verification is a uniqueness
+// authority any more. What makes two records two *independent* records is the
+// sealed synthesis admission below, which joins each report one-to-one to its
+// own trusted attempt and route. Every record still keeps its own digest and
+// every report's current bytes are still compared to it.
+const ADMISSION_RECORD_KEYS = canonicalStringify([
+  'admission_sha256',
+  'attempt_id',
+  'output_sha256',
+  'provider_family',
+  'reviewer_id',
+  'route_sha256',
+]);
+
+function admissionRecordDigest(record) {
+  return sha256(Buffer.from(canonicalStringify({
+    attempt_id: record.attempt_id,
+    output_sha256: record.output_sha256,
+    provider_family: record.provider_family,
+    reviewer_id: record.reviewer_id,
+    route_sha256: record.route_sha256,
+  }), 'utf8'));
+}
+
+// The carrier is emitted only by final production synthesis and arrives verbatim
+// from the trusted coordinator. Readiness re-checks its seals; it never rebuilds
+// a field of it from a reviewer id, a provider string, or a report path.
+function parseReadinessAdmission(admission) {
+  if (!admission || typeof admission !== 'object' || Array.isArray(admission)
+      || admission.schema_version !== READINESS_ADMISSION_SCHEMA
+      || typeof admission.round_id !== 'string' || admission.round_id.length === 0
+      || !SHA256_HEX.test(admission.routing_plan_sha256 || '')
+      || !SHA256_HEX.test(admission.carrier_sha256 || '')
+      || !Array.isArray(admission.records) || admission.records.length === 0) {
+    throw new Error('readiness admission carrier is malformed');
+  }
+  const byAttempt = new Map();
+  const routeIdentities = new Set();
+  for (const record of admission.records) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)
+        || canonicalStringify(Object.keys(record).sort(utf8Compare)) !== ADMISSION_RECORD_KEYS
+        || typeof record.attempt_id !== 'string' || record.attempt_id.length === 0
+        || REVIEWER_PROVIDERS.get(record.reviewer_id) !== record.provider_family
+        || !SHA256_HEX.test(record.route_sha256 || '')
+        || !SHA256_HEX.test(record.output_sha256 || '')
+        || record.admission_sha256 !== admissionRecordDigest(record)
+        || byAttempt.has(record.attempt_id)
+        || routeIdentities.has(record.route_sha256)) {
+      throw new Error('readiness admission record is not sealed trusted attempt evidence');
+    }
+    byAttempt.set(record.attempt_id, record);
+    routeIdentities.add(record.route_sha256);
+  }
+  const { carrier_sha256: seal, ...body } = admission;
+  if (sha256(Buffer.from(canonicalStringify(body), 'utf8')) !== seal) {
+    throw new Error('readiness admission carrier seal is invalid');
+  }
+  return byAttempt;
+}
+
+// Joins one trusted report input to at most one admission record. `exhaustive`
+// is true at creation, where readiness sees every report of the round and so
+// every admitted attempt must be consumed by one of them — including a report
+// whose Artifact Gate is later excluded. Verification sees only the reports the
+// receipt counted, so there it is injective rather than bijective: an
+// unconsumed record can inflate nothing, because each counted report still has
+// to bring its own.
+function joinAdmittedAttempt(admittedByAttempt, report, digest, consumedAttempts) {
+  if (admittedByAttempt === null) {
+    if (Object.hasOwn(report, 'attempt_id')) {
+      throw new Error('an admitted attempt id requires a sealed readiness admission carrier');
+    }
+    return null;
+  }
+  if (typeof report.attempt_id !== 'string' || !admittedByAttempt.has(report.attempt_id)) {
+    throw new Error(`reviewer report names no admitted attempt: ${report.reviewer_id}`);
+  }
+  if (consumedAttempts.has(report.attempt_id)) {
+    throw new Error(`admitted attempt is claimed twice: ${report.attempt_id}`);
+  }
+  consumedAttempts.add(report.attempt_id);
+  const admitted = admittedByAttempt.get(report.attempt_id);
+  // Reviewer and provider are derived from the admitted route, never accepted
+  // from the report or path claim.
+  if (admitted.reviewer_id !== report.reviewer_id
+      || admitted.provider_family !== report.provider_family) {
+    throw new Error(`admitted attempt does not authorise reviewer ${report.reviewer_id}`);
+  }
+  if (admitted.output_sha256 !== digest) {
+    throw new Error(`admitted attempt output does not match the report bytes: ${report.reviewer_id}`);
+  }
+  return admitted;
+}
+
+function reportRecords(repo, reports, admission) {
   if (!Array.isArray(reports) || reports.length === 0) {
     throw new Error('document readiness requires at least one reviewer report');
   }
+  const admittedByAttempt = admission === null || admission === undefined
+    ? null
+    : parseReadinessAdmission(admission);
   const reviewerIds = new Set();
   const reportPaths = new Set();
-  const reportDigests = new Set();
-  return reports.map((report) => {
+  const consumedAttempts = new Set();
+  // Without a carrier readiness holds no independence evidence at all, so it
+  // cannot admit a second byte-identical report. The refusal is the missing
+  // attempt evidence — not a claim that the digest is an identity.
+  const unbackedDigests = new Set();
+  const records = [];
+  const exclusions = [];
+  for (const report of reports) {
     if (!report || typeof report !== 'object' || Array.isArray(report)
         || typeof report.reviewer_id !== 'string' || report.reviewer_id.length === 0
         || typeof report.provider_family !== 'string' || report.provider_family.length === 0) {
@@ -299,23 +427,57 @@ function reportRecords(repo, reports) {
     if (!isReadinessReportPath(file.relative_path)) {
       throw new Error('review report must be canonical or a private reviewer report');
     }
-    const digest = sha256(file.bytes);
-    if (reportPaths.has(file.relative_path) || reportDigests.has(digest)) {
-      throw new Error('duplicate reviewer report path or content hash');
+    if (reportPaths.has(file.relative_path)) {
+      throw new Error(`duplicate reviewer report path: ${file.relative_path}`);
     }
     reportPaths.add(file.relative_path);
-    reportDigests.add(digest);
-    const text = file.bytes.toString('utf8');
-    const artifactGate = parseArtifactGate(text);
-    return {
+    const digest = sha256(file.bytes);
+    const admitted = joinAdmittedAttempt(admittedByAttempt, report, digest, consumedAttempts);
+    if (admittedByAttempt === null) {
+      if (unbackedDigests.has(digest)) {
+        throw new Error('byte-identical reviewer reports require distinct admitted attempt evidence');
+      }
+      unbackedDigests.add(digest);
+    }
+    // C-GATE-EXCLUSION (D16) — only a canonical gate-parse failure is that one
+    // reviewer's local failure. It becomes a stable exclusion record and lowers
+    // the admitted floor; it never aborts readiness, and the excluded reviewer's
+    // local id never joins another reviewer's namespace. Anything else — a path
+    // escape, a forged identity — is still the round's failure.
+    let artifactGate;
+    try {
+      artifactGate = parseArtifactGate(file.bytes.toString('utf8'));
+    } catch (error) {
+      if (!GATE_ERROR_CODES.has(error?.code)) throw error;
+      exclusions.push({
+        code: error.code,
+        path: file.relative_path,
+        provider_family: report.provider_family,
+        reviewer_id: report.reviewer_id,
+      });
+      continue;
+    }
+    records.push({
       path: file.relative_path,
       reviewer_id: report.reviewer_id,
       provider_family: report.provider_family,
       sha256: digest,
       artifact_gate_sha256: sha256(Buffer.from(canonicalStringify(artifactGate), 'utf8')),
       artifact_gate: artifactGate,
-    };
-  }).sort((left, right) => utf8Compare(left.reviewer_id, right.reviewer_id));
+      ...(admitted ? {
+        attempt_id: admitted.attempt_id,
+        route_sha256: admitted.route_sha256,
+        admission_sha256: admitted.admission_sha256,
+      } : {}),
+    });
+  }
+  if (admittedByAttempt !== null && consumedAttempts.size !== admittedByAttempt.size) {
+    throw new Error('every admitted attempt must be consumed by exactly one reviewer report');
+  }
+  return {
+    records: records.sort((left, right) => utf8Compare(left.reviewer_id, right.reviewer_id)),
+    exclusions: exclusions.sort((left, right) => utf8Compare(left.reviewer_id, right.reviewer_id)),
+  };
 }
 
 // C-FINDING-IDENTITY (D17) — a local Artifact Gate id is the reviewer's own
@@ -352,7 +514,7 @@ export function isFindingRef(value) {
     // A reference nobody wrote is the unattributed fallback D17 forbids: an empty
     // or non-string reviewer id names no reviewer, so it names no finding either.
     && typeof value.reviewer_id === 'string' && value.reviewer_id.length > 0
-    && FINDING_ID.test(value.finding_id || '');
+    && isFindingId(value.finding_id);
 }
 
 function requireFindingRef(value, label) {
@@ -360,6 +522,35 @@ function requireFindingRef(value, label) {
     throw new Error(`${label} requires a reviewer-scoped finding_ref`);
   }
   return findingRef(value.reviewer_id, value.finding_id);
+}
+
+// The schema-1.0 arm. That writer collapsed canonically identical cross-reviewer
+// duplicates of a bare local id into one obligation, so a verified historical
+// receipt exposes an explicitly non-attributing reference rather than a guess at
+// which reviewer produced it. The two arms carry different key sets, so they are
+// structurally distinct before `canonicalStringify` and a historical global
+// obligation can never collide with a present or future reviewer id.
+const LEGACY_FINDING_REF_KEYS = canonicalStringify(['finding_id', 'scope']);
+
+function legacyFindingRef(findingId) {
+  return { finding_id: findingId, scope: LEGACY_SCOPE };
+}
+
+function isLegacyFindingRef(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    && canonicalStringify(Object.keys(value).sort(utf8Compare)) === LEGACY_FINDING_REF_KEYS
+    && value.scope === LEGACY_SCOPE
+    && isFindingId(value.finding_id);
+}
+
+function requireLegacyFindingRef(value, label) {
+  const findingId = isLegacyFindingRef(value?.finding_ref)
+    ? value.finding_ref.finding_id
+    : value?.finding_id;
+  if (!isFindingId(findingId)) {
+    throw new Error(`${label} requires a ${LEGACY_SCOPE} finding id`);
+  }
+  return legacyFindingRef(findingId);
 }
 
 function mergeGateFindings(reports) {
@@ -371,6 +562,12 @@ function mergeGateFindings(reports) {
       throw new Error('Artifact Gate evidence requires an admitted reviewer id');
     }
     for (const finding of report.artifact_gate.findings) {
+      // The canonical parser already refuses a non-string id; hand-built gate
+      // evidence reaches this authority without passing through it, and a
+      // non-string id here would be carried verbatim into `blocking_finding_refs`.
+      if (!isFindingId(finding?.id)) {
+        throw new Error('Artifact Gate evidence requires a string finding id');
+      }
       const ref = findingRef(report.reviewer_id, finding.id);
       const key = findingRefKey(ref);
       const prior = byRef.get(key);
@@ -398,6 +595,7 @@ export function evaluateDocumentReadiness({
   risk,
   requiredReviewers,
   providerFamilyMinimum,
+  gateExclusions = [],
 } = {}) {
   if (!RISK_VALUES.has(risk)) throw new Error(`invalid document readiness risk: ${String(risk)}`);
   const riskMinimum = ['high', 'critical'].includes(risk) ? 2 : 1;
@@ -438,6 +636,10 @@ export function evaluateDocumentReadiness({
     blocking_finding_ids: blockingFindingRefs.map((ref) => ref.finding_id),
     blocking_reasons: blockingReasons,
     deferred_findings: deferredFindings,
+    // Stable per-report exclusion records. The floor above is computed from
+    // admitted reports only, so an excluded reviewer lowers it rather than
+    // aborting the round.
+    gate_exclusions: [...gateExclusions],
     reviewer_count: reportEvidence.length,
     provider_family_count: providerFamilies,
     required_reviewers: reviewerMinimum,
@@ -449,6 +651,64 @@ export function evaluateDocumentReadiness({
   };
 }
 
+// The schema-1.0 writer semantics, reproduced exactly so a historical receipt is
+// recomputed with the rule that produced it. That writer keyed every admitted
+// finding globally by its bare local id and collapsed cross-reviewer duplicates
+// whose severity, stage and acceptance evidence were canonically equal; only a
+// non-identical duplicate threw. A `1.0` receipt is never compared against a
+// reviewer-scoped recomputation, and its bytes are never rewritten or resealed.
+function legacyMergeGateFindings(reports) {
+  const byId = new Map();
+  for (const report of reports) {
+    for (const finding of report.artifact_gate.findings) {
+      const prior = byId.get(finding.id);
+      if (prior && (
+        prior.severity !== finding.severity
+        || prior.stage !== finding.stage
+        || canonicalStringify(prior.acceptance_evidence) !== canonicalStringify(finding.acceptance_evidence)
+      )) {
+        throw new Error(`reviewers disagree on Artifact Gate finding ${finding.id}`);
+      }
+      if (!prior) byId.set(finding.id, finding);
+    }
+  }
+  return [...byId.values()].sort((left, right) => utf8Compare(left.id, right.id));
+}
+
+function evaluateLegacyDocumentReadiness({
+  reportEvidence,
+  risk,
+  requiredReviewers,
+  providerFamilyMinimum,
+}) {
+  const riskMinimum = ['high', 'critical'].includes(risk) ? 2 : 1;
+  const reviewerMinimum = Math.max(riskMinimum, requiredReviewers ?? riskMinimum);
+  const familyMinimum = Math.max(riskMinimum, providerFamilyMinimum ?? riskMinimum);
+  const findings = legacyMergeGateFindings(reportEvidence);
+  const blockingFindingIds = findings
+    .filter((finding) => ['critical', 'warning'].includes(finding.severity)
+      && finding.stage === 'pre_implementation')
+    .map((finding) => finding.id);
+  const blockingReasons = [];
+  if (reportEvidence.length < reviewerMinimum) blockingReasons.push('required_reviewers');
+  const providerFamilies = new Set(reportEvidence.map((report) => report.provider_family)).size;
+  if (providerFamilies < familyMinimum) blockingReasons.push('provider_families');
+  if (blockingFindingIds.length > 0) blockingReasons.push('pre_implementation_findings');
+  return {
+    status: blockingReasons.length === 0 ? 'READY_FOR_IMPLEMENTATION' : 'DOCUMENT_BLOCKED',
+    deferred_findings: findings
+      .filter((finding) => ['critical', 'warning'].includes(finding.severity)
+        && finding.stage === 'implementation_verification')
+      .map((finding) => ({
+        finding_id: finding.id,
+        severity: finding.severity,
+        acceptance_evidence: finding.acceptance_evidence,
+      })),
+    reviewer_count: reportEvidence.length,
+    provider_family_count: providerFamilies,
+  };
+}
+
 export function createDocumentReadinessReceipt(options = {}) {
   const repo = resolve(options.repo);
   if (!RISK_VALUES.has(options.risk)) {
@@ -456,12 +716,17 @@ export function createDocumentReadinessReceipt(options = {}) {
   }
   const risk = options.risk;
   const documents = documentRecords(repo, options.artifacts);
-  const reportsWithGates = reportRecords(repo, options.reports);
+  const readinessAdmission = options.readinessAdmission ?? null;
+  const {
+    records: reportsWithGates,
+    exclusions,
+  } = reportRecords(repo, options.reports, readinessAdmission);
   const readiness = evaluateDocumentReadiness({
     reportEvidence: reportsWithGates,
     risk,
     requiredReviewers: options.requiredReviewers,
     providerFamilyMinimum: options.providerFamilyMinimum,
+    gateExclusions: exclusions,
   });
   if (readiness.status !== 'READY_FOR_IMPLEMENTATION') {
     return { ...readiness, receipt_path: null };
@@ -476,6 +741,9 @@ export function createDocumentReadinessReceipt(options = {}) {
     risk,
     generated_at: options.generatedAt || new Date().toISOString(),
     documents,
+    // Persisted verbatim, so verification repeats the same attempt/route join
+    // rather than trusting a historical reviewer/path assertion.
+    readiness_admission: readinessAdmission,
     reports,
     reviewer_requirements: {
       required_reviewers: readiness.required_reviewers,
@@ -528,7 +796,7 @@ function verifyReceipt(options) {
     throw new Error(`receipt JSON is invalid: ${error.message}`);
   }
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
-      || receipt.schema_version !== RECEIPT_SCHEMA
+      || !ACCEPTED_RECEIPT_SCHEMAS.has(receipt.schema_version)
       || receipt.status !== 'READY_FOR_IMPLEMENTATION'
       || !RISK_VALUES.has(receipt.risk)
       || !/^[a-f0-9]{64}$/u.test(receipt.scope_sha256 || '')
@@ -581,32 +849,59 @@ function verifyReceipt(options) {
   if (scopeDigest(documents) !== receipt.scope_sha256) {
     throw new Error('receipt scope hash is stale');
   }
+  // The dual reader. A sealed `1.0` receipt is read with its own schema and
+  // recomputed under that schema's writer semantics — including the digest
+  // uniqueness the `1.0` writer itself enforced, which is what stands in for the
+  // admission evidence a `1.0` receipt cannot carry. A `2.0` receipt is read
+  // strictly and its independence comes from the admission join instead, so
+  // `seenReportDigests` is not a uniqueness authority there.
+  const legacy = receipt.schema_version === LEGACY_RECEIPT_SCHEMA;
+  if (legacy === Object.hasOwn(receipt, 'readiness_admission')) {
+    throw new Error('receipt admission provenance does not match its schema');
+  }
+  const admittedByAttempt = legacy || receipt.readiness_admission === null
+    ? null
+    : parseReadinessAdmission(receipt.readiness_admission);
+  const admissionKeys = ['attempt_id', 'route_sha256', 'admission_sha256'];
   const seenReviewers = new Set();
   const seenReportPaths = new Set();
-  const seenReportDigests = new Set();
+  const seenLegacyDigests = new Set();
+  const consumedAttempts = new Set();
   const reportEvidence = receipt.reports.map((report) => {
     if (!report || typeof report !== 'object' || Array.isArray(report)
         || typeof report.reviewer_id !== 'string' || report.reviewer_id.length === 0
         || typeof report.provider_family !== 'string' || report.provider_family.length === 0
-        || !/^[a-f0-9]{64}$/u.test(report.sha256 || '')
-        || !/^[a-f0-9]{64}$/u.test(report.artifact_gate_sha256 || '')
+        || !SHA256_HEX.test(report.sha256 || '')
+        || !SHA256_HEX.test(report.artifact_gate_sha256 || '')
         || seenReviewers.has(report.reviewer_id)
         || seenReportPaths.has(report.path)
-        || seenReportDigests.has(report.sha256)
+        || (legacy && seenLegacyDigests.has(report.sha256))
+        || admissionKeys.some((key) => Object.hasOwn(report, key)) !== (admittedByAttempt !== null)
         || REVIEWER_PROVIDERS.get(report.reviewer_id) !== report.provider_family) {
       throw new Error('receipt reviewer evidence is invalid');
     }
     seenReviewers.add(report.reviewer_id);
     seenReportPaths.add(report.path);
-    seenReportDigests.add(report.sha256);
+    seenLegacyDigests.add(report.sha256);
     const current = safeExistingFile(repo, report.path, 'receipt report');
     if (!isReadinessReportPath(current.relative_path)) {
       throw new Error('receipt report path is not trusted runtime evidence');
     }
+    // Every record still keeps its own digest, and each report's current bytes
+    // are still compared to it. Only the cross-record equality constraint went.
     if (sha256(current.bytes) !== report.sha256) {
       throw new Error(`review report hash changed: ${report.path}`);
     }
-    const gate = parseHistoricalReceiptArtifactGate(current.bytes.toString('utf8'));
+    const admitted = joinAdmittedAttempt(admittedByAttempt, report, report.sha256, consumedAttempts);
+    if (admitted && (admitted.route_sha256 !== report.route_sha256
+        || admitted.admission_sha256 !== report.admission_sha256)) {
+      throw new Error(`receipt admission provenance is inconsistent: ${report.path}`);
+    }
+    // Schema-2.0 parsing is strict; only the sealed schema-1.0 recomputation
+    // relaxes the advisory rule its writer accepted.
+    const gate = legacy
+      ? parseHistoricalReceiptArtifactGate(current.bytes.toString('utf8'))
+      : parseArtifactGate(current.bytes.toString('utf8'));
     if (sha256(Buffer.from(canonicalStringify(gate), 'utf8')) !== report.artifact_gate_sha256) {
       throw new Error(`Artifact Gate hash changed: ${report.path}`);
     }
@@ -630,7 +925,8 @@ function verifyReceipt(options) {
       throw new Error('receipt reviewer requirements are invalid');
     }
   }
-  const readiness = evaluateDocumentReadiness({
+  const evaluate = legacy ? evaluateLegacyDocumentReadiness : evaluateDocumentReadiness;
+  const readiness = evaluate({
     reportEvidence,
     risk: receipt.risk,
     requiredReviewers: requirements.required_reviewers,
@@ -643,13 +939,25 @@ function verifyReceipt(options) {
         !== canonicalStringify(receipt.deferred_findings)) {
     throw new Error('receipt readiness evidence is inconsistent');
   }
+  // Only after the whole historical receipt verifies does each bare `1.0`
+  // obligation normalize — in memory — to an explicitly non-attributing
+  // `legacy_global` reference. One or more canonically identical historical
+  // matches are one obligation; zero matches and conflicting multi-matches
+  // already failed the comparison above. Nothing on disk is rewritten.
+  const deferredFindings = legacy
+    ? receipt.deferred_findings.map((finding) => ({
+      acceptance_evidence: finding.acceptance_evidence,
+      finding_ref: legacyFindingRef(finding.finding_id),
+      severity: finding.severity,
+    }))
+    : receipt.deferred_findings;
   return {
     status: receipt.status,
     receipt,
     receipt_path: file.absolute_path,
     scope_sha256: receipt.scope_sha256,
     risk: receipt.risk,
-    deferred_findings: receipt.deferred_findings,
+    deferred_findings: deferredFindings,
     document_verdict: documentVerdict(readiness),
   };
 }
@@ -694,8 +1002,17 @@ export function evaluateDeferredAcceptance({
       && implementationScopeSha256 !== computedScopeSha256) {
     throw new Error('implementation scope SHA-256 is stale');
   }
+  // A bare `finding_id` is accepted only for a verified `1.0` receipt, where it
+  // normalizes to the same `legacy_global` reference the reader exposed. A `2.0`
+  // receipt requires the full reviewer-scoped ref on every input and refuses a
+  // bare-id or `legacy_global` fallback, and so does a receipt that names no
+  // schema at all.
+  const legacy = document.schema_version === LEGACY_RECEIPT_SCHEMA;
+  const requireRef = (value, label) => (legacy
+    ? requireLegacyFindingRef(value, label)
+    : requireFindingRef(value?.finding_ref, label));
   const requiredRefs = document.deferred_findings.map(
-    (finding) => requireFindingRef(finding?.finding_ref, 'deferred readiness obligation'),
+    (finding) => requireRef(finding, 'deferred readiness obligation'),
   );
   const requiredByRef = new Map(document.deferred_findings.map((finding, index) => [
     findingRefKey(requiredRefs[index]),
@@ -710,7 +1027,7 @@ export function evaluateDeferredAcceptance({
       throw new Error('deferred acceptance verification item is malformed');
     }
     const itemRef = findingRefKey(
-      requireFindingRef(item.finding_ref, 'deferred acceptance verification item'),
+      requireRef(item, 'deferred acceptance verification item'),
     );
     if (verifiedByRef.has(itemRef)) {
       throw new Error(`duplicate deferred verification: ${itemRef}`);

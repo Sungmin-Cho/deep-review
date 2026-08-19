@@ -1681,3 +1681,246 @@ test('a routing-plan operational failure cannot emit a verdict or allow Phase 6'
   assert.equal(result.error, 'routing_plan_operational_failure');
   assert.deepEqual(result.routing_shortfalls, ['required_provider:codex']);
 });
+
+// T-READY-8 (D17) — readiness independence is never something a report can
+// claim for itself. Dispatch binds a fresh opaque `attempt_id` to one parsed
+// protocol-3 route before the attempt runs; final production synthesis
+// re-derives every admitted field from that trusted dispatch record and the
+// immutable routing plan, seals the result once, and the coordinator hands the
+// carrier to document readiness verbatim. No field is reconstructed from a
+// reviewer id, a provider string, a report path, or prose inside the report.
+function executionRouteFor(plan, reviewerId) {
+  const route = (plan.routes || []).find((item) => item.reviewer_id === reviewerId);
+  if (!route) throw new Error(`fixture has no planned route for ${reviewerId}`);
+  return { protocol_version: '3.0', ...route };
+}
+
+function dispatchRecordFor(plan, reviewerId, overrides = {}) {
+  const route = executionRouteFor(plan, reviewerId);
+  return {
+    attempt_id: `attempt-${reviewerId}`,
+    reviewer_id: reviewerId,
+    provider_family: route.provider,
+    execution_route: route,
+    route_sha256: sha256(canonicalStringify(route)),
+    output_sha256: sha256(`review:${reviewerId}`),
+    model: route.resolved.model ?? null,
+    session_id: `session-${reviewerId}`,
+    compatibility_evidence_sha256: route.grok_compatibility_evidence?.evidence_sha256 ?? null,
+    ...overrides,
+  };
+}
+
+function trustedDispatch(plan, reviewerIds, overrides = {}) {
+  return {
+    round_id: 'round-1',
+    routing_plan_sha256: sha256(canonicalStringify(plan)),
+    records: reviewerIds.map((reviewerId) => dispatchRecordFor(plan, reviewerId)),
+    ...overrides,
+  };
+}
+
+// Rebuilt here from the record's own fields rather than imported, so the seal
+// is checked against an independent computation and not against itself.
+function admissionRecordDigest(record) {
+  return sha256(canonicalStringify({
+    attempt_id: record.attempt_id,
+    output_sha256: record.output_sha256,
+    provider_family: record.provider_family,
+    reviewer_id: record.reviewer_id,
+    route_sha256: record.route_sha256,
+  }));
+}
+
+test('T-READY-8 final synthesis seals trusted attempt and route evidence for readiness', async () => {
+  const { synthesizeReviewRound } = await import(synthesisUrl);
+  const plan = routingPlan();
+  const attempts = [attempt('claude-opus'), attempt('codex-review')];
+  const round = synthesizeReviewRound({
+    attempts,
+    consensus: { findings: [] },
+    routingPlan: plan,
+    dispatch: trustedDispatch(plan, ['claude-opus', 'codex-review']),
+  });
+  assert.equal(round.status, 'reviewed');
+  assert.equal(round.verdict, 'APPROVE');
+  assert.equal(round.phase6_allowed, true);
+
+  const carrier = round.readiness_admission;
+  assert.ok(carrier, 'final production synthesis emits one sealed readiness_admission');
+  assert.equal(carrier.schema_version, '1.0');
+  assert.equal(carrier.round_id, 'round-1');
+  assert.equal(carrier.routing_plan_sha256, sha256(canonicalStringify(plan)));
+  assert.deepEqual(
+    carrier.records.map((record) => record.attempt_id),
+    ['attempt-claude-opus', 'attempt-codex-review'],
+  );
+  for (const record of carrier.records) {
+    const planned = executionRouteFor(plan, record.reviewer_id);
+    // Every admitted field is the trusted route's, recomputed here from the
+    // plan — not the dispatch record's own assertion echoed back.
+    assert.equal(record.provider_family, planned.provider);
+    assert.equal(record.route_sha256, sha256(canonicalStringify(planned)));
+    assert.equal(record.output_sha256, sha256(`review:${record.reviewer_id}`));
+    assert.equal(record.admission_sha256, admissionRecordDigest(record));
+    // The carrier is closed: the execution route, model, and session that
+    // authorised the record stay in the dispatch record and never leak into
+    // the sealed evidence.
+    assert.deepEqual(Object.keys(record).sort(), [
+      'admission_sha256',
+      'attempt_id',
+      'output_sha256',
+      'provider_family',
+      'reviewer_id',
+      'route_sha256',
+    ]);
+  }
+  const { carrier_sha256: seal, ...carrierBody } = carrier;
+  assert.equal(seal, sha256(canonicalStringify(carrierBody)));
+
+  const refused = (dispatch, roundAttempts = attempts) => synthesizeReviewRound({
+    attempts: roundAttempts,
+    consensus: { findings: [] },
+    routingPlan: plan,
+    dispatch,
+  });
+  const mutatedDispatch = (mutate) => {
+    const dispatch = trustedDispatch(plan, ['claude-opus', 'codex-review']);
+    mutate(dispatch);
+    return dispatch;
+  };
+
+  // Every failure mode names itself, so one negative cannot pass for another
+  // negative's reason.
+  for (const [reason, dispatch] of [
+    // Reconstructing the output digest from anything but the admitted attempt.
+    ['output_digest_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.records[0].output_sha256 = sha256('review:some-other-report');
+    })],
+    // A provider string the trusted route did not authorise.
+    ['provider_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.records[0].provider_family = 'codex';
+    })],
+    ['model_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.records[0].model = 'forged-model';
+    })],
+    ['session_identity_invalid', mutatedDispatch((dispatch) => {
+      dispatch.records[0].session_id = '';
+    })],
+    ['session_identity_invalid', mutatedDispatch((dispatch) => {
+      dispatch.records[1].session_id = dispatch.records[0].session_id;
+    })],
+    ['route_digest_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.records[0].route_sha256 = sha256('not this route');
+    })],
+    // Self-consistent, parseable, and absent from the immutable plan.
+    ['unplanned_route', mutatedDispatch((dispatch) => {
+      const route = { ...dispatch.records[0].execution_route, selection_reason: 'off-plan route' };
+      dispatch.records[0].execution_route = route;
+      dispatch.records[0].route_sha256 = sha256(canonicalStringify(route));
+    })],
+    ['duplicate_attempt_id', mutatedDispatch((dispatch) => {
+      dispatch.records[1].attempt_id = dispatch.records[0].attempt_id;
+    })],
+    ['duplicate_route_identity', mutatedDispatch((dispatch) => {
+      dispatch.records[1] = dispatchRecordFor(plan, 'claude-opus', {
+        attempt_id: 'attempt-replayed',
+        session_id: 'session-replayed',
+      });
+    })],
+    ['routing_plan_seal_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.routing_plan_sha256 = sha256('a different routing plan');
+    })],
+    ['admission_join_not_one_to_one', trustedDispatch(plan, ['claude-opus'])],
+    ['dispatch_malformed', mutatedDispatch((dispatch) => {
+      dispatch.round_id = '';
+    })],
+  ]) {
+    const result = refused(dispatch);
+    assert.equal(result.status, 'operational_failure', reason);
+    assert.equal(result.error, 'invalid_readiness_admission', reason);
+    assert.equal(result.readiness_admission_error, reason);
+    assert.equal(result.verdict, null, reason);
+    assert.equal(result.phase6_allowed, false, reason);
+    assert.equal(Object.hasOwn(result, 'readiness_admission'), false, reason);
+  }
+
+  // An admission record nobody consumed is the same failure from the other
+  // side: one attempt, one record, never one-and-a-spare.
+  const spare = refused(
+    trustedDispatch(plan, ['claude-opus', 'codex-review']),
+    [attempt('claude-opus')],
+  );
+  assert.equal(spare.error, 'invalid_readiness_admission');
+  assert.equal(spare.readiness_admission_error, 'admission_join_not_one_to_one');
+
+  // Grok's compatibility evidence is validated for that exact attempt id, and
+  // no other reviewer may claim any.
+  const grokIds = ['claude-opus', 'codex-review', 'agy', 'grok'];
+  const grokPlan = routingPlan({
+    candidate_reviewers: [...candidates, grokCandidate],
+    routes: [...baseRoutes(), agyRoute(), grokRoute()],
+  });
+  const grokAttempts = grokIds.map((reviewerId) => attempt(reviewerId));
+  const grokAdmitted = synthesizeReviewRound({
+    attempts: grokAttempts,
+    consensus: { findings: [] },
+    routingPlan: grokPlan,
+    dispatch: trustedDispatch(grokPlan, grokIds),
+  });
+  assert.equal(grokAdmitted.status, 'reviewed');
+  assert.equal(grokAdmitted.readiness_admission.records.length, 4);
+  for (const mutate of [
+    (dispatch) => { dispatch.records[3].compatibility_evidence_sha256 = 'f'.repeat(64); },
+    (dispatch) => { dispatch.records[0].compatibility_evidence_sha256 = 'f'.repeat(64); },
+    (dispatch) => { dispatch.records[3].compatibility_evidence_sha256 = null; },
+  ]) {
+    const dispatch = trustedDispatch(grokPlan, grokIds);
+    mutate(dispatch);
+    const result = synthesizeReviewRound({
+      attempts: grokAttempts,
+      consensus: { findings: [] },
+      routingPlan: grokPlan,
+      dispatch,
+    });
+    assert.equal(result.status, 'operational_failure');
+    assert.equal(result.readiness_admission_error, 'compatibility_evidence_mismatch');
+  }
+
+  // The carrier is emitted only by *final production* synthesis. A shadow round
+  // is not production and an expansion round is not final.
+  const shadowPlan = routingPlan({
+    shadow_mode: true,
+    routes: [baseRoutes()[0]],
+    candidate_reviewers: candidates.slice(0, 1),
+  });
+  const shadow = synthesizeReviewRound({
+    attempts: [attempt('claude-opus')],
+    consensus: { findings: [] },
+    routingPlan: shadowPlan,
+    dispatch: trustedDispatch(shadowPlan, ['claude-opus']),
+  });
+  assert.equal(shadow.status, 'reviewed');
+  assert.equal(shadow.shadow_mode, true);
+  assert.equal(Object.hasOwn(shadow, 'readiness_admission'), false);
+
+  const expanding = synthesizeReviewRound({
+    attempts,
+    consensus: { findings: [] },
+    routingPlan: plan,
+    readinessMismatch: true,
+    dispatch: trustedDispatch(plan, ['claude-opus', 'codex-review']),
+  });
+  assert.equal(expanding.status, 'needs_expansion');
+  assert.equal(Object.hasOwn(expanding, 'readiness_admission'), false);
+
+  // And a round that was never handed a dispatch record emits nothing at all,
+  // rather than inventing a carrier from the attempts it happens to hold.
+  const undispatched = synthesizeReviewRound({
+    attempts,
+    consensus: { findings: [] },
+    routingPlan: plan,
+  });
+  assert.equal(undispatched.status, 'reviewed');
+  assert.equal(Object.hasOwn(undispatched, 'readiness_admission'), false);
+});
