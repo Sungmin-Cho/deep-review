@@ -300,7 +300,10 @@ test('low-risk warning-only plan becomes READY and emits a sealed content-addres
     `${onDisk.scope_sha256}-${onDisk.receipt_sha256}`,
   );
   assert.match(onDisk.receipt_sha256, /^[a-f0-9]{64}$/);
-  assert.equal(onDisk.deferred_findings[0].finding_id, 'DOC-1');
+  assert.deepEqual(onDisk.deferred_findings[0].finding_ref, {
+    finding_id: 'DOC-1',
+    reviewer_id: 'claude-opus',
+  });
 
   const verified = verifyReadinessReceipt({ repo, receiptPath: created.receipt_path });
   assert.equal(verified.status, 'READY_FOR_IMPLEMENTATION');
@@ -534,7 +537,10 @@ test('implementation APPROVE is floored until every deferred acceptance item has
     .update(fs.readFileSync(path.join(repo, 'migration-test.tap')))
     .digest('hex');
   assert.equal(pending.complete, false);
-  assert.deepEqual(pending.pending_finding_ids, ['DOC-1']);
+  assert.deepEqual(pending.pending_finding_refs, [{
+    finding_id: 'DOC-1',
+    reviewer_id: 'claude-opus',
+  }]);
   const floored = gateImplementationVerdict({
     status: 'reviewed', verdict: 'APPROVE', phase6_allowed: true,
   }, pending);
@@ -544,7 +550,7 @@ test('implementation APPROVE is floored until every deferred acceptance item has
   const complete = evaluateDeferredAcceptance({
     receipt: verifiedReceipt.receipt,
     verifiedItems: [{
-      finding_id: 'DOC-1',
+      finding_ref: { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
       implementation_scope_sha256: implementationScopeSha256,
       verification_results: [{
         criterion: 'migration dry-run passes and rollback restores the prior schema',
@@ -561,7 +567,7 @@ test('implementation APPROVE is floored until every deferred acceptance item has
   assert.throws(() => evaluateDeferredAcceptance({
     receipt: verifiedReceipt.receipt,
     verifiedItems: [{
-      finding_id: 'DOC-1',
+      finding_ref: { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
       implementation_scope_sha256: implementationScopeSha256,
       verification_results: [{
         criterion: 'verified',
@@ -608,4 +614,330 @@ test('verified readiness receipt is injected into implementation payload as trus
   assert.match(prompt, /VERIFIED DOCUMENT READINESS RECEIPT/);
   assert.match(prompt, /"finding_id": "DOC-1"/);
   assert.ok(prompt.trimEnd().endsWith('IMPLEMENTATION DIFF'));
+});
+
+// A local Artifact Gate id belongs to the reviewer that wrote it, so the same
+// local id from two reviewers is two findings, not one (D17).
+test('T-READY-3 same local id remains distinct by reviewer through readiness', async () => {
+  const {
+    createDocumentReadinessReceipt,
+    evaluateDocumentReadiness,
+    verifyReadinessReceipt,
+  } = await import(readinessUrl);
+  const repo = repoFixture();
+  const claudeReport = writeReport(repo, 'claude-collision-review.md', report({
+    findings: [{
+      id: 'DOC-1',
+      severity: 'warning',
+      stage: 'implementation_verification',
+      acceptance_evidence: ['claude: migration dry-run passes'],
+    }],
+  }));
+  const codexReport = writeReport(repo, 'codex-collision-review.md', report({
+    findings: [{
+      id: 'DOC-1',
+      severity: 'warning',
+      stage: 'implementation_verification',
+      acceptance_evidence: ['codex: rollback restores the prior schema'],
+    }],
+  }));
+  const created = createDocumentReadinessReceipt({
+    repo,
+    artifacts: [{ path: 'docs/계획 Ω.md', target_kind: 'implementation-plan' }],
+    reports: [
+      { path: claudeReport, reviewer_id: 'claude-opus', provider_family: 'claude' },
+      { path: codexReport, reviewer_id: 'codex-review', provider_family: 'codex' },
+    ],
+    risk: 'low',
+  });
+  assert.equal(created.status, 'READY_FOR_IMPLEMENTATION');
+  const expected = [
+    {
+      acceptance_evidence: ['claude: migration dry-run passes'],
+      finding_ref: { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
+      severity: 'warning',
+    },
+    {
+      acceptance_evidence: ['codex: rollback restores the prior schema'],
+      finding_ref: { finding_id: 'DOC-1', reviewer_id: 'codex-review' },
+      severity: 'warning',
+    },
+  ];
+  assert.deepEqual(created.deferred_findings, expected);
+  const onDisk = JSON.parse(fs.readFileSync(created.receipt_path, 'utf8'));
+  assert.deepEqual(onDisk.deferred_findings, expected);
+  const verified = verifyReadinessReceipt({ repo, receiptPath: created.receipt_path });
+  assert.deepEqual(verified.deferred_findings, expected);
+  assert.equal(verified.document_verdict, 'CONCERN');
+
+  // The key became composite, not absent. One reviewer contradicting itself on
+  // its own local id is still a contradiction and never resolves first-wins,
+  // while an identical repeat stays one finding.
+  const claudeEvidence = (stage) => ({
+    reviewer_id: 'claude-opus',
+    provider_family: 'claude',
+    artifact_gate: {
+      schema_version: 1,
+      findings: [{
+        id: 'DOC-1',
+        severity: 'warning',
+        stage,
+        acceptance_evidence: ['claude: migration dry-run passes'],
+      }],
+    },
+  });
+  assert.throws(() => evaluateDocumentReadiness({
+    reportEvidence: [
+      claudeEvidence('implementation_verification'),
+      claudeEvidence('pre_implementation'),
+    ],
+    risk: 'low',
+  }), /contradicts itself/);
+  assert.deepEqual(
+    evaluateDocumentReadiness({
+      reportEvidence: [
+        claudeEvidence('implementation_verification'),
+        claudeEvidence('implementation_verification'),
+      ],
+      risk: 'low',
+    }).deferred_findings,
+    [{
+      acceptance_evidence: ['claude: migration dry-run passes'],
+      finding_ref: { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
+      severity: 'warning',
+    }],
+  );
+});
+
+// Blockers carry the same identity. The ordering is reviewer first, local id
+// second, so neither a reversal nor an id-first sort can reproduce it.
+test('T-READY-4 both reviewer-scoped pre-implementation blockers survive', async () => {
+  const { createDocumentReadinessReceipt } = await import(readinessUrl);
+  const repo = repoFixture();
+  const claudeReport = writeReport(repo, 'claude-blocker-review.md', report({
+    verdict: 'REQUEST_CHANGES',
+    warning: 2,
+    findings: [
+      {
+        id: 'DOC-9',
+        severity: 'warning',
+        stage: 'pre_implementation',
+        acceptance_evidence: ['claude: name the rollback owner'],
+      },
+      {
+        id: 'DOC-1',
+        severity: 'warning',
+        stage: 'pre_implementation',
+        acceptance_evidence: ['claude: resolve the migration contradiction'],
+      },
+    ],
+  }));
+  const codexReport = writeReport(repo, 'codex-blocker-review.md', report({
+    verdict: 'REQUEST_CHANGES',
+    warning: 1,
+    findings: [{
+      id: 'DOC-1',
+      severity: 'warning',
+      stage: 'pre_implementation',
+      acceptance_evidence: ['codex: bound the retry budget'],
+    }],
+  }));
+  const blocked = createDocumentReadinessReceipt({
+    repo,
+    artifacts: [{ path: 'docs/계획 Ω.md', target_kind: 'implementation-plan' }],
+    reports: [
+      { path: claudeReport, reviewer_id: 'claude-opus', provider_family: 'claude' },
+      { path: codexReport, reviewer_id: 'codex-review', provider_family: 'codex' },
+    ],
+    risk: 'low',
+  });
+  assert.equal(blocked.status, 'DOCUMENT_BLOCKED');
+  assert.equal(blocked.receipt_path, null);
+  assert.equal(blocked.document_verdict, 'REQUEST_CHANGES');
+  assert.deepEqual(blocked.blocking_finding_refs, [
+    { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
+    { finding_id: 'DOC-9', reviewer_id: 'claude-opus' },
+    { finding_id: 'DOC-1', reviewer_id: 'codex-review' },
+  ]);
+  assert.ok(blocked.blocking_reasons.includes('pre_implementation_findings'));
+  // The bare-id list is a display projection: one entry per authoritative ref,
+  // in the same order, so a shared local id renders twice and collapses to two
+  // under any set-keyed operation. That is why it can never be the authority.
+  assert.deepEqual(blocked.blocking_finding_ids, ['DOC-1', 'DOC-9', 'DOC-1']);
+  assert.equal(blocked.blocking_finding_ids.length, blocked.blocking_finding_refs.length);
+  assert.equal(new Set(blocked.blocking_finding_ids).size, 2);
+});
+
+test('T-READY-7 no authoritative blocker operation keys on a bare local id', async () => {
+  const {
+    createDocumentReadinessReceipt,
+    evaluateDeferredAcceptance,
+    evaluateDocumentReadiness,
+    verifyReadinessReceipt,
+  } = await import(readinessUrl);
+
+  // One local id, two reviewers, two stages: a bare-id key would collapse them
+  // and route one finding to the other's authority.
+  const mixedRepo = repoFixture();
+  const mixedClaude = writeReport(mixedRepo, 'claude-mixed-review.md', report({
+    verdict: 'REQUEST_CHANGES',
+    warning: 1,
+    findings: [{
+      id: 'DOC-1',
+      severity: 'warning',
+      stage: 'pre_implementation',
+      acceptance_evidence: ['claude: resolve the migration contradiction'],
+    }],
+  }));
+  const mixedCodex = writeReport(mixedRepo, 'codex-mixed-review.md', report({
+    findings: [{
+      id: 'DOC-1',
+      severity: 'warning',
+      stage: 'implementation_verification',
+      acceptance_evidence: ['codex: rollback restores the prior schema'],
+    }],
+  }));
+  const mixed = createDocumentReadinessReceipt({
+    repo: mixedRepo,
+    artifacts: [{ path: 'docs/계획 Ω.md', target_kind: 'implementation-plan' }],
+    reports: [
+      { path: mixedClaude, reviewer_id: 'claude-opus', provider_family: 'claude' },
+      { path: mixedCodex, reviewer_id: 'codex-review', provider_family: 'codex' },
+    ],
+    risk: 'low',
+  });
+  assert.equal(mixed.status, 'DOCUMENT_BLOCKED');
+  assert.deepEqual(mixed.blocking_finding_refs, [
+    { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
+  ]);
+  assert.deepEqual(mixed.deferred_findings, [{
+    acceptance_evidence: ['codex: rollback restores the prior schema'],
+    finding_ref: { finding_id: 'DOC-1', reviewer_id: 'codex-review' },
+    severity: 'warning',
+  }]);
+
+  // No reviewer, no reference. A blocker operation must fail closed rather than
+  // fall back to the bare local id when the ref cannot be formed.
+  const gateEvidence = (extra) => ({
+    ...extra,
+    provider_family: 'claude',
+    artifact_gate: {
+      schema_version: 1,
+      findings: [{
+        id: 'DOC-1',
+        severity: 'warning',
+        stage: 'pre_implementation',
+        acceptance_evidence: ['resolve the migration contradiction'],
+      }],
+    },
+  });
+  assert.throws(
+    () => evaluateDocumentReadiness({ reportEvidence: [gateEvidence({})], risk: 'low' }),
+    /reviewer id/,
+  );
+  assert.throws(
+    () => evaluateDocumentReadiness({
+      reportEvidence: [gateEvidence({ reviewer_id: '' })],
+      risk: 'low',
+    }),
+    /reviewer id/,
+  );
+  // The same evidence with a reviewer id is admitted, so the two negatives above
+  // fail on the missing reference and not on the hand-built evidence shape.
+  assert.deepEqual(
+    evaluateDocumentReadiness({
+      reportEvidence: [gateEvidence({ reviewer_id: 'claude-opus' })],
+      risk: 'low',
+    }).blocking_finding_refs,
+    [{ finding_id: 'DOC-1', reviewer_id: 'claude-opus' }],
+  );
+
+  // Deferred acceptance keys on the same reference. Two reviewers sharing a
+  // local id are two obligations, and a bare id satisfies neither by fallback.
+  const deferredRepo = repoFixture();
+  const deferredClaude = writeReport(deferredRepo, 'claude-deferred-review.md', report({
+    findings: [{
+      id: 'DOC-1',
+      severity: 'warning',
+      stage: 'implementation_verification',
+      acceptance_evidence: ['claude: migration dry-run passes'],
+    }],
+  }));
+  const deferredCodex = writeReport(deferredRepo, 'codex-deferred-review.md', report({
+    findings: [{
+      id: 'DOC-1',
+      severity: 'warning',
+      stage: 'implementation_verification',
+      acceptance_evidence: ['codex: rollback restores the prior schema'],
+    }],
+  }));
+  const deferredCreated = createDocumentReadinessReceipt({
+    repo: deferredRepo,
+    artifacts: [{ path: 'docs/계획 Ω.md', target_kind: 'implementation-plan' }],
+    reports: [
+      { path: deferredClaude, reviewer_id: 'claude-opus', provider_family: 'claude' },
+      { path: deferredCodex, reviewer_id: 'codex-review', provider_family: 'codex' },
+    ],
+    risk: 'low',
+  });
+  const deferredVerified = verifyReadinessReceipt({
+    repo: deferredRepo,
+    receiptPath: deferredCreated.receipt_path,
+  });
+  fs.writeFileSync(path.join(deferredRepo, 'implementation.js'), 'export const migrated = true;\n');
+  fs.writeFileSync(path.join(deferredRepo, 'migration-test.tap'), 'ok 1 - migration rollback roundtrip\n');
+  const implementationArtifacts = [{ path: 'implementation.js' }];
+  const pending = evaluateDeferredAcceptance({
+    receipt: deferredVerified.receipt,
+    verifiedItems: [],
+    repo: deferredRepo,
+    implementationArtifacts,
+  });
+  assert.equal(pending.required_count, 2);
+  assert.deepEqual(pending.pending_finding_refs, [
+    { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
+    { finding_id: 'DOC-1', reviewer_id: 'codex-review' },
+  ]);
+  // Same display projection rule as the blockers: parallel, duplicated, never an
+  // identity — two obligations cannot be told apart by it.
+  assert.deepEqual(pending.pending_finding_ids, ['DOC-1', 'DOC-1']);
+  const claudeVerification = (findingReference) => ({
+    ...findingReference,
+    implementation_scope_sha256: pending.implementation_scope_sha256,
+    verification_results: [{
+      criterion: 'claude: migration dry-run passes',
+      status: 'passed',
+      evidence_path: 'migration-test.tap',
+      evidence_sha256: sha256(fs.readFileSync(path.join(deferredRepo, 'migration-test.tap'))),
+    }],
+  });
+  const acceptance = (verifiedItem) => evaluateDeferredAcceptance({
+    receipt: deferredVerified.receipt,
+    verifiedItems: [verifiedItem],
+    repo: deferredRepo,
+    implementationArtifacts,
+    implementationScopeSha256: pending.implementation_scope_sha256,
+  });
+  assert.throws(
+    () => acceptance(claudeVerification({ finding_id: 'DOC-1' })),
+    /reviewer-scoped finding_ref/,
+  );
+  // Nor is a differently scoped identity a reviewer-scoped reference: the ref is
+  // exactly the pair, so no other shape can normalize into this obligation.
+  assert.throws(
+    () => acceptance(claudeVerification({
+      finding_ref: { finding_id: 'DOC-1', reviewer_id: 'claude-opus', scope: 'legacy_global' },
+    })),
+    /reviewer-scoped finding_ref/,
+  );
+  // The same evidence under the exact reference is accepted, so both negatives
+  // fail on the reference shape and not on the evidence.
+  const claudeVerified = acceptance(claudeVerification({
+    finding_ref: { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
+  }));
+  assert.equal(claudeVerified.verified_count, 1);
+  assert.deepEqual(claudeVerified.verified_items[0].finding_ref, {
+    finding_id: 'DOC-1',
+    reviewer_id: 'claude-opus',
+  });
 });

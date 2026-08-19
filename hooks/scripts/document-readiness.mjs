@@ -318,22 +318,64 @@ function reportRecords(repo, reports) {
   }).sort((left, right) => utf8Compare(left.reviewer_id, right.reviewer_id));
 }
 
+// C-FINDING-IDENTITY (D17) — a local Artifact Gate id is the reviewer's own
+// namespace, never a global one. The authoritative carrier is `finding_ref`,
+// naming both the reviewer and the local id; every identity, lookup,
+// deduplication and gate-arithmetic operation keys on `canonicalStringify` of
+// that ref. A bare local id may be projected for display and may never be read
+// back by an authority, because two reviewers naming `DOC-1` are two findings.
+function findingRef(reviewerId, findingId) {
+  return { finding_id: findingId, reviewer_id: reviewerId };
+}
+
+function findingRefKey(ref) {
+  return canonicalStringify(ref);
+}
+
+// Deterministic order for every authoritative list: reviewer first, local id
+// second. Sorting the canonical ref string instead would order by local id,
+// which is precisely the global namespace this rule denies.
+function compareFindingRefs(left, right) {
+  return utf8Compare(left.reviewer_id, right.reviewer_id)
+    || utf8Compare(left.finding_id, right.finding_id);
+}
+
+const FINDING_REF_KEYS = canonicalStringify(['finding_id', 'reviewer_id']);
+
+function requireFindingRef(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || canonicalStringify(Object.keys(value).sort(utf8Compare)) !== FINDING_REF_KEYS
+      || typeof value.reviewer_id !== 'string' || value.reviewer_id.length === 0
+      || !FINDING_ID.test(value.finding_id || '')) {
+    throw new Error(`${label} requires a reviewer-scoped finding_ref`);
+  }
+  return findingRef(value.reviewer_id, value.finding_id);
+}
+
 function mergeGateFindings(reports) {
-  const byId = new Map();
+  const byRef = new Map();
   for (const report of reports) {
+    // No reviewer, no reference. An unattributed gate fails closed here rather
+    // than falling back to the bare local id further downstream.
+    if (typeof report?.reviewer_id !== 'string' || report.reviewer_id.length === 0) {
+      throw new Error('Artifact Gate evidence requires an admitted reviewer id');
+    }
     for (const finding of report.artifact_gate.findings) {
-      const prior = byId.get(finding.id);
+      const ref = findingRef(report.reviewer_id, finding.id);
+      const key = findingRefKey(ref);
+      const prior = byRef.get(key);
       if (prior && (
         prior.severity !== finding.severity
         || prior.stage !== finding.stage
         || canonicalStringify(prior.acceptance_evidence) !== canonicalStringify(finding.acceptance_evidence)
       )) {
-        throw new Error(`reviewers disagree on Artifact Gate finding ${finding.id}`);
+        throw new Error(`one reviewer contradicts itself on Artifact Gate finding ${key}`);
       }
-      if (!prior) byId.set(finding.id, finding);
+      if (!prior) byRef.set(key, { ...finding, finding_ref: ref });
     }
   }
-  return [...byId.values()].sort((left, right) => utf8Compare(left.id, right.id));
+  return [...byRef.values()]
+    .sort((left, right) => compareFindingRefs(left.finding_ref, right.finding_ref));
 }
 
 function documentVerdict(readiness) {
@@ -360,27 +402,30 @@ export function evaluateDocumentReadiness({
   const reviewerMinimum = Math.max(riskMinimum, requiredReviewers ?? riskMinimum);
   const familyMinimum = Math.max(riskMinimum, providerFamilyMinimum ?? riskMinimum);
   const findings = mergeGateFindings(reportEvidence);
-  const blockingFindingIds = findings
+  const blockingFindingRefs = findings
     .filter((finding) => ['critical', 'warning'].includes(finding.severity)
       && finding.stage === 'pre_implementation')
-    .map((finding) => finding.id);
+    .map((finding) => finding.finding_ref);
   const blockingReasons = [];
   if (reportEvidence.length < reviewerMinimum) blockingReasons.push('required_reviewers');
   const providerFamilies = new Set(reportEvidence.map((report) => report.provider_family)).size;
   if (providerFamilies < familyMinimum) blockingReasons.push('provider_families');
-  if (blockingFindingIds.length > 0) blockingReasons.push('pre_implementation_findings');
+  if (blockingFindingRefs.length > 0) blockingReasons.push('pre_implementation_findings');
   const deferredFindings = findings
     .filter((finding) => ['critical', 'warning'].includes(finding.severity)
       && finding.stage === 'implementation_verification')
     .map((finding) => ({
-      finding_id: finding.id,
+      finding_ref: finding.finding_ref,
       severity: finding.severity,
       acceptance_evidence: finding.acceptance_evidence,
     }));
   const status = blockingReasons.length === 0 ? 'READY_FOR_IMPLEMENTATION' : 'DOCUMENT_BLOCKED';
   const readiness = {
     status,
-    blocking_finding_ids: blockingFindingIds,
+    blocking_finding_refs: blockingFindingRefs,
+    // Display projection only: one entry per authoritative ref, same order, so a
+    // local id shared by two reviewers renders twice. Never read back.
+    blocking_finding_ids: blockingFindingRefs.map((ref) => ref.finding_id),
     blocking_reasons: blockingReasons,
     deferred_findings: deferredFindings,
     reviewer_count: reportEvidence.length,
@@ -639,22 +684,28 @@ export function evaluateDeferredAcceptance({
       && implementationScopeSha256 !== computedScopeSha256) {
     throw new Error('implementation scope SHA-256 is stale');
   }
-  const requiredById = new Map(document.deferred_findings.map((finding) => [
-    finding.finding_id,
+  const requiredRefs = document.deferred_findings.map(
+    (finding) => requireFindingRef(finding?.finding_ref, 'deferred readiness obligation'),
+  );
+  const requiredByRef = new Map(document.deferred_findings.map((finding, index) => [
+    findingRefKey(requiredRefs[index]),
     finding.acceptance_evidence,
   ]));
-  const verifiedById = new Map();
+  const verifiedByRef = new Map();
   for (const item of verifiedItems) {
-    if (!item || !FINDING_ID.test(item.finding_id || '')
+    if (!item || typeof item !== 'object' || Array.isArray(item)
         || item.implementation_scope_sha256 !== computedScopeSha256
         || !Array.isArray(item.verification_results)
         || item.verification_results.length === 0) {
       throw new Error('deferred acceptance verification item is malformed');
     }
-    if (verifiedById.has(item.finding_id)) {
-      throw new Error(`duplicate deferred verification: ${item.finding_id}`);
+    const itemRef = findingRefKey(
+      requireFindingRef(item.finding_ref, 'deferred acceptance verification item'),
+    );
+    if (verifiedByRef.has(itemRef)) {
+      throw new Error(`duplicate deferred verification: ${itemRef}`);
     }
-    const requiredEvidence = requiredById.get(item.finding_id);
+    const requiredEvidence = requiredByRef.get(itemRef);
     const resultByCriterion = new Map();
     for (const result of item.verification_results) {
       if (!result || typeof result.criterion !== 'string'
@@ -677,22 +728,25 @@ export function evaluateDeferredAcceptance({
     }
     if (!requiredEvidence
         || requiredEvidence.some((criterion) => !resultByCriterion.has(criterion))) {
-      throw new Error(`deferred acceptance evidence does not satisfy ${item.finding_id}`);
+      throw new Error(`deferred acceptance evidence does not satisfy ${itemRef}`);
     }
-    verifiedById.set(item.finding_id, [...resultByCriterion.values()]);
+    verifiedByRef.set(itemRef, [...resultByCriterion.values()]);
   }
-  const required = document.deferred_findings.map((finding) => finding.finding_id);
-  const pending = required.filter((findingId) => !verifiedById.has(findingId));
+  const pendingRefs = requiredRefs.filter((ref) => !verifiedByRef.has(findingRefKey(ref)));
   return {
-    complete: pending.length === 0,
-    required_count: required.length,
-    verified_count: required.length - pending.length,
-    pending_finding_ids: pending,
-    verified_items: required.filter((findingId) => verifiedById.has(findingId)).map((findingId) => ({
-      finding_id: findingId,
-      verification_results: verifiedById.get(findingId),
-      implementation_scope_sha256: computedScopeSha256,
-    })),
+    complete: pendingRefs.length === 0,
+    required_count: requiredRefs.length,
+    verified_count: requiredRefs.length - pendingRefs.length,
+    pending_finding_refs: pendingRefs,
+    // Display projection only, on the same terms as `blocking_finding_ids`.
+    pending_finding_ids: pendingRefs.map((ref) => ref.finding_id),
+    verified_items: requiredRefs
+      .filter((ref) => verifiedByRef.has(findingRefKey(ref)))
+      .map((ref) => ({
+        finding_ref: ref,
+        verification_results: verifiedByRef.get(findingRefKey(ref)),
+        implementation_scope_sha256: computedScopeSha256,
+      })),
     implementation_scope_sha256: computedScopeSha256,
   };
 }
