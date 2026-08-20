@@ -6,7 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const {
   cleanupGitFixtures,
   createGitFixture,
@@ -1646,4 +1647,429 @@ test('J2: a benign runClassifyArtifactsCli run still writes provenance through t
   assert.ok(fs.existsSync(provenancePath), 'provenance must still be written for a benign run');
   const written = JSON.parse(fs.readFileSync(provenancePath, 'utf8'));
   assert.equal(written.artifacts[0].path, 'notes.md');
+});
+
+// ---------------------------------------------------------------------------
+// D22 / T-PROBE-7 — the consumer half of the production carrier coordinator.
+//
+// `classify-artifacts.mjs` is real process B here: it acquires a fresh readable
+// endpoint from the live coordinator and re-detects nothing. The whole traversal
+// — standalone detection, classification, dry-run/explain, route persistence,
+// parseExecutionRoute and the Grok bridge — must observe exactly ONE `--version`
+// child and exactly ONE `--help` child in total. Counted, not bounded.
+// ---------------------------------------------------------------------------
+
+const coordinatorExecutable = path.join(root, 'hooks', 'scripts', 'grok-carrier-coordinator.mjs');
+const coordinatorLibUrl = pathToFileURL(
+  path.join(root, 'hooks', 'scripts', 'lib', 'grok-carrier-coordinator.mjs'),
+).href;
+const executionPlanUrl = pathToFileURL(
+  path.join(root, 'hooks', 'scripts', 'lib', 'execution-plan.mjs'),
+).href;
+
+const CARRIER_GROK_HELP = [
+  '--single', '--prompt-file', '--model', '--reasoning-effort',
+  '--permission-mode', '--sandbox', '--cwd', '--output-format', '--max-turns',
+  '--session-id', '--no-memory', '--no-subagents',
+].join(' ');
+
+const carrierCoordinatorChildren = new Set();
+test.after(() => {
+  for (const child of carrierCoordinatorChildren) {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+});
+
+function installStub(bin, dir, command, log, body) {
+  const source = [
+    "'use strict';",
+    "const fs = require('node:fs');",
+    `const log = ${JSON.stringify(log)};`,
+    'fs.appendFileSync(log, `${JSON.stringify(process.argv.slice(2))}\\n`);',
+    body,
+    '',
+  ].join('\n');
+  if (process.platform === 'win32') {
+    const program = path.join(dir, `${command}-probe.js`);
+    fs.writeFileSync(program, source);
+    fs.writeFileSync(path.join(bin, `${command}.cmd`), `@echo off\r\n"${process.execPath}" "${program}" %*\r\n`);
+    return;
+  }
+  const launcher = path.join(bin, command);
+  fs.writeFileSync(launcher, `#!/usr/bin/env node\n${source}`);
+  fs.chmodSync(launcher, 0o755);
+}
+
+function carrierGrokBin(prefix) {
+  const dir = temporaryDirectory(prefix);
+  const bin = path.join(dir, 'bin');
+  const log = path.join(dir, 'grok-calls.ndjson');
+  const detectionLog = path.join(dir, 'agy-calls.ndjson');
+  fs.mkdirSync(bin, { recursive: true });
+  installStub(bin, dir, 'grok', log, [
+    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
+    `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${CARRIER_GROK_HELP}\n`)});`,
+    'else process.exitCode = 2;',
+  ].join('\n'));
+  // The detection tracer. `detectEnvironment` probes `agy --version` and nothing
+  // downstream of it does — `probeCapabilities` only probes claude and codex —
+  // so this log counts environment DETECTIONS, one line per detection. It is the
+  // oracle for "consumers perform zero environment re-detection": the Grok child
+  // count alone cannot see a re-detection, because a consumer that re-detects
+  // does so without candidacy and spawns no Grok child at all.
+  installStub(bin, dir, 'agy', detectionLog, "process.stdout.write('agy 9.9.9\\n');");
+  return { dir, bin, log, detectionLog };
+}
+
+function compatibilityChildren(log) {
+  let text;
+  try { text = fs.readFileSync(log, 'utf8'); } catch { return []; }
+  return text.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function carrierEnvironment(bin) {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (/^(?:CODEX_|CLAUDE_|PLUGIN_ROOT$)/iu.test(key)) delete env[key];
+  }
+  env.PATH = [bin, path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter);
+  return env;
+}
+
+async function launchCoordinator(repo, env, mode) {
+  const child = spawn(process.execPath, [
+    coordinatorExecutable, '--cwd', repo, '--mode', mode,
+  ], { env, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+  carrierCoordinatorChildren.add(child);
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+  const exited = new Promise((done) => child.once('exit', (code) => done(code)));
+  const lines = await Promise.race([
+    new Promise((done, fail) => {
+      let text = '';
+      const onData = (chunk) => {
+        text += chunk.toString('utf8');
+        const split = text.split('\n');
+        if (split.length > 2) {
+          child.stdout.off('data', onData);
+          done(split.slice(0, 2));
+        }
+      };
+      child.stdout.on('data', onData);
+      child.stdout.once('error', fail);
+    }),
+    exited.then((code) => { throw new Error(`coordinator exited early (${code}): ${stderr}`); }),
+  ]);
+  return { child, exited, environment: JSON.parse(lines[0]), descriptor: JSON.parse(lines[1]) };
+}
+
+test('a production carrier fixture traversing detection, classification, dry-run/explain, route persistence, parseExecutionRoute and the Grok bridge observes exactly two compatibility children', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints; the Windows named-pipe polarity is covered by the release smoke job');
+    return;
+  }
+  const grok = carrierGrokBin('carrier-production-');
+  const repo = createGitFixture('carrier production repo');
+  fs.writeFileSync(path.join(repo, 'candidate.md'), '# Candidate design\n\nA short design note.\n');
+  const env = carrierEnvironment(grok.bin);
+  const { requestCoordinatorShutdown } = await import(coordinatorLibUrl);
+  const { parseExecutionRoute } = await import(executionPlanUrl);
+
+  // 1. Standalone detection — the coordinator owns and drains real process A.
+  const coordinator = await launchCoordinator(repo, env, 'dry-run');
+  assert.equal(coordinator.environment.grok_compatibility_verified, true);
+  assert.deepEqual(compatibilityChildren(grok.log), [['--version'], ['--help']]);
+
+  // 2. Classification + 3. route persistence, as real process B.
+  const planOut = path.join(repo, '.deep-review', 'tmp', 'routing-plan.json');
+  const classification = spawnSync(process.execPath, [
+    classifyCliPath,
+    '--repo', repo,
+    '--grok-coordinator-control', coordinator.descriptor.control_path,
+    '--emit-routing-plan',
+    '--format', 'json',
+  ], { env, encoding: 'utf8', shell: false });
+  assert.equal(classification.status, 0, classification.stderr);
+  const classified = JSON.parse(classification.stdout);
+  const identity = classified.routing_plan.carrier_identity;
+  assert.equal(identity.coordinator_id, coordinator.descriptor.coordinator_id);
+  assert.equal(identity.environment_sha256, coordinator.descriptor.environment_sha256);
+  // The persisted route carries the carrier identity WITH the canonical bytes.
+  const persisted = JSON.parse(fs.readFileSync(planOut, 'utf8'));
+  assert.deepEqual(persisted.carrier_identity, identity);
+  assert.equal(
+    createHash('sha256').update(persisted.environment_canonical).digest('hex'),
+    coordinator.descriptor.environment_sha256,
+  );
+  // A re-detecting classifier could not know a coordinator_id, and — decisively
+  // — could not reproduce that digest: an environment it detected for itself
+  // carries no candidacy-gated Grok fields at all, so its canonical bytes hash
+  // to something else. The scope it classified is the coordinator's scope.
+  assert.ok(
+    classified.artifacts.some((artifact) => artifact.path === 'candidate.md'),
+    'the carrier-supplied change scope must be the one classified',
+  );
+
+  // 4. Dry-run / explain, again as a real consumer process.
+  for (const extra of [[], ['--explain-routing']]) {
+    const dryRun = spawnSync(process.execPath, [
+      classifyCliPath,
+      '--repo', repo,
+      '--grok-coordinator-control', coordinator.descriptor.control_path,
+      ...extra,
+    ], { env, encoding: 'utf8', shell: false });
+    assert.equal(dryRun.status, 0, dryRun.stderr);
+    assert.ok(dryRun.stdout.length > 0);
+  }
+
+  // 5. parseExecutionRoute receives the complete environment's sealed evidence.
+  const route = {
+    protocol_version: '3.0',
+    reviewer_id: 'grok',
+    provider: 'grok',
+    adapter_id: 'grok-cli',
+    assignment_role: 'feasibility',
+    rubric_id: 'feasibility-v1',
+    wave: 1,
+    required: true,
+    selection_reason: 'carrier-supplied environment',
+    resolved: { model: 'grok', effort: 'medium' },
+    artifact_phase: 'implementation',
+    risk: 'low',
+    document_review_mode: 'full-readiness',
+    grok_compatibility_evidence: JSON.parse(persisted.environment_canonical).grok_compatibility_evidence,
+  };
+  assert.deepEqual(
+    parseExecutionRoute(route, 'grok').grokCompatibilityEvidence,
+    coordinator.environment.grok_compatibility_evidence,
+  );
+
+  // 6. The Grok bridge consumer: identity-only reuse, in a real process.
+  const bridge = path.join(fixtureRootFor(repo), 'bridge-consumer.mjs');
+  fs.writeFileSync(bridge, [
+    `import { acquireEnvironmentEndpoint } from ${JSON.stringify(coordinatorLibUrl)};`,
+    `import { parseExecutionRouteJson } from ${JSON.stringify(executionPlanUrl)};`,
+    'const [controlPath, routeJson] = process.argv.slice(2);',
+    "const acquired = await acquireEnvironmentEndpoint({ controlPath, consumerId: 'grok-bridge' });",
+    "const parsed = parseExecutionRouteJson(routeJson, 'grok');",
+    'process.stdout.write(`${JSON.stringify({',
+    '  coordinator_id: acquired.coordinator_id,',
+    '  environment_sha256: acquired.environment_sha256,',
+    '  bound: JSON.stringify(parsed.grokCompatibilityEvidence)',
+    '    === JSON.stringify(acquired.environment.grok_compatibility_evidence),',
+    '})}\\n`);',
+    '',
+  ].join('\n'));
+  const bridged = spawnSync(process.execPath, [bridge, coordinator.descriptor.control_path, JSON.stringify(route)], {
+    env, encoding: 'utf8', shell: false,
+  });
+  assert.equal(bridged.status, 0, bridged.stderr);
+  const bridgeResult = JSON.parse(bridged.stdout);
+  assert.equal(bridgeResult.coordinator_id, coordinator.descriptor.coordinator_id);
+  assert.equal(bridgeResult.bound, true);
+
+  // The counted total across the whole traversal.
+  const children = compatibilityChildren(grok.log);
+  assert.equal(children.filter((call) => call[0] === '--version').length, 1);
+  assert.equal(children.filter((call) => call[0] === '--help').length, 1);
+  assert.equal(children.length, 2);
+  // ZERO re-detection: one environment detection in total, by real process A.
+  assert.deepEqual(compatibilityChildren(grok.detectionLog), [['--version']]);
+
+  const terminated = await requestCoordinatorShutdown({
+    controlPath: coordinator.descriptor.control_path,
+    coordinatorId: coordinator.descriptor.coordinator_id,
+  });
+  assert.equal(terminated.consumers_served, 4);
+  assert.equal(await coordinator.exited, 0);
+});
+
+test('a classify-artifacts consumer fails closed when the coordinator is unconfirmed', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints');
+    return;
+  }
+  const grok = carrierGrokBin('carrier-unconfirmed-');
+  const repo = createGitFixture('carrier unconfirmed repo');
+  fs.writeFileSync(path.join(repo, 'candidate.md'), '# Candidate\n');
+  const env = carrierEnvironment(grok.bin);
+  const absent = path.join(temporaryDirectory('carrier-no-coordinator-'), 'c.sock');
+
+  const result = spawnSync(process.execPath, [
+    classifyCliPath, '--repo', repo, '--grok-coordinator-control', absent, '--format', 'json',
+  ], { env, encoding: 'utf8', shell: false });
+
+  assert.notEqual(result.status, 0);
+  assert.equal(compatibilityChildren(grok.log).length, 0, 'a failed acquisition must reach zero probe');
+});
+
+// ---------------------------------------------------------------------------
+// Replay-and-diff — accepting a supplied environment must change no existing
+// non-Grok classify-artifacts behaviour. The pinned pre-slice commit 1ab7496 is
+// replayed against the same input matrix as the live module and diffed.
+// ---------------------------------------------------------------------------
+
+const CLASSIFY_BASELINE_COMMIT = '1ab7496';
+
+function extractClassifyBaseline(commit, label, mutate = null) {
+  const dest = temporaryDirectory(`${label}-`);
+  const list = spawnSync('git', ['ls-tree', '-r', '--name-only', commit, '--', 'hooks/scripts'], {
+    cwd: root, encoding: 'utf8',
+  });
+  assert.equal(list.status, 0, list.stderr);
+  const paths = list.stdout.trim().split('\n').filter(Boolean);
+  assert.ok(paths.includes('hooks/scripts/classify-artifacts.mjs'));
+  for (const relPath of paths) {
+    const show = spawnSync('git', ['show', `${commit}:${relPath}`], { cwd: root, encoding: null });
+    assert.equal(show.status, 0, show.stderr && show.stderr.toString());
+    const destPath = path.join(dest, relPath);
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    fs.writeFileSync(destPath, mutate ? mutate(relPath, show.stdout) : show.stdout);
+  }
+  return dest;
+}
+
+function classifyMatrix() {
+  const pinnedCapabilities = [{
+    protocol_version: '2.0',
+    adapter_id: 'claude-cli',
+    provider: 'claude',
+    available: true,
+    roles: ['standard'],
+    model_selection: { supported: true, aliases: ['steady'], catalog_complete: false, transport: 'flag:--model' },
+    effort_selection: { supported: true, levels: ['low', 'medium'], transport: 'flag:--effort' },
+    structured_output: true,
+    read_only_enforcement: 'process-contract',
+  }];
+  const pinnedReviewers = [{
+    id: 'claude-opus', provider: 'claude', role: 'standard', adapter_id: 'claude-cli',
+  }];
+  const runtime = { capabilities: pinnedCapabilities, reviewers: pinnedReviewers };
+
+  const withTargets = (files) => {
+    const repo = temporaryDirectory('classify-replay-');
+    for (const [name, body] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(repo, name)), { recursive: true });
+      fs.writeFileSync(path.join(repo, name), body);
+    }
+    const list = path.join(repo, 'targets.z');
+    fs.writeFileSync(list, `${Object.keys(files).join('\0')}\0`);
+    return { repo, list };
+  };
+
+  const cases = [];
+  const plain = withTargets({ 'notes.md': 'plain review notes' });
+  cases.push({ argv: ['--repo', plain.repo, '--change-state', 'non-git', '--files-from0', plain.list], runtime });
+  const design = withTargets({ 'design.md': '# Design\n\n## Architecture\n\nA design document about the system architecture.\n' });
+  cases.push({ argv: ['--repo', design.repo, '--change-state', 'non-git', '--files-from0', design.list], runtime });
+  const code = withTargets({ 'src/index.js': 'export const value = 1;\n' });
+  cases.push({ argv: ['--repo', code.repo, '--change-state', 'non-git', '--files-from0', code.list], runtime });
+  const mixed = withTargets({
+    'plan.md': '# Plan\n\n- [ ] step one\n',
+    'src/app.ts': 'export const app = 1;\n',
+    'README.md': '# Readme\n',
+  });
+  cases.push({ argv: ['--repo', mixed.repo, '--change-state', 'non-git', '--files-from0', mixed.list], runtime });
+  cases.push({
+    argv: ['--repo', mixed.repo, '--change-state', 'non-git', '--files-from0', mixed.list, '--explain-routing'],
+    runtime,
+  });
+  cases.push({
+    argv: ['--repo', mixed.repo, '--change-state', 'non-git', '--files-from0', mixed.list, '--format', 'json'],
+    runtime,
+  });
+  const emitted = withTargets({ 'spec.md': '# Spec\n\nRequirements and acceptance criteria.\n' });
+  cases.push({
+    argv: [
+      '--repo', emitted.repo, '--change-state', 'non-git', '--files-from0', emitted.list,
+      '--emit-routing-plan', '--routing-plan-out', path.join(emitted.repo, 'plan.json'),
+    ],
+    runtime,
+  });
+  const empty = withTargets({ 'ignored.md': 'x' });
+  fs.writeFileSync(empty.list, '');
+  cases.push({ argv: ['--repo', empty.repo, '--change-state', 'non-git', '--files-from0', empty.list], runtime });
+  cases.push({ argv: ['--repo', plain.repo, '--change-state', 'non-git'], runtime });
+  cases.push({ argv: ['--repo', plain.repo, '--format', 'yaml'], runtime });
+  cases.push({ argv: ['--repo', plain.repo, '--not-a-flag', 'x'], runtime });
+  cases.push({ argv: ['--repo', plain.repo, '--overrides-json', '{ bad'], runtime });
+  cases.push({
+    argv: ['--repo', plain.repo, '--change-state', 'non-git', '--files-from0', plain.list, '--host-assertions-json', '{"nope":true}'],
+    runtime,
+  });
+  cases.push({
+    argv: ['--repo', plain.repo, '--change-state', 'non-git', '--files-from0', plain.list, '--adaptive-context-json', 'not json'],
+    runtime,
+  });
+  const git = createGitFixture('classify replay git');
+  fs.writeFileSync(path.join(git, 'untracked.md'), '# Untracked\n');
+  cases.push({
+    argv: ['--repo', git, '--change-state', 'untracked-only', '--review-base', 'HEAD', '--format', 'json'],
+    runtime,
+  });
+  cases.push({ argv: ['--repo', git, '--change-state', 'untracked-only', '--review-base', 'HEAD'], runtime });
+  return cases;
+}
+
+async function observeClassify(moduleUrl, testCase) {
+  const { runClassifyArtifactsCli } = await import(moduleUrl);
+  const originalWrite = process.stdout.write;
+  let printed = '';
+  process.stdout.write = (chunk) => { printed += chunk; return true; };
+  try {
+    const result = await runClassifyArtifactsCli(testCase.argv, {}, testCase.runtime);
+    // The wall-clock stamp is the one field that legitimately differs between
+    // two runs of the same input; normalise it in the object AND in the text
+    // the CLI printed, or the diff reports a divergence it did not observe.
+    return JSON.stringify({
+      ok: true,
+      printed: printed.replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/gu, '<stamp>'),
+      result,
+    }, (key, value) => (key === 'generated_at' ? '<stamp>' : value));
+  } catch (error) {
+    return JSON.stringify({ ok: false, message: error.message });
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+}
+
+test('accepting a supplied environment changes no non-Grok classify-artifacts behaviour (replay-and-diff vs 1ab7496)', async () => {
+  const baselineRoot = extractClassifyBaseline(CLASSIFY_BASELINE_COMMIT, 'classify-baseline');
+  const baselineUrl = pathToFileURL(
+    path.join(baselineRoot, 'hooks', 'scripts', 'classify-artifacts.mjs'),
+  ).href;
+
+  const matrix = classifyMatrix();
+  const before = [];
+  for (const testCase of matrix) before.push(await observeClassify(baselineUrl, testCase));
+  const after = [];
+  for (const testCase of classifyMatrix()) after.push(await observeClassify(scopeUrl, testCase));
+
+  const differences = matrix
+    .map((_, index) => index)
+    .filter((index) => before[index] !== after[index]);
+  assert.deepEqual(differences, [], `classify-artifacts diverged from the pinned baseline at matrix indices: ${differences.join(', ')}`);
+
+  // Positive control: a mutated baseline must be observed by exactly this
+  // comparison. A diff that cannot fail proves nothing.
+  const mutantRoot = extractClassifyBaseline(CLASSIFY_BASELINE_COMMIT, 'classify-mutant', (relPath, bytes) => (
+    relPath === 'hooks/scripts/classify-artifacts.mjs'
+      ? Buffer.from(bytes.toString('utf8').replace(
+        "'non-git workspace has no git change scope to classify. '",
+        "'MUTATED workspace has no git change scope to classify. '",
+      ), 'utf8')
+      : bytes
+  ));
+  const mutantUrl = pathToFileURL(
+    path.join(mutantRoot, 'hooks', 'scripts', 'classify-artifacts.mjs'),
+  ).href;
+  const mutated = [];
+  for (const testCase of classifyMatrix()) mutated.push(await observeClassify(mutantUrl, testCase));
+  const controlDifferences = matrix
+    .map((_, index) => index)
+    .filter((index) => before[index] !== mutated[index]);
+  assert.ok(controlDifferences.length > 0, 'positive control failed to detect a mutated baseline');
+
+  assert.equal(matrix.length, 16);
+  assert.equal(differences.length, 0);
 });

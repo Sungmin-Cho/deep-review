@@ -13,7 +13,9 @@ const {
 const { tmpdir } = require('node:os');
 const { delimiter, dirname, join, resolve } = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
+const net = require('node:net');
+const { createHash } = require('node:crypto');
 const {
   cleanupGitFixtures,
   createGitFixture,
@@ -551,4 +553,632 @@ test('Git fixture naming contract remains argv-safe', () => {
   git(repo, ['add', '--', '한 글.txt']);
   assert.equal(git(repo, ['-c', 'core.quotePath=false', 'ls-files', '--', '한 글.txt']), '한 글.txt');
   assert.equal(readFileSync(join(repo, '한 글.txt'), 'utf8'), 'one');
+});
+
+// ---------------------------------------------------------------------------
+// D22 / T-PROBE-7 — the production carrier coordinator.
+//
+// `hooks/scripts/grok-carrier-coordinator.mjs` is the shipped executable that
+// owns the private channel from process A (the standalone detector) to process
+// B (every downstream consumer). These fixtures spawn both halves as real OS
+// processes: a same-process fake cannot prove that a file descriptor, which is
+// process-local, was actually re-supplied as a fresh readable endpoint.
+// ---------------------------------------------------------------------------
+
+const coordinatorExecutablePath = join(
+  __dirname, '..', 'hooks', 'scripts', 'grok-carrier-coordinator.mjs',
+);
+const coordinatorLibUrl = pathToFileURL(join(
+  __dirname, '..', 'hooks', 'scripts', 'lib', 'grok-carrier-coordinator.mjs',
+)).href;
+const standaloneDetectorPath = join(__dirname, '..', 'hooks', 'scripts', 'detect-environment.mjs');
+
+const GROK_HELP_FLAGS = [
+  '--single', '--prompt-file', '--model', '--reasoning-effort',
+  '--permission-mode', '--sandbox', '--cwd', '--output-format', '--max-turns',
+  '--session-id', '--no-memory', '--no-subagents',
+].join(' ');
+
+const liveCoordinators = new Set();
+
+test.after(() => {
+  for (const child of liveCoordinators) {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+});
+
+function grokStubSource(log) {
+  return [
+    "'use strict';",
+    "const fs = require('node:fs');",
+    `const log = ${JSON.stringify(log)};`,
+    'fs.appendFileSync(log, `${JSON.stringify(process.argv.slice(2))}\\n`);',
+    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
+    `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${GROK_HELP_FLAGS}\n`)});`,
+    'else process.exitCode = 2;',
+    '',
+  ].join('\n');
+}
+
+function makeGrokBin(prefix) {
+  const root = makeTemporaryDirectory(prefix);
+  const bin = join(root, 'bin');
+  const log = join(root, 'grok-calls.ndjson');
+  mkdirSync(bin, { recursive: true });
+  const source = grokStubSource(log);
+  if (process.platform === 'win32') {
+    const program = join(root, 'grok-probe.js');
+    writeFileSync(program, source);
+    makeExecutable(join(bin, 'grok.cmd'), `@echo off\r\n"${process.execPath}" "${program}" %*\r\n`);
+  } else {
+    makeExecutable(join(bin, 'grok'), `#!/usr/bin/env node\n${source}`);
+  }
+  return { root, bin, log };
+}
+
+function grokChildren(log) {
+  let text;
+  try { text = readFileSync(log, 'utf8'); } catch { return []; }
+  return text.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function pathEnvironment(bin) {
+  return isolatedEnvironment({
+    PATH: [bin, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter),
+  });
+}
+
+// Real process B. It links the shipped owner module and nothing else, so what
+// it proves is the production acquisition path, not a test re-implementation.
+function writeConsumer(root, name) {
+  const consumer = join(root, name);
+  writeFileSync(consumer, [
+    `import { acquireEnvironmentEndpoint } from ${JSON.stringify(coordinatorLibUrl)};`,
+    'const [controlPath, consumerId] = process.argv.slice(2);',
+    'const acquired = await acquireEnvironmentEndpoint({ controlPath, consumerId });',
+    'process.stdout.write(`${JSON.stringify({',
+    '  coordinator_id: acquired.coordinator_id,',
+    '  generation: acquired.generation,',
+    '  environment_sha256: acquired.environment_sha256,',
+    '  environment: acquired.environment,',
+    "  canonical: acquired.canonical_bytes.toString('utf8'),",
+    '  endpoint: acquired.endpoint,',
+    '})}\\n`);',
+    '',
+  ].join('\n'));
+  return consumer;
+}
+
+function readLines(stream, count) {
+  return new Promise((resolvePromise, reject) => {
+    let text = '';
+    const onData = (chunk) => {
+      text += chunk.toString('utf8');
+      const lines = text.split('\n');
+      if (lines.length > count) {
+        stream.off('data', onData);
+        stream.off('error', reject);
+        resolvePromise(lines.slice(0, count));
+      }
+    };
+    stream.on('data', onData);
+    stream.once('error', reject);
+  });
+}
+
+async function startCoordinator(repo, env, mode = 'review') {
+  const child = spawn(process.execPath, [
+    coordinatorExecutablePath, '--cwd', repo, '--mode', mode,
+  ], { env, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+  liveCoordinators.add(child);
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+  const exited = new Promise((resolvePromise) => child.once('exit', (code) => resolvePromise(code)));
+  const lines = await Promise.race([
+    readLines(child.stdout, 2),
+    exited.then((code) => { throw new Error(`coordinator exited early (${code}): ${stderr}`); }),
+  ]);
+  return {
+    child,
+    exited,
+    environment: JSON.parse(lines[0]),
+    descriptor: JSON.parse(lines[1]),
+  };
+}
+
+test('the shipped coordinator executable drains one frame from real process A and serves the complete environment to real process B', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints; the Windows named-pipe polarity is covered by the release smoke job');
+    return;
+  }
+  const grok = makeGrokBin('coordinator-e2e-');
+  const repo = createGitFixture('coordinator repo');
+  writeFileSync(join(repo, 'candidate.md'), '# Candidate\n');
+  const env = pathEnvironment(grok.bin);
+  const {
+    COORDINATOR_ENVIRONMENT_FIELDS,
+    COORDINATOR_GROK_FIELDS,
+    requestCoordinatorShutdown,
+  } = await import(coordinatorLibUrl);
+
+  const coordinator = await startCoordinator(repo, env);
+
+  // Public stdout is the environment JSON; the private descriptor is a path,
+  // never fd 1, and the canonical frame never appears on stdout.
+  for (const field of [...COORDINATOR_ENVIRONMENT_FIELDS, ...COORDINATOR_GROK_FIELDS]) {
+    assert.ok(Object.hasOwn(coordinator.environment, field), `stdout environment is missing ${field}`);
+  }
+  assert.equal(coordinator.environment.grok_compatibility_verified, true);
+  assert.equal(typeof coordinator.descriptor.control_path, 'string');
+  assert.notEqual(coordinator.descriptor.control_path, '1');
+  assert.equal(coordinator.descriptor.mode, 'review');
+  assert.match(coordinator.descriptor.environment_sha256, /^[a-f0-9]{64}$/u);
+
+  // Exactly one frame was drained from real process A: the standalone detector
+  // spawned exactly the two compatibility children and no consumer adds more.
+  assert.deepEqual(grokChildren(grok.log), [['--version'], ['--help']]);
+
+  const consumer = writeConsumer(fixtureRootFor(repo), 'process-b.mjs');
+  const first = spawnSync(process.execPath, [
+    consumer, coordinator.descriptor.control_path, 'classify-artifacts',
+  ], { env, encoding: 'utf8', shell: false });
+  assert.equal(first.status, 0, first.stderr);
+  const acquired = JSON.parse(first.stdout);
+  assert.equal(acquired.coordinator_id, coordinator.descriptor.coordinator_id);
+  assert.equal(acquired.environment_sha256, coordinator.descriptor.environment_sha256);
+  assert.deepEqual(acquired.environment, coordinator.environment);
+  assert.equal(createHash('sha256').update(acquired.canonical).digest('hex'), acquired.environment_sha256);
+  assert.equal(acquired.environment.grok_compatibility_evidence.version, '1.0.4');
+
+  // A second consumer gets a FRESH readable endpoint, not the first one's.
+  const second = spawnSync(process.execPath, [
+    consumer, coordinator.descriptor.control_path, 'grok-bridge',
+  ], { env, encoding: 'utf8', shell: false });
+  assert.equal(second.status, 0, second.stderr);
+  const reacquired = JSON.parse(second.stdout);
+  assert.notEqual(reacquired.endpoint.path, acquired.endpoint.path, 'each consumer must get a fresh endpoint');
+  assert.equal(reacquired.canonical, acquired.canonical, 'consumers must not reserialize the canonical buffer');
+  assert.deepEqual(grokChildren(grok.log), [['--version'], ['--help']], 'consumers must re-detect nothing');
+
+  const terminated = await requestCoordinatorShutdown({
+    controlPath: coordinator.descriptor.control_path,
+    coordinatorId: coordinator.descriptor.coordinator_id,
+  });
+  assert.equal(terminated.coordinator_id, coordinator.descriptor.coordinator_id);
+  assert.equal(terminated.consumers_served, 2);
+  assert.equal(await coordinator.exited, 0);
+});
+
+test('every control-protocol message is observed on the private control path', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints');
+    return;
+  }
+  const grok = makeGrokBin('coordinator-protocol-');
+  const repo = createGitFixture('coordinator protocol repo');
+  const env = pathEnvironment(grok.bin);
+  const { decodeControlFrames, encodeControlFrame } = await import(coordinatorLibUrl);
+  const coordinator = await startCoordinator(repo, env, 'dry-run');
+
+  const observed = [];
+  const socket = net.connect(coordinator.descriptor.control_path);
+  // Bounded on purpose. A coordinator that never handshakes would otherwise
+  // leave this promise pending forever, and node:test has no default per-test
+  // timeout — the run would read as a hang instead of the failure it is.
+  await Promise.race([
+    new Promise((_resolvePromise, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`control protocol stalled after: ${observed.map((m) => m.message).join(', ') || '(nothing)'}`)),
+        5000,
+      );
+      timer.unref();
+    }),
+    new Promise((resolvePromise, reject) => {
+      let rest = Buffer.alloc(0);
+      socket.on('data', (chunk) => {
+        const decoded = decodeControlFrames(Buffer.concat([rest, chunk]));
+        rest = decoded.rest;
+        for (const message of decoded.messages) {
+          observed.push(message);
+          if (message.message === 'coordinator_ready') {
+            socket.write(encodeControlFrame({ message: 'acquire_endpoint', consumer_id: 'probe' }));
+          } else if (message.message === 'environment_endpoint') {
+            socket.write(encodeControlFrame({
+              message: 'shutdown', coordinator_id: coordinator.descriptor.coordinator_id,
+            }));
+          } else if (message.message === 'coordinator_terminated') {
+            socket.end();
+            resolvePromise();
+          }
+        }
+      });
+      socket.once('error', reject);
+    }),
+  ]);
+
+  assert.deepEqual(observed.map((message) => message.message), [
+    'coordinator_ready', 'environment_endpoint', 'coordinator_terminated',
+  ]);
+  const [ready, endpoint, terminated] = observed;
+  assert.deepEqual(
+    Object.keys(ready).sort(),
+    ['coordinator_id', 'generation', 'message', 'pid'],
+  );
+  assert.equal(ready.pid, coordinator.descriptor.pid);
+  assert.equal(endpoint.environment_sha256, coordinator.descriptor.environment_sha256);
+  assert.equal(typeof endpoint.endpoint.path, 'string');
+  assert.equal(terminated.consumers_served, 1);
+  assert.equal(await coordinator.exited, 0);
+});
+
+test('a consumer that never sees coordinator_ready fails closed', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints');
+    return;
+  }
+  const { acquireEnvironmentEndpoint, encodeControlFrame } = await import(coordinatorLibUrl);
+  const root = makeTemporaryDirectory('coordinator-unconfirmed-');
+
+  // Polarity 1 — an unconfirmed coordinator that pushes an endpoint anyway. The
+  // consumer must refuse it on the handshake, not on the endpoint being absent:
+  // the endpoint path below does not exist, so a consumer that skipped the
+  // handshake check would fail with ENOENT instead.
+  const forgedPath = join(root, 'forged.sock');
+  const forged = net.createServer((socket) => {
+    socket.write(encodeControlFrame({
+      message: 'environment_endpoint',
+      coordinator_id: 'forged',
+      environment_sha256: 'f'.repeat(64),
+      endpoint: { kind: 'private-stream', path: join(root, 'absent.sock'), generation: 1 },
+    }));
+  });
+  await new Promise((resolvePromise) => forged.listen(forgedPath, resolvePromise));
+  try {
+    await assert.rejects(
+      () => acquireEnvironmentEndpoint({ controlPath: forgedPath, consumerId: 'classify-artifacts', timeoutMs: 3000 }),
+      /coordinator_ready/u,
+    );
+  } finally {
+    await new Promise((resolvePromise) => forged.close(resolvePromise));
+  }
+
+  // Polarity 2 — a coordinator that never handshakes at all is unconfirmed too,
+  // and the deadline must say so rather than reporting a generic timeout.
+  const silentPath = join(root, 'silent.sock');
+  const silent = net.createServer(() => { /* accepts and says nothing */ });
+  await new Promise((resolvePromise) => silent.listen(silentPath, resolvePromise));
+  try {
+    await assert.rejects(
+      () => acquireEnvironmentEndpoint({ controlPath: silentPath, consumerId: 'classify-artifacts', timeoutMs: 300 }),
+      /coordinator_ready/u,
+    );
+  } finally {
+    await new Promise((resolvePromise) => silent.close(resolvePromise));
+  }
+});
+
+test('the coordinator drain fails closed across the negative frame matrix, with real process A', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints');
+    return;
+  }
+  const { createGrokCarrierCoordinator } = await import(coordinatorLibUrl);
+  const grok = makeGrokBin('coordinator-negative-');
+  const repo = createGitFixture('coordinator negative repo');
+  const env = pathEnvironment(grok.bin);
+  const root = makeTemporaryDirectory('coordinator-producers-');
+
+  // Each producer is a REAL spawned process standing in for process A: it emits
+  // the same public environment JSON on stdout and a deliberately broken
+  // private frame on the carrier descriptor.
+  const good = spawnSync(process.execPath, [
+    standaloneDetectorPath,
+    '--cwd', repo, '--format', 'json', '--grok-candidate', '--grok-carrier-fd', '3',
+  ], { env, encoding: null, shell: false, stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+  assert.equal(good.status, 0, good.stderr.toString('utf8'));
+  const goodEnvironment = good.stdout.toString('utf8').trim();
+  const goodFrame = good.output[3];
+
+  const producer = (name, body) => {
+    const filePath = join(root, `${name}.mjs`);
+    writeFileSync(filePath, [
+      "import { writeSync } from 'node:fs';",
+      `const environment = ${JSON.stringify(goodEnvironment)};`,
+      `const frame = Buffer.from(${JSON.stringify(goodFrame.toString('base64'))}, 'base64');`,
+      body,
+      'process.stdout.write(`${environment}\\n`);',
+      '',
+    ].join('\n'));
+    return filePath;
+  };
+
+  const matrix = [
+    ['missing', producer('missing', '// writes no frame at all'), /carrier frame is missing/u],
+    ['duplicate', producer('duplicate', 'writeSync(3, Buffer.concat([frame, frame]));'), /trailing bytes/u],
+    ['trailing', producer('trailing', "writeSync(3, Buffer.concat([frame, Buffer.from('\\0')]));"), /trailing bytes/u],
+    ['short', producer('short', 'writeSync(3, frame.subarray(0, frame.length - 8));'), /truncated/u],
+    ['malformed', producer('malformed', 'const bad = Buffer.from(frame); bad.fill(0x7b, 4, 12); writeSync(3, bad);'), /UTF-8 JSON|carrier/u],
+    ['over-limit', producer('overlimit', 'const head = Buffer.alloc(4); head.writeUInt32BE(65537, 0); writeSync(3, Buffer.concat([head, Buffer.alloc(70000)]));'), /maximum|exceed/u],
+    ['stdio-substituted', producer('stdio', 'process.stdout.write(frame);'), /carrier frame is missing/u],
+  ];
+
+  for (const [label, detectorPath, expected] of matrix) {
+    await assert.rejects(
+      () => createGrokCarrierCoordinator({
+        cwd: repo, mode: 'review', env, detectorPath, drainTimeoutMs: 5000,
+      }),
+      expected,
+      `${label} must fail closed`,
+    );
+  }
+
+  // The read deadline is mandatory: a producer that holds the descriptor open
+  // and never reaches EOF must not hang the coordinator.
+  // A pending top-level await would let Node exit (and so close the descriptor);
+  // a live timer is what actually holds the private channel open past EOF.
+  const stalled = producer('stalled', 'writeSync(3, frame); setTimeout(() => {}, 60000);');
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: repo, mode: 'review', env, detectorPath: stalled, drainTimeoutMs: 400,
+    }),
+    /deadline/u,
+  );
+
+  // Identity: a frame that is not the carrier the public environment reports.
+  const swapped = producer('swapped', [
+    "const parsed = JSON.parse(frame.subarray(4).toString('utf8'));",
+    "parsed.version_build = 'deadbeef';",
+    "const bytes = Buffer.from(JSON.stringify(parsed), 'utf8');",
+    'const head = Buffer.alloc(4); head.writeUInt32BE(bytes.length, 0);',
+    'writeSync(3, Buffer.concat([head, bytes]));',
+  ].join('\n'));
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: repo, mode: 'review', env, detectorPath: swapped, drainTimeoutMs: 5000,
+    }),
+    /carrier|identity|evidence/u,
+  );
+});
+
+test('the private descriptor is never fd 1/stdout and never a stdio substitute', async () => {
+  const { assertPrivateEndpoint } = await import(coordinatorLibUrl);
+
+  assert.doesNotThrow(() => assertPrivateEndpoint({
+    kind: 'private-stream', path: '/tmp/x/e1.sock', generation: 1,
+  }));
+  for (const endpoint of [
+    { kind: 'inherited-fd', fd: 0 },
+    { kind: 'inherited-fd', fd: 1 },
+    { kind: 'inherited-fd', fd: 2 },
+    { kind: 'private-stream', path: '/dev/stdout', generation: 1 },
+    { kind: 'private-stream', path: '/dev/stdin', generation: 1 },
+    { kind: 'private-stream', path: '/dev/stderr', generation: 1 },
+    { kind: 'private-stream', path: '/dev/fd/1', generation: 1 },
+    { kind: 'private-stream', path: 'CONOUT$', generation: 1 },
+  ]) {
+    assert.throws(() => assertPrivateEndpoint(endpoint), /stdio|descriptor/iu, JSON.stringify(endpoint));
+  }
+});
+
+test('the private descriptor check rejects every console/null device spelling, on any platform', async () => {
+  const { assertPrivateEndpoint } = await import(coordinatorLibUrl);
+
+  // The accepted control must survive every mutation below: a blanket refusal
+  // must never make this assertion pass.
+  assert.doesNotThrow(() => assertPrivateEndpoint({
+    kind: 'private-stream', path: '/tmp/deep-review/carrier-1.sock', generation: 1,
+  }));
+
+  for (const path of [
+    'CON',                 // bare Windows console device
+    'con',                 // case-insensitive bare form
+    'CON:',                // trailing DOS device suffix
+    '\\\\.\\CON',          // Win32 device-namespace prefix
+    '\\\\.\\CONOUT$',
+    '\\\\.\\CONIN$',
+    '\\\\?\\CON',          // alternate device-namespace prefix
+    'NUL',                 // the null device
+    'conout$',             // lowercase bare form (pre-existing coverage, kept)
+    '/DEV/STDOUT',          // case-insensitive POSIX form (macOS APFS default)
+  ]) {
+    assert.throws(
+      () => assertPrivateEndpoint({ kind: 'private-stream', path, generation: 1 }),
+      /stdio|descriptor/iu,
+      `expected ${JSON.stringify(path)} to be refused as a stdio/console/null substitute`,
+    );
+  }
+});
+
+test('every field of the complete environment payload is required, by name', async () => {
+  const {
+    COORDINATOR_ENVIRONMENT_FIELDS,
+    COORDINATOR_GROK_FIELDS,
+    validateCoordinatorEnvironment,
+  } = await import(coordinatorLibUrl);
+
+  assert.deepEqual([...COORDINATOR_ENVIRONMENT_FIELDS], [
+    'runtime_host', 'plugin_root', 'node_available', 'node_path',
+    'claude_cli', 'claude_cli_path', 'codex_plugin', 'codex_companion_path',
+    'codex_cli', 'codex_cli_path', 'codex_installed', 'agy_cli', 'agy_cli_path',
+    'agy_version', 'is_git', 'has_commits', 'change_state', 'staged', 'unstaged',
+    'untracked', 'has_untracked', 'review_base', 'review_base_method', 'is_shallow',
+  ]);
+  assert.deepEqual([...COORDINATOR_GROK_FIELDS], [
+    'grok_cli', 'grok_cli_path', 'grok_version',
+    'grok_compatibility_verified', 'grok_compatibility_evidence',
+  ]);
+
+  const complete = completeEnvironmentFixture();
+  assert.doesNotThrow(() => validateCoordinatorEnvironment(complete));
+
+  for (const field of [...COORDINATOR_ENVIRONMENT_FIELDS, ...COORDINATOR_GROK_FIELDS]) {
+    const dropped = { ...complete };
+    delete dropped[field];
+    assert.throws(
+      () => validateCoordinatorEnvironment(dropped),
+      new RegExp(field, 'u'),
+      `dropping ${field} must be rejected by name`,
+    );
+  }
+});
+
+function completeEnvironmentFixture() {
+  return {
+    runtime_host: 'claude-code',
+    plugin_root: '/plugin',
+    node_available: true,
+    node_path: '/node',
+    claude_cli: false,
+    claude_cli_path: '',
+    codex_plugin: false,
+    codex_companion_path: '',
+    codex_cli: false,
+    codex_cli_path: '',
+    codex_installed: false,
+    agy_cli: false,
+    agy_cli_path: '',
+    agy_version: '',
+    is_git: true,
+    has_commits: true,
+    change_state: 'clean',
+    staged: 0,
+    unstaged: 0,
+    untracked: 0,
+    has_untracked: false,
+    review_base: 'abc',
+    review_base_method: 'merge-base',
+    is_shallow: false,
+    grok_cli: false,
+    grok_cli_path: '',
+    grok_version: '',
+    grok_compatibility_verified: false,
+    grok_compatibility_evidence: null,
+  };
+}
+
+// A fake coordinator whose control protocol is well-formed but whose private
+// endpoint serves bytes of the test's choosing. It is the only way to reach the
+// consumer-side EOF/exactly-one-frame rules, which the producer-side drain
+// cannot exercise.
+async function fakeCoordinator(root, encodeControlFrame, id, sha256, endpointBytes) {
+  const controlPath = join(root, `c-${id}.sock`);
+  const endpointPath = join(root, `e-${id}.sock`);
+  const endpointServer = net.createServer((socket) => socket.end(endpointBytes));
+  await new Promise((resolvePromise) => endpointServer.listen(endpointPath, resolvePromise));
+  const controlServer = net.createServer((socket) => {
+    socket.write(encodeControlFrame({
+      message: 'coordinator_ready', coordinator_id: 'fake-id', generation: 1, pid: process.pid,
+    }));
+    socket.on('data', () => {
+      socket.write(encodeControlFrame({
+        message: 'environment_endpoint',
+        coordinator_id: 'fake-id',
+        environment_sha256: sha256,
+        endpoint: { kind: 'private-stream', path: endpointPath, generation: 1 },
+      }));
+    });
+  });
+  await new Promise((resolvePromise) => controlServer.listen(controlPath, resolvePromise));
+  return {
+    controlPath,
+    close: async () => {
+      await new Promise((resolvePromise) => endpointServer.close(resolvePromise));
+      await new Promise((resolvePromise) => controlServer.close(resolvePromise));
+    },
+  };
+}
+
+test('a private endpoint serving anything but exactly one frame before EOF is refused', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints');
+    return;
+  }
+  const {
+    acquireEnvironmentEndpoint,
+    canonicalEnvironmentBytes,
+    encodeControlFrame,
+  } = await import(coordinatorLibUrl);
+  const root = makeTemporaryDirectory('coordinator-endpoint-frames-');
+  const canonical = canonicalEnvironmentBytes(completeEnvironmentFixture());
+  const sha = createHash('sha256').update(canonical).digest('hex');
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(canonical.length, 0);
+  const frame = Buffer.concat([head, canonical]);
+
+  for (const [label, bytes, expected] of [
+    ['duplicate', Buffer.concat([frame, frame]), /trailing bytes/u],
+    ['trailing', Buffer.concat([frame, Buffer.from('\0')]), /trailing bytes/u],
+    ['short', frame.subarray(0, frame.length - 8), /truncated/u],
+    ['missing', Buffer.alloc(0), /carrier frame is missing/u],
+  ]) {
+    // The digest it advertises is the correct one: every polarity here must be
+    // refused on the frame, before the identity check could excuse it.
+    const fake = await fakeCoordinator(root, encodeControlFrame, label, sha, bytes);
+    try {
+      await assert.rejects(
+        () => acquireEnvironmentEndpoint({
+          controlPath: fake.controlPath, consumerId: 'classify-artifacts', timeoutMs: 3000,
+        }),
+        expected,
+        `${label} must be refused before the payload is used`,
+      );
+    } finally {
+      // Unconditional: a listening server left behind by a failed assertion
+      // holds the whole runner open, which reads as a hang rather than a failure.
+      await fake.close();
+    }
+  }
+});
+
+test('a stale environment_sha256 is rejected against the canonical bytes it claims', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints');
+    return;
+  }
+  const {
+    acquireEnvironmentEndpoint,
+    canonicalEnvironmentBytes,
+    encodeControlFrame,
+  } = await import(coordinatorLibUrl);
+  const root = makeTemporaryDirectory('coordinator-stale-');
+  const controlPath = join(root, 'c.sock');
+  const endpointPath = join(root, 'e.sock');
+  const environment = completeEnvironmentFixture();
+  const canonical = canonicalEnvironmentBytes(environment);
+  // The environment changed under a retained identity: the coordinator answers
+  // with the digest of a PRIOR environment.
+  const staleSha = createHash('sha256')
+    .update(canonicalEnvironmentBytes({ ...environment, change_state: 'unstaged' }))
+    .digest('hex');
+
+  const endpointServer = net.createServer((socket) => {
+    const head = Buffer.alloc(4);
+    head.writeUInt32BE(canonical.length, 0);
+    socket.end(Buffer.concat([head, canonical]));
+  });
+  await new Promise((resolvePromise) => endpointServer.listen(endpointPath, resolvePromise));
+  const controlServer = net.createServer((socket) => {
+    socket.write(encodeControlFrame({
+      message: 'coordinator_ready', coordinator_id: 'stale-id', generation: 1, pid: process.pid,
+    }));
+    socket.on('data', () => {
+      socket.write(encodeControlFrame({
+        message: 'environment_endpoint',
+        coordinator_id: 'stale-id',
+        environment_sha256: staleSha,
+        endpoint: { kind: 'private-stream', path: endpointPath, generation: 1 },
+      }));
+    });
+  });
+  await new Promise((resolvePromise) => controlServer.listen(controlPath, resolvePromise));
+
+  try {
+    await assert.rejects(
+      () => acquireEnvironmentEndpoint({ controlPath, consumerId: 'classify-artifacts', timeoutMs: 3000 }),
+      /environment_sha256/u,
+    );
+  } finally {
+    await new Promise((resolvePromise) => endpointServer.close(resolvePromise));
+    await new Promise((resolvePromise) => controlServer.close(resolvePromise));
+  }
 });

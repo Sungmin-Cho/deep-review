@@ -25,6 +25,12 @@ import {
   selectSemanticAdapter,
 } from './lib/semantic-classify.mjs';
 import { detectEnvironment } from './detect-environment.mjs';
+// D22: a carrier consumer. It only ACQUIRES from a live coordinator — it never
+// creates one and never spawns a producer, so the dry-run boundary above holds.
+import {
+  acquireEnvironmentEndpoint,
+  bindRouteCarrierIdentity,
+} from './lib/grok-carrier-coordinator.mjs';
 import { CLASSIFICATION_VERSION } from './lib/target-taxonomy.mjs';
 import {
   buildCapabilities,
@@ -262,6 +268,7 @@ const VALUE_FLAGS = {
   '--format': 'format',
   '--files-from0': 'filesFrom',
   '--routing-plan-out': 'routingPlanOut',
+  '--grok-coordinator-control': 'grokCoordinatorControl',
   '--host-assertions-json': 'hostAssertionsJson',
   '--adaptive-context-json': 'adaptiveContextJson',
 };
@@ -653,6 +660,20 @@ export async function runClassifyArtifactsCli(argv = process.argv.slice(2), env 
 
   let { changeState, reviewBase } = options;
   let environment;
+  // D22: with a live coordinator the complete detected environment arrives over
+  // a fresh private endpoint, and this process re-detects NOTHING — no
+  // detectEnvironment call, no `--version` or `--help` child of its own. The
+  // canonical buffer is reused byte-for-byte, never reserialized.
+  let carrier = null;
+  if (options.grokCoordinatorControl !== undefined) {
+    carrier = await acquireEnvironmentEndpoint({
+      controlPath: options.grokCoordinatorControl,
+      consumerId: 'classify-artifacts',
+    });
+    environment = carrier.environment;
+    changeState = changeState || environment.change_state;
+    reviewBase = reviewBase ?? environment.review_base;
+  }
   if (!changeState) {
     environment = await detectEnvironment({ cwd: repo, env });
     changeState = environment.change_state;
@@ -826,6 +847,9 @@ export async function runClassifyArtifactsCli(argv = process.argv.slice(2), env 
   routingPlan.explicit_overrides = explicit;
   routingPlan.apply_automatic = policy.features?.automatic_model_routing !== false
     && policy.features?.routing_shadow_mode !== true;
+  // Route persistence stores the carrier identity WITH the canonical bytes, so
+  // a persisted route stays bound to the coordinator that produced it.
+  if (carrier) bindRouteCarrierIdentity(routingPlan, carrier);
   result = {
     ...result,
     routing_plan: routingPlan,
