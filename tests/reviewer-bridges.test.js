@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -15,10 +15,15 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { delimiter, dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
+import {
+  cleanupGitFixtures,
+  createGitFixture,
+  fixtureRootFor,
+} from './helpers/git-fixture.js';
 import { writeContainedFile } from '../hooks/scripts/lib/runtime-context.mjs';
 import { runClaudeReviewer } from '../hooks/scripts/run-claude-reviewer.mjs';
 import { runCodexReviewer } from '../hooks/scripts/run-codex-reviewer.mjs';
@@ -1260,4 +1265,508 @@ test('Codex bridge CLI exits nonzero for adapter failure and preserves genuine c
       );
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// SLICE-010a / T-PROBE-8 — the PUBLIC half of D22.
+//
+// SLICE-003d already proved the non-public traversal (standalone detection,
+// classification, dry-run/explain, route persistence, parseExecutionRoute and a
+// bridge consumer) observes exactly two compatibility children. What that
+// fixture could not prove is that the *loaded instruction entrypoints* enter
+// through the coordinator — they did not exist yet. They do now, so the argv
+// below is READ OUT OF THE SHIPPED INSTRUCTIONS rather than restated here: an
+// instruction that drifts away from the shipped executable fails this test
+// instead of quietly leaving the public path un-coordinated.
+// ---------------------------------------------------------------------------
+
+const coordinatorExecutable = join(pluginRoot, 'hooks', 'scripts', 'grok-carrier-coordinator.mjs');
+const classifyExecutable = join(pluginRoot, 'hooks', 'scripts', 'classify-artifacts.mjs');
+const standaloneDetector = join(pluginRoot, 'hooks', 'scripts', 'detect-environment.mjs');
+const grokBridgeExecutable = join(pluginRoot, 'hooks', 'scripts', 'run-grok-reviewer.mjs');
+const coordinatorLibraryUrl = pathToFileURL(
+  join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-carrier-coordinator.mjs'),
+).href;
+const executionPlanModuleUrl = pathToFileURL(
+  join(pluginRoot, 'hooks', 'scripts', 'lib', 'execution-plan.mjs'),
+).href;
+
+const GROK_HELP_FLAGS = [
+  '--single', '--prompt-file', '--model', '--reasoning-effort',
+  '--permission-mode', '--sandbox', '--cwd', '--output-format', '--max-turns',
+  '--session-id', '--no-memory', '--no-subagents',
+].join(' ');
+
+const liveCoordinatorChildren = new Set();
+test.after(() => {
+  cleanupGitFixtures();
+  for (const child of liveCoordinatorChildren) {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+});
+
+function instructionText(relativePath) {
+  return readFileSync(join(pluginRoot, relativePath), 'utf8');
+}
+
+// The shipped instruction is the source of the argv. `{plugin_root}` is a
+// documentation placeholder an agent substitutes, so it is substituted here too.
+function coordinatorInvocationFromInstructions(relativePath, mode) {
+  const line = instructionText(relativePath)
+    .split('\n')
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith('node ')
+      && entry.includes('grok-carrier-coordinator.mjs')
+      && entry.includes(`--mode ${mode}`));
+  assert.ok(line, `${relativePath} must carry a runnable --mode ${mode} coordinator invocation`);
+  const tokens = line.split(/\s+/u).slice(1);
+  assert.equal(
+    tokens[0].replace('{plugin_root}', pluginRoot),
+    coordinatorExecutable,
+    `${relativePath} must invoke the shipped coordinator executable`,
+  );
+  return tokens.map((token) => token.replace('{plugin_root}', pluginRoot));
+}
+
+function grokProbeBin(prefix) {
+  const dir = workspace(prefix);
+  const bin = join(dir, 'bin');
+  const grokLog = join(dir, 'grok-children.ndjson');
+  const detectionLog = join(dir, 'agy-children.ndjson');
+  mkdirSync(bin, { recursive: true });
+  const writeStub = (command, log, body) => {
+    const source = [
+      "'use strict';",
+      "const fs = require('node:fs');",
+      `fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
+      body,
+      '',
+    ].join('\n');
+    if (process.platform === 'win32') {
+      const program = join(dir, `${command}-probe.js`);
+      writeFileSync(program, source);
+      writeFileSync(join(bin, `${command}.cmd`), `@echo off\r\n"${process.execPath}" "${program}" %*\r\n`);
+      return;
+    }
+    const launcher = join(bin, command);
+    writeFileSync(launcher, `#!/usr/bin/env node\n${source}`);
+    chmodSync(launcher, 0o755);
+  };
+  writeStub('grok', grokLog, [
+    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
+    `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${GROK_HELP_FLAGS}\n`)});`,
+    'else process.exitCode = 2;',
+  ].join('\n'));
+  // `detectEnvironment` probes `agy --version`; nothing downstream of it does.
+  // One line here is one environment DETECTION, which is the only way to see a
+  // consumer that re-detects without candidacy and so spawns no Grok child.
+  writeStub('agy', detectionLog, "process.stdout.write('agy 9.9.9\\n');");
+  return { dir, bin, grokLog, detectionLog };
+}
+
+function childArgvRows(log) {
+  if (!existsSync(log)) return [];
+  return readFileSync(log, 'utf8').trim().split('\n').filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function probeEnvironment(bin) {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (/^(?:CODEX_|CLAUDE_|PLUGIN_ROOT$)/iu.test(key)) delete env[key];
+  }
+  env.PATH = [bin, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter);
+  return env;
+}
+
+function readStdoutLines(stream, count) {
+  return new Promise((resolvePromise, reject) => {
+    let text = '';
+    const onData = (chunk) => {
+      text += chunk.toString('utf8');
+      const lines = text.split('\n');
+      if (lines.length > count) {
+        stream.off('data', onData);
+        stream.off('error', reject);
+        resolvePromise(lines.slice(0, count));
+      }
+    };
+    stream.on('data', onData);
+    stream.once('error', reject);
+  });
+}
+
+async function startCoordinatorFromInstructions(relativePath, mode, repo, env) {
+  const argv = coordinatorInvocationFromInstructions(relativePath, mode)
+    .map((token) => (token === 'PROJECT_ROOT' ? repo : token));
+  const child = spawn(process.execPath, argv, { env, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+  liveCoordinatorChildren.add(child);
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+  const exited = new Promise((done) => child.once('exit', (code) => done(code)));
+  const lines = await Promise.race([
+    readStdoutLines(child.stdout, 2),
+    exited.then((code) => { throw new Error(`coordinator exited early (${code}): ${stderr}`); }),
+  ]);
+  return { argv, child, exited, environment: JSON.parse(lines[0]), descriptor: JSON.parse(lines[1]) };
+}
+
+test('T-PROBE-8: the public normal-review and dry-run/explain entrypoints cannot bypass the coordinator, re-detect, or outlive it', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints; the Windows named-pipe polarity is covered by the release smoke job');
+    return;
+  }
+  const grok = grokProbeBin('grok-public-entrypoints-');
+  const repo = createGitFixture('public entrypoint repo');
+  writeFileSync(join(repo, 'candidate.md'), '# Candidate design\n\nA short design note.\n');
+  const env = probeEnvironment(grok.bin);
+  const { requestCoordinatorShutdown } = await import(coordinatorLibraryUrl);
+  const { parseExecutionRoute } = await import(executionPlanModuleUrl);
+
+  // 1. Public NORMAL REVIEW enters through the coordinator named at
+  //    review-execution.md's step-0 invocation. Process A runs inside it.
+  const review = await startCoordinatorFromInstructions(
+    'skills/deep-review-workflow/references/review-execution.md', 'review', repo, env,
+  );
+  assert.equal(review.environment.grok_compatibility_verified, true);
+  assert.deepEqual(childArgvRows(grok.grokLog), [['--version'], ['--help']]);
+
+  // 2. Classification + route persistence, as a real consumer process, using
+  //    exactly the coordinator flag the shipped instruction tells it to pass.
+  assert.match(
+    instructionText('skills/deep-review-workflow/references/review-execution.md'),
+    /--grok-coordinator-control/u,
+  );
+  const planOut = join(repo, '.deep-review', 'tmp', 'routing-plan.json');
+  const classification = spawnSync(process.execPath, [
+    classifyExecutable,
+    '--repo', repo,
+    '--grok-coordinator-control', review.descriptor.control_path,
+    '--emit-routing-plan',
+    '--format', 'json',
+  ], { env, encoding: 'utf8', shell: false });
+  assert.equal(classification.status, 0, classification.stderr);
+  const classified = JSON.parse(classification.stdout);
+  assert.equal(classified.routing_plan.carrier_identity.coordinator_id, review.descriptor.coordinator_id);
+  assert.equal(
+    classified.routing_plan.carrier_identity.environment_sha256,
+    review.descriptor.environment_sha256,
+  );
+  const persisted = JSON.parse(readFileSync(planOut, 'utf8'));
+  assert.equal(
+    createHash('sha256').update(persisted.environment_canonical).digest('hex'),
+    review.descriptor.environment_sha256,
+  );
+
+  // 3. parseExecutionRoute reuses the same sealed evidence, byte for byte.
+  const route = {
+    protocol_version: '3.0',
+    reviewer_id: 'grok',
+    provider: 'grok',
+    adapter_id: 'grok-cli',
+    assignment_role: 'feasibility',
+    rubric_id: 'feasibility-v1',
+    wave: 1,
+    required: true,
+    selection_reason: 'public entrypoint traversal',
+    resolved: { model: 'grok', effort: 'medium' },
+    artifact_phase: 'implementation',
+    risk: 'low',
+    document_review_mode: 'full-readiness',
+    grok_compatibility_evidence: JSON.parse(persisted.environment_canonical).grok_compatibility_evidence,
+  };
+  assert.deepEqual(
+    parseExecutionRoute(route, 'grok').grokCompatibilityEvidence,
+    review.environment.grok_compatibility_evidence,
+  );
+
+  // 4. The Grok bridge consumer, as a real process: identity-only reuse.
+  const bridgeConsumer = join(fixtureRootFor(repo), 'public-bridge-consumer.mjs');
+  writeFileSync(bridgeConsumer, [
+    `import { acquireEnvironmentEndpoint } from ${JSON.stringify(coordinatorLibraryUrl)};`,
+    `import { parseExecutionRouteJson } from ${JSON.stringify(executionPlanModuleUrl)};`,
+    'const [controlPath, routeJson] = process.argv.slice(2);',
+    "const acquired = await acquireEnvironmentEndpoint({ controlPath, consumerId: 'grok-bridge' });",
+    "const parsed = parseExecutionRouteJson(routeJson, 'grok');",
+    'process.stdout.write(`${JSON.stringify({',
+    '  coordinator_id: acquired.coordinator_id,',
+    '  bound: JSON.stringify(parsed.grokCompatibilityEvidence)',
+    '    === JSON.stringify(acquired.environment.grok_compatibility_evidence),',
+    '})}\\n`);',
+    '',
+  ].join('\n'));
+  const bridged = spawnSync(process.execPath, [
+    bridgeConsumer, review.descriptor.control_path, JSON.stringify(route),
+  ], { env, encoding: 'utf8', shell: false });
+  assert.equal(bridged.status, 0, bridged.stderr);
+  assert.equal(JSON.parse(bridged.stdout).coordinator_id, review.descriptor.coordinator_id);
+  assert.equal(JSON.parse(bridged.stdout).bound, true);
+
+  // 5. Public DRY-RUN / EXPLAIN, from the public skill's own invocation.
+  const dryRun = await startCoordinatorFromInstructions('skills/deep-review/SKILL.md', 'dry-run', repo, env);
+  assert.match(instructionText('skills/deep-review/SKILL.md'), /--grok-coordinator-control/u);
+  for (const extra of [[], ['--explain-routing']]) {
+    const explained = spawnSync(process.execPath, [
+      classifyExecutable,
+      '--repo', repo,
+      '--grok-coordinator-control', dryRun.descriptor.control_path,
+      ...extra,
+    ], { env, encoding: 'utf8', shell: false });
+    assert.equal(explained.status, 0, explained.stderr);
+    assert.ok(explained.stdout.length > 0);
+  }
+
+  // 6. The counted total across BOTH public entrypoints. Each entrypoint owns
+  //    one coordinator, so each drains its own process A: two detections and
+  //    four compatibility children in total, one `--version` and one `--help`
+  //    per entrypoint. Counted, not bounded.
+  const children = childArgvRows(grok.grokLog);
+  assert.equal(children.filter((call) => call[0] === '--version').length, 2);
+  assert.equal(children.filter((call) => call[0] === '--help').length, 2);
+  assert.equal(children.length, 4);
+  assert.deepEqual(childArgvRows(grok.detectionLog), [['--version'], ['--version']]);
+
+  // 7. Neither public path outlives its coordinator: once review's coordinator
+  //    is shut down, a real consumer process fails closed rather than falling
+  //    back to detecting for itself.
+  const terminated = await requestCoordinatorShutdown({
+    controlPath: review.descriptor.control_path,
+    coordinatorId: review.descriptor.coordinator_id,
+  });
+  assert.equal(await review.exited, 0);
+  assert.ok(terminated.consumers_served >= 2);
+
+  const afterShutdown = spawnSync(process.execPath, [
+    classifyExecutable,
+    '--repo', repo,
+    '--grok-coordinator-control', review.descriptor.control_path,
+    '--format', 'json',
+  ], { env, encoding: 'utf8', shell: false });
+  assert.notEqual(afterShutdown.status, 0, 'a dead coordinator must not be survivable');
+  assert.equal(childArgvRows(grok.grokLog).length, 4, 'a failed-closed consumer must not re-probe');
+  assert.equal(childArgvRows(grok.detectionLog).length, 2, 'a failed-closed consumer must not re-detect');
+
+  await requestCoordinatorShutdown({
+    controlPath: dryRun.descriptor.control_path,
+    coordinatorId: dryRun.descriptor.coordinator_id,
+  });
+  assert.equal(await dryRun.exited, 0);
+});
+
+test('T-PROBE-8: the negative frame matrix fails closed with a real process A and a real process B', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX private-socket endpoints');
+    return;
+  }
+  const grok = grokProbeBin('grok-public-negative-');
+  const repo = createGitFixture('public negative repo');
+  writeFileSync(join(repo, 'candidate.md'), '# Candidate\n');
+  const env = probeEnvironment(grok.bin);
+  const producerRoot = workspace('grok-public-producers-');
+
+  // The good frame, produced by the real standalone detector — real process A.
+  const good = spawnSync(process.execPath, [
+    standaloneDetector,
+    '--cwd', repo, '--format', 'json', '--grok-candidate', '--grok-carrier-fd', '3',
+  ], { env, encoding: null, shell: false, stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+  assert.equal(good.status, 0, good.stderr.toString('utf8'));
+  const goodEnvironment = good.stdout.toString('utf8').trim();
+  const goodFrame = good.output[3];
+
+  const producer = (name, body) => {
+    const filePath = join(producerRoot, `${name}.mjs`);
+    writeFileSync(filePath, [
+      "import { writeSync } from 'node:fs';",
+      `const environment = ${JSON.stringify(goodEnvironment)};`,
+      `const frame = Buffer.from(${JSON.stringify(goodFrame.toString('base64'))}, 'base64');`,
+      body,
+      'process.stdout.write(`${environment}\\n`);',
+      '',
+    ].join('\n'));
+    return filePath;
+  };
+
+  // Process B is a real spawned consumer for every cell: it builds a coordinator
+  // over the broken producer and then tries to acquire an endpoint. Nothing in
+  // this matrix runs inside the test process.
+  const consumer = join(producerRoot, 'process-b.mjs');
+  writeFileSync(consumer, [
+    'import {',
+    '  acquireEnvironmentEndpoint,',
+    '  createGrokCarrierCoordinator,',
+    `} from ${JSON.stringify(coordinatorLibraryUrl)};`,
+    'const [cwd, detectorPath, deadline] = process.argv.slice(2);',
+    'let coordinator = null;',
+    'try {',
+    '  coordinator = await createGrokCarrierCoordinator({',
+    '    cwd, mode: "review", env: process.env, detectorPath, drainTimeoutMs: Number(deadline),',
+    '  });',
+    '} catch (error) {',
+    '  process.stdout.write(`${JSON.stringify({ acquired: false, message: error.message })}\\n`);',
+    '  process.exit(3);',
+    '}',
+    'const acquired = await acquireEnvironmentEndpoint({',
+    '  controlPath: coordinator.control_path, consumerId: "grok-bridge",',
+    '});',
+    'process.stdout.write(`${JSON.stringify({ acquired: true, coordinator_id: acquired.coordinator_id })}\\n`);',
+    'process.exit(0);',
+    '',
+  ].join('\n'));
+
+  const matrix = [
+    ['missing', producer('missing', '// writes no frame at all'), /carrier frame is missing/u, '5000'],
+    ['duplicate', producer('duplicate', 'writeSync(3, Buffer.concat([frame, frame]));'), /trailing bytes/u, '5000'],
+    ['trailing', producer('trailing', "writeSync(3, Buffer.concat([frame, Buffer.from('\\0')]));"), /trailing bytes/u, '5000'],
+    ['short', producer('short', 'writeSync(3, frame.subarray(0, frame.length - 8));'), /truncated/u, '5000'],
+    ['malformed', producer('malformed', 'const bad = Buffer.from(frame); bad.fill(0x7b, 4, 12); writeSync(3, bad);'), /UTF-8 JSON|carrier/u, '5000'],
+    ['over-limit', producer('overlimit', 'const head = Buffer.alloc(4); head.writeUInt32BE(65537, 0); writeSync(3, Buffer.concat([head, Buffer.alloc(70000)]));'), /maximum|exceed/u, '5000'],
+    ['stdio-substituted', producer('stdio', 'process.stdout.write(frame);'), /carrier frame is missing/u, '5000'],
+    ['stalled', producer('stalled', 'writeSync(3, frame); setTimeout(() => {}, 60000);'), /deadline/u, '400'],
+  ];
+
+  for (const [label, detectorPath, expected, deadline] of matrix) {
+    const run = spawnSync(process.execPath, [consumer, repo, detectorPath, deadline], {
+      env, encoding: 'utf8', shell: false,
+    });
+    assert.notEqual(run.status, 0, `${label} must fail closed in a real process B`);
+    const observed = JSON.parse(run.stdout.trim().split('\n').pop());
+    assert.equal(observed.acquired, false, `${label} must never yield an endpoint`);
+    assert.match(observed.message, expected, `${label} produced the wrong refusal`);
+  }
+
+  // The good producer, through the same real process B, still succeeds — so the
+  // matrix above is measuring the frame, not a broken harness.
+  const healthy = spawnSync(process.execPath, [consumer, repo, standaloneDetector, '5000'], {
+    env, encoding: 'utf8', shell: false,
+  });
+  assert.equal(healthy.status, 0, healthy.stderr);
+  assert.equal(JSON.parse(healthy.stdout.trim().split('\n').pop()).acquired, true);
+});
+
+// ---------------------------------------------------------------------------
+// SLICE-010a residual — the child-process transport for the owner-bound
+// `containment_ready_token`. SLICE-008c wired the in-process seam and left the
+// CLI without one, so `main()` refused every invocation before doing anything.
+// ---------------------------------------------------------------------------
+
+test('the Grok bridge CLI transports the owner-bound containment token as one inline argv value', async () => {
+  const { parseCli } = await import(pathToFileURL(grokBridgeExecutable).href);
+  const token = '{"containment_ready":true}';
+
+  assert.deepEqual(
+    parseCli([
+      '--execution-route-json', '{"reviewer_id":"grok"}', '--reviewer-id', 'grok',
+      '--containment-ready-token-json', token,
+    ]),
+    {
+      executionRouteJson: '{"reviewer_id":"grok"}',
+      reviewerId: 'grok',
+      containmentReadyTokenJson: token,
+    },
+  );
+
+  // Additive only: the closed grammar is byte-identical when the flag is absent.
+  assert.deepEqual(
+    parseCli(['--execution-route-json', '{"reviewer_id":"grok"}', '--reviewer-id', 'grok']),
+    { executionRouteJson: '{"reviewer_id":"grok"}', reviewerId: 'grok' },
+  );
+  assert.throws(
+    () => parseCli([
+      '--execution-route-json', '{}', '--reviewer-id', 'grok',
+      '--containment-ready-token-json', '',
+    ]),
+    /--containment-ready-token-json must be non-empty/u,
+  );
+  assert.throws(
+    () => parseCli([
+      '--execution-route-json', '{}', '--reviewer-id', 'grok',
+      '--containment-ready-token-json',
+    ]),
+    /unknown or incomplete argument/u,
+  );
+});
+
+test('the Grok bridge child-process entry consumes the transported token instead of always refusing', async () => {
+  const supervisorUrl = pathToFileURL(
+    join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs'),
+  ).href;
+  const { preflightGrokContainment } = await import(supervisorUrl);
+  // Host-independent: the containment platform is pinned, never inherited.
+  const admission = preflightGrokContainment({
+    platform: 'linux',
+    arch: 'x64',
+    helperExists: () => true,
+    helperSpawner: () => ({ ok: true }),
+  });
+  assert.equal(admission.ok, true);
+
+  const grok = grokProbeBin('grok-token-transport-');
+  const env = probeEnvironment(grok.bin);
+  const root = workspace('grok-token-transport');
+  const promptFile = join(root, 'payload.txt');
+  const outputFile = join(root, 'output.txt');
+  writeFileSync(promptFile, 'PAYLOAD');
+
+  // A real sealed carrier, from the real producer: route parsing rejects a
+  // `grok` route without one, so the token gate is unreachable without it.
+  const detected = spawnSync(process.execPath, [
+    standaloneDetector,
+    '--cwd', root, '--format', 'json', '--grok-candidate', '--grok-carrier-fd', '3',
+  ], { env, encoding: 'utf8', shell: false, stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+  assert.equal(detected.status, 0, detected.stderr);
+  const environment = JSON.parse(detected.stdout);
+  assert.equal(environment.grok_compatibility_verified, true);
+
+  const baseArgv = [
+    grokBridgeExecutable,
+    '--project-root', root,
+    '--plugin-root', pluginRoot,
+    '--prompt-file', promptFile,
+    '--output', outputFile,
+    '--execution-route-json', JSON.stringify({
+      protocol_version: '3.0',
+      reviewer_id: 'grok',
+      provider: 'grok',
+      adapter_id: 'grok-cli',
+      assignment_role: 'feasibility',
+      rubric_id: 'feasibility-v1',
+      wave: 1,
+      required: true,
+      selection_reason: 'token transport fixture',
+      resolved: { model: 'grok-4.6', effort: 'medium' },
+      artifact_phase: 'implementation',
+      risk: 'low',
+      document_review_mode: 'full-readiness',
+      grok_compatibility_evidence: environment.grok_compatibility_evidence,
+    }),
+    '--reviewer-id', 'grok',
+  ];
+
+  // Without the flag the CLI cannot supply a token at all, and says exactly that.
+  const withoutToken = spawnSync(process.execPath, baseArgv, { env, encoding: 'utf8', shell: false });
+  assert.notEqual(withoutToken.status, 0);
+  assert.match(withoutToken.stderr, /missing_containment_ready_token/u);
+
+  // With it, admission is satisfied and the refusal moves PAST that gate — the
+  // containment owner minted above is live in this test process, not in the
+  // spawned bridge, which is exactly the D20 owner-liveness rule.
+  const withToken = spawnSync(process.execPath, [
+    ...baseArgv,
+    '--containment-ready-token-json', JSON.stringify(admission.containment_ready_token),
+  ], { env, encoding: 'utf8', shell: false });
+  const withTokenOutput = `${withToken.stdout}${withToken.stderr}`;
+  assert.doesNotMatch(withTokenOutput, /missing_containment_ready_token/u);
+  const refused = JSON.parse(withToken.stdout.trim().split('\n').pop());
+  // Past the admission gate and into evidence consumption — the sealed carrier
+  // is on the result — then refused by the NEXT gate, contributing no vote.
+  assert.equal(refused.compatibility.version, '1.0.4');
+  assert.equal(refused.attempted, false);
+  assert.equal(refused.contributes_vote, false);
+
+  // A malformed token value fails closed at the transport, not silently.
+  const malformed = spawnSync(process.execPath, [
+    ...baseArgv, '--containment-ready-token-json', '{not json',
+  ], { env, encoding: 'utf8', shell: false });
+  assert.notEqual(malformed.status, 0);
+  assert.match(malformed.stderr, /containment[_-]ready[_-]token/iu);
 });

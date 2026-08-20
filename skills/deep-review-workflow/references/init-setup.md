@@ -10,8 +10,10 @@ whether to reinitialize. A decline is terminal and changes nothing.
 
 Resolve the runtime root, then use the Node CLI
 `detect-environment.mjs --cwd PROJECT_ROOT --format json` to collect project
-context. Read package manifests, source layout, lint configuration, and naming
-patterns with host file tools. Present inferred architecture, style, and
+context. This census is intentionally candidacy-free: initialization never
+dispatches a reviewer, so it never carries a Grok candidacy argument and creates
+no Grok state. Read package manifests, source layout, lint configuration, and
+naming patterns with host file tools. Present inferred architecture, style, and
 entropy rules for confirmation.
 
 ## 2. Create runtime directories
@@ -40,11 +42,19 @@ agy_enabled: true
 agy_sensitive_acked_fingerprint: ""
 agy_sensitive_acked_at: ""
 agy_fingerprint_mode: hybrid
+grok_notified: false
+grok_sensitive_acked_fingerprint: ""
+grok_sensitive_acked_at: ""
+grok_fingerprint_mode: hybrid
 last_review: null
 app_qa:
   last_command: null
   last_url: null
 ```
+
+There is deliberately no `grok_enabled` key: Grok candidacy and disabling are
+owned by the parsed public flags and overrides, and a second inert
+enable-looking key would create a false configuration authority.
 
 Write the confirmed team rules to `.deep-review/rules.yaml` and preserve this
 shape when a field was not inferred:

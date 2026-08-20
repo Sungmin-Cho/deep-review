@@ -813,6 +813,11 @@ export function parseCli(argv) {
       '--routing-plan': 'routingPlan',
       '--execution-route-json': 'executionRouteJson',
       '--reviewer-id': 'reviewerId',
+      // The child-process transport for D21's owner-bound admission. Inline,
+      // like `--execution-route-json`: the token is valid only while its owner
+      // is live, so it is bound to this one invocation rather than left on disk
+      // where a later round could replay a released owner's admission.
+      '--containment-ready-token-json': 'containmentReadyTokenJson',
     }[flag];
     if (!key || index + 1 >= argv.length) throw new Error(`unknown or incomplete argument: ${flag}`);
     values[key] = argv[index + 1];
@@ -825,6 +830,11 @@ export function parseCli(argv) {
     [hasRoutingPlan, 'routingPlan', '--routing-plan'],
     [hasExecutionRouteJson, 'executionRouteJson', '--execution-route-json'],
     [hasReviewerId, 'reviewerId', '--reviewer-id'],
+    [
+      Object.hasOwn(values, 'containmentReadyTokenJson'),
+      'containmentReadyTokenJson',
+      '--containment-ready-token-json',
+    ],
   ]) {
     if (present && values[key].length === 0) throw new Error(`${flag} must be non-empty`);
   }
@@ -838,8 +848,15 @@ export function parseCli(argv) {
 async function main() {
   const options = parseCli(process.argv.slice(2));
   if (options.help) {
-    process.stdout.write('Usage: run-grok-reviewer.mjs --project-root DIR --plugin-root DIR --prompt-file FILE --output FILE (--routing-plan FILE | --execution-route-json JSON) --reviewer-id grok [--mode MODE] [--timeout-seconds N] [--max-turns N]\n');
+    process.stdout.write('Usage: run-grok-reviewer.mjs --project-root DIR --plugin-root DIR --prompt-file FILE --output FILE (--routing-plan FILE | --execution-route-json JSON) --reviewer-id grok --containment-ready-token-json JSON [--mode MODE] [--timeout-seconds N] [--max-turns N]\n');
     return;
+  }
+  if (options.containmentReadyTokenJson !== undefined) {
+    try {
+      options.containmentToken = JSON.parse(options.containmentReadyTokenJson);
+    } catch (error) {
+      throw new Error(`invalid_containment_ready_token: ${error.message}`);
+    }
   }
   options.pluginRoot ??= resolvePluginRoot();
   options.executionPlan = options.executionRouteJson

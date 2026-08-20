@@ -2,7 +2,7 @@
 name: deep-review
 description: Public cross-runtime entrypoint for independent review, initialization, and evidence-based review response.
 user-invocable: true
-argument-hint: "[init] [--contract [SLICE-NNN]] [--entropy] [--ultracode] [--codex|--no-codex] [--no-opus] [--agy|--no-agy] [--codex-only] [--reviewer-strategy adaptive|static] [--readiness-receipt PATH] [--dry-run] [--explain-routing] [--routing auto|fast|balanced|quality] [--model PROVIDER=MODEL] [--effort PROVIDER=EFFORT] [--reviewer-model REVIEWER=MODEL] [--reviewer-effort REVIEWER=EFFORT] [--allow-fallback|--no-fallback] [--allow-classifier] [--respond (REPORT_PATH | --source=pr [--pr=NNN])]"
+argument-hint: "[init] [--contract [SLICE-NNN]] [--entropy] [--ultracode] [--codex|--no-codex] [--no-opus] [--agy|--no-agy] [--grok|--no-grok] [--codex-only] [--reviewer-strategy adaptive|static] [--readiness-receipt PATH] [--dry-run] [--explain-routing] [--routing auto|fast|balanced|quality] [--model PROVIDER=MODEL] [--effort PROVIDER=EFFORT] [--reviewer-model REVIEWER=MODEL] [--reviewer-effort REVIEWER=EFFORT] [--allow-fallback|--no-fallback] [--allow-classifier] [--respond (REPORT_PATH | --source=pr [--pr=NNN])]"
 ---
 
 # deep-review — public route
@@ -30,9 +30,10 @@ The returned JSON is the executable route authority. Stop on `ok=false`; use
 its expanded `argv` and terminal `route` without independently reparsing them.
 The runtime enforces this grammar:
 
-1. Expand `--codex-only` to `--codex --no-opus --no-agy` before validation.
-2. Reject `--ultracode` with `--no-opus`, and reject `--codex` with
-   `--no-codex`.
+1. Expand `--codex-only` to `--codex --no-opus --no-agy --no-grok` before
+   validation.
+2. Reject `--ultracode` with `--no-opus`, reject `--codex` with `--no-codex`,
+   and reject `--grok` with `--no-grok` (and therefore with `--codex-only`).
 3. `--contract` consumes the next token only when it matches `SLICE-[0-9]+`.
    `--respond` consumes a following report path only when it names an existing
    file; `--source=pr` and `--pr=NNN` stay respond options.
@@ -57,10 +58,24 @@ The runtime enforces this grammar:
 - `review` — terminal for `--contract`, `--entropy`, reviewer flags, or no
   arguments.
   - Artifact-aware classification and routing (Phase 2): when the returned route sets
-    `dryRun` or `explainRouting`, do not run any reviewer. Instead run
+    `dryRun` or `explainRouting`, no reviewer runs on this branch. When Grok is a
+    candidate, the Grok control-plane entrypoint for this branch is the shipped
+    coordinator, started first and kept alive for the whole branch:
+
+    ```text
+    node {plugin_root}/hooks/scripts/grok-carrier-coordinator.mjs --cwd PROJECT_ROOT --mode dry-run
+    ```
+
+    Its first stdout line is the environment JSON and its second is the
+    coordinator descriptor carrying `control_path`. Then run
     `node {plugin_root}/hooks/scripts/classify-artifacts.mjs --repo PROJECT_ROOT`
-    (append `--explain-routing` when the route set `explainRouting`), print its
-    listing. When returned JSON has `route.overrides`, append
+    (append `--grok-coordinator-control CONTROL_PATH` on the candidate branch,
+    and `--explain-routing` when the route set `explainRouting`), print its
+    listing. Classification consumes the same `GROK_COMPATIBILITY_CARRIER` the
+    coordinator already drained: it acquires a fresh readable endpoint, and must
+    not detect the environment for itself or run a compatibility probe. An
+    unconfirmed or terminated coordinator is terminal here — fail closed.
+    When returned JSON has `route.overrides`, append
     `--overrides-json` and `JSON.stringify(route.overrides)` as a single argv
     value so model IDs and paths are never reparsed by a shell. Then 종료
     without running a reviewer. That helper classifies the change scope, renders
@@ -95,8 +110,8 @@ eligible reviewer set for compatibility. `routing_shadow_mode: true` computes
 and records the adaptive plan but does not apply it. Use static strategy and
 shadow mode together when exact pre-2.0 dispatch behavior is required.
 
-The `--no-*`, `--codex`, `--codex-only`, `--agy`, and `--ultracode` flags are
-hard eligibility or required-assignment constraints. A reviewer-level model or
+The `--no-*`, `--codex`, `--codex-only`, `--agy`, `--grok`, and `--ultracode`
+flags are hard eligibility or required-assignment constraints. A reviewer-level model or
 effort override requires that canonical reviewer to be selected; a provider
 override applies only to selected reviewers from that provider and never adds a
 reviewer.
@@ -108,6 +123,16 @@ effort override (`--model agy=…`, `--effort agy=…`, `--reviewer-model agy=�
 `--reviewer-effort agy=…`) restores agy candidacy so the override is not a
 terminal error, while leaving its required-ness exactly as it is for every
 other provider — a provider-level agy override still never forces selection.
+
+`grok` is the same exception, on the same terms. `--grok` both permits Grok
+candidacy and requires its selection; a Grok-targeting `--model grok=…`,
+`--effort grok=…`, `--reviewer-model grok=…`, or `--reviewer-effort grok=…`
+restores candidacy without forcing selection. `--no-grok` alone is successful
+silent negative selection; `--no-grok` combined with a Grok-targeting override
+is `ERROR_CONFLICTING_REVIEWER_SELECTION`, not a quiet win for either side.
+Candidacy is resolved here, before environment detection, because Grok probing
+and Grok state are gated on it — a review with no Grok flag creates none.
+There is no `grok_enabled` config key; `--no-grok` is the enforceable disable.
 
 `--allow-classifier` opts `--dry-run` or `--explain-routing` into semantic
 classification for ambiguous artifacts. Artifact content is untrusted data;

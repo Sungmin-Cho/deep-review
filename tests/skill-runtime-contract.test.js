@@ -42,6 +42,37 @@ function anchoredBody(source, name) {
   );
 }
 
+// SLICE-010a2. The two shell-free scan lists are hoisted so the reconciliation
+// guard below can check their membership. They are the scans' real inputs, not
+// copies: deleting an entry here deletes it from the scan *and* trips the guard.
+const RUNTIME_REFERENCES = [
+  'skills/deep-review/SKILL.md',
+  'skills/deep-review-workflow/SKILL.md',
+  'skills/deep-review-loop/SKILL.md',
+  'skills/deep-review-workflow/references/runtime-dispatch.md',
+  'skills/deep-review-workflow/references/review-execution.md',
+  'skills/deep-review-workflow/references/codex-integration.md',
+  'skills/deep-review-workflow/references/agy-integration.md',
+  'skills/deep-review-workflow/references/grok-integration.md',
+  'skills/deep-review-workflow/references/ultracode-integration.md',
+  'skills/deep-review-workflow/references/recurring-findings-export.md',
+  'skills/deep-review-workflow/references/init-setup.md',
+  'skills/deep-review-workflow/references/contract-schema.md',
+  'skills/deep-review-workflow/references/entropy-scan.md',
+  'skills/deep-review-workflow/references/report-format.md',
+];
+
+const RESPOND_REFERENCES = [
+  'skills/deep-review/SKILL.md',
+  'skills/receiving-review/SKILL.md',
+  'skills/receiving-review/references/respond-execution.md',
+  'skills/receiving-review/references/response-protocol.md',
+  'skills/receiving-review/references/response-format.md',
+  'skills/receiving-review/references/phase6-delegation-spec.md',
+  'skills/receiving-review/references/phase6-prompt-contract.md',
+  'agents/phase6-implementer.md',
+];
+
 function runLoop(args) {
   const result = spawnSync(process.execPath, [loopState, ...args], {
     cwd: root,
@@ -160,10 +191,24 @@ test('runtime dispatch SSOT is capability-based and defines the exact role matri
     ['Codex standard reviewer', 'Node Codex exec bridge', 'generic subagent'],
     ['Codex adversarial reviewer', 'Node Codex exec bridge', 'generic subagent'],
     ['agy reviewer', 'Node agy bridge', 'Node agy bridge'],
+    ['grok reviewer', 'Node grok bridge', 'Node grok bridge'],
   ];
   for (const row of rows) {
     for (const cell of row) assert.match(dispatch, new RegExp(escapeRegex(cell)));
   }
+  // O7: asserted as a row, not as three independent cells, so a `grok reviewer`
+  // that exists only in prose cannot satisfy it and neither can a row that
+  // declares the bridge for one capability profile only.
+  assert.match(
+    dispatch,
+    /^\|\s*grok reviewer\s*\|\s*Node grok bridge\s*\|\s*Node grok bridge\s*\|$/mu,
+    'the grok reviewer row must declare the Node grok bridge for both capability profiles',
+  );
+  // The `--no-grok` selection invariant, alongside the existing `--no-codex` one.
+  assert.match(dispatch, /`--no-grok`.{0,120}disables.{0,60}`grok`/isu);
+  // The read-only trust boundary states Grok's preventive-but-partial status:
+  // prevention is attributed to plan mode, detection to the bounded fingerprint.
+  assert.match(dispatch, /--permission-mode plan/u);
   assert.match(dispatch, /tool capability/i);
   assert.match(dispatch, /runtime_host.{0,100}(?:never|아니|금지)/is);
   assert.match(dispatch, /codex-review/);
@@ -307,17 +352,7 @@ test('loop public contract forwards routing controls and codifies document readi
 });
 
 test('supported runtime references use Node/direct tools and the runtime-root contract', () => {
-  const runtimeReferences = [
-    'skills/deep-review-workflow/SKILL.md',
-    'skills/deep-review-loop/SKILL.md',
-    'skills/deep-review-workflow/references/runtime-dispatch.md',
-    'skills/deep-review-workflow/references/review-execution.md',
-    'skills/deep-review-workflow/references/codex-integration.md',
-    'skills/deep-review-workflow/references/agy-integration.md',
-    'skills/deep-review-workflow/references/ultracode-integration.md',
-    'skills/deep-review-workflow/references/recurring-findings-export.md',
-    'skills/deep-review-workflow/references/init-setup.md',
-  ];
+  const runtimeReferences = RUNTIME_REFERENCES;
   const forbidden = /(?:\.sh\b|\bbash\b|\bpython3\b|\bperl\b|\bmktemp\b|\bshopt\b|\bfind\b|\bawk\b|\bsed\b|\bxargs\b|<\(|\bcomm\b|\brealpath\b|_timeout)/i;
   for (const relativePath of runtimeReferences) {
     const source = read(relativePath);
@@ -330,25 +365,18 @@ test('supported runtime references use Node/direct tools and the runtime-root co
     'build-reviewer-payload.mjs',
     'mutation-protocol.mjs',
     'agy-privacy-preflight.mjs',
+    'grok-privacy-preflight.mjs',
     'run-claude-reviewer.mjs',
     'run-codex-reviewer.mjs',
     'run-agy-reviewer.mjs',
+    'run-grok-reviewer.mjs',
     'loop-state.mjs',
   ]) assert.match(combined, new RegExp(helper.replace('.', '\\.')));
   assert.match(combined, /plugin_root.{0,160}PLUGIN_ROOT.{0,160}CLAUDE_PLUGIN_ROOT/is);
 });
 
 test('respond references are shell-free and route every stateful operation through Node helpers', () => {
-  const respondReferences = [
-    'skills/deep-review/SKILL.md',
-    'skills/receiving-review/SKILL.md',
-    'skills/receiving-review/references/respond-execution.md',
-    'skills/receiving-review/references/response-protocol.md',
-    'skills/receiving-review/references/response-format.md',
-    'skills/receiving-review/references/phase6-delegation-spec.md',
-    'skills/receiving-review/references/phase6-prompt-contract.md',
-    'agents/phase6-implementer.md',
-  ];
+  const respondReferences = RESPOND_REFERENCES;
   const forbidden = /```(?:bash|sh|shell)|\bbash\s+-c\b|\btee\b|\bls\s+-[^\n]*t\b|\bmkdir\s+-p\b|\bcompgen\b|\b(?:awk|sed)\b|<\(|\$log_path|\$\{(?:severity|CLAUDE_PLUGIN_ROOT)|'\\''/iu;
   for (const relativePath of respondReferences) {
     assert.doesNotMatch(
@@ -831,6 +859,7 @@ test('no shipped instruction directs a read of the repository-internal routing p
     'skills/deep-review-workflow/references/review-execution.md',
     'skills/deep-review-workflow/references/codex-integration.md',
     'skills/deep-review-workflow/references/agy-integration.md',
+    'skills/deep-review-workflow/references/grok-integration.md',
     'commands/deep-review.md',
     'agents/code-reviewer.md',
   ];
@@ -849,8 +878,14 @@ test('no shipped instruction directs a read of the repository-internal routing p
   const leafSurfaces = [
     'skills/deep-review-workflow/references/review-execution.md',
     'skills/deep-review-workflow/references/codex-integration.md',
+    'skills/deep-review-workflow/references/grok-integration.md',
   ].map(read).join('\n');
-  for (const bridge of ['run-claude-reviewer.mjs', 'run-agy-reviewer.mjs', 'run-codex-reviewer.mjs']) {
+  for (const bridge of [
+    'run-claude-reviewer.mjs',
+    'run-agy-reviewer.mjs',
+    'run-codex-reviewer.mjs',
+    'run-grok-reviewer.mjs',
+  ]) {
     for (const line of leafSurfaces.split('\n')) {
       if (!line.includes(bridge)) continue;
       assert.doesNotMatch(
@@ -860,4 +895,361 @@ test('no shipped instruction directs a read of the repository-internal routing p
       );
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// SLICE-010a — the Grok control plane on the loaded instruction surfaces.
+// ---------------------------------------------------------------------------
+
+// Every shipped instruction file, discovered rather than listed, so a new
+// authority is covered the moment it lands.
+function shippedInstructionFiles() {
+  const files = [];
+  const walk = (relativeDir) => {
+    for (const entry of fs.readdirSync(path.join(root, relativeDir), { withFileTypes: true })) {
+      const next = `${relativeDir}/${entry.name}`;
+      if (entry.isDirectory()) walk(next);
+      else if (entry.name.endsWith('.md')) files.push(next);
+    }
+  };
+  for (const directory of ['skills', 'agents', 'commands']) walk(directory);
+  return files;
+}
+
+const PREVENTION_VERB = /\b(?:prevents?|prevented|preventing|blocks?|blocked|blocking|barrier|forbids?|disallows?|stops?)\b/giu;
+// A prevention word is a *claim* only when nothing negates it just before. The
+// honest wording — "was observed not to prevent", "is not a write barrier" —
+// therefore reads as no claim at all, while "`--sandbox read-only` prevents
+// writes" reads as exactly one.
+const NEGATION_BEFORE = /\b(?:not|never|no|nor|without|cannot|can't|isn't|doesn't|neither)\b[^.;:]{0,80}$/iu;
+
+function sandboxPreventionClaims(source) {
+  const claims = [];
+  for (const hit of source.matchAll(/--sandbox(?:[ \t]+read-only)?/giu)) {
+    const window = source.slice(hit.index, hit.index + 220).replace(/\s+/gu, ' ');
+    for (const verb of window.matchAll(PREVENTION_VERB)) {
+      if (NEGATION_BEFORE.test(window.slice(0, verb.index))) continue;
+      claims.push(window);
+    }
+  }
+  return claims;
+}
+
+// T-DOC-2. D12/A3 attribute observed write prevention to `--permission-mode
+// plan` alone; `--sandbox read-only` is required and not inert, but in v1.0.3 it
+// was observed not to stop a workspace write. §2.15 bounds what the hybrid
+// digest detects. The negative half sweeps EVERY shipped instruction file, so
+// keeping the Grok reference honest while another authority promotes the
+// sandbox flag to a write barrier does not satisfy this test.
+test('T-DOC-2: instructions attribute prevention only to permission-mode plan', () => {
+  const scanned = shippedInstructionFiles();
+  assert.ok(scanned.length > 10, 'the instruction sweep matched almost nothing — the walk has rotted');
+  for (const relativePath of scanned) {
+    assert.deepEqual(
+      sandboxPreventionClaims(read(relativePath)),
+      [],
+      `${relativePath} credits --sandbox read-only with preventing writes`,
+    );
+  }
+
+  const grok = read('skills/deep-review-workflow/references/grok-integration.md');
+  // The positive half: prevention is claimed, and claimed only for plan mode.
+  assert.match(grok, /`--permission-mode plan`[^.]{0,240}prevent/isu);
+  assert.match(grok, /`--sandbox read-only`/u);
+  assert.match(
+    grok,
+    /--sandbox read-only[\s\S]{0,400}\bnot\b[\s\S]{0,160}(?:write barrier|prevent)/isu,
+    'the sandbox flag must be named as required-but-not-a-write-barrier',
+  );
+
+  // §2.15's enumerated observation surface, stated as a bounded detector.
+  for (const marker of ['@HEAD', '@STATUS/', '@SENSITIVE/']) {
+    assert.ok(grok.includes(marker), `grok-integration.md must enumerate ${marker}`);
+  }
+  assert.match(grok, /bounded detector/iu);
+  assert.match(grok, /not a total backstop/iu);
+  assert.match(grok, /`\.git`/u);
+  assert.match(grok, /ignored/iu);
+  assert.match(grok, /distinct[^.]{0,80}plugin root/isu);
+});
+
+// T-TRUST-1. The emitted routing plan lives at a repository-internal path, so a
+// repository under analysis can commit one there. Grok is a new door into the
+// trusted path and must not be a softer one than the three that already exist.
+test('T-TRUST-1: Grok instruction and bridge reject repository routing-plan authority', () => {
+  const surfaces = [
+    ['skills/deep-review-workflow/references/grok-integration.md', read('skills/deep-review-workflow/references/grok-integration.md')],
+    ['skills/deep-review-workflow/references/review-execution.md', read('skills/deep-review-workflow/references/review-execution.md')],
+  ];
+
+  let bridgeInvocations = 0;
+  for (const [relativePath, source] of surfaces) {
+    for (const line of source.split('\n')) {
+      if (line.includes('.deep-review/tmp/routing-plan.json')) {
+        assert.ok(
+          line.includes('--routing-plan-out') || !line.includes('--routing-plan'),
+          `${relativePath} feeds the repository-internal plan back as a trusted source: ${line.trim()}`,
+        );
+      }
+      if (!line.includes('run-grok-reviewer.mjs')) continue;
+      if (!line.includes('node ')) continue;
+      bridgeInvocations += 1;
+      assert.doesNotMatch(
+        line,
+        /--routing-plan(?!-out)/u,
+        `${relativePath} hands the Grok bridge a repository plan path: ${line.trim()}`,
+      );
+      assert.match(line, /--execution-route-json/u, `${relativePath} must pass the Grok route inline`);
+      assert.match(line, /--reviewer-id grok\b/u, `${relativePath} must bind the canonical reviewer id`);
+    }
+  }
+  assert.ok(bridgeInvocations > 0, 'no shipped instruction invokes the Grok bridge at all');
+});
+
+// T-PROBE-8, instruction half. The public normal-review and public
+// dry-run/explain authorities enter the Grok control plane through the shipped
+// coordinator executable. Neither may name a standalone helper as that
+// entrypoint, call `detectEnvironment`, or ask anyone to spawn a `--version` or
+// `--help` probe: the coordinator's process A is the sole producer.
+test('T-PROBE-8: public normal-review and dry-run/explain enter through the coordinator and never re-detect', () => {
+  const authorities = [
+    ['skills/deep-review/SKILL.md', read('skills/deep-review/SKILL.md')],
+    ['skills/deep-review-workflow/SKILL.md', read('skills/deep-review-workflow/SKILL.md')],
+    ['skills/deep-review-workflow/references/review-execution.md', read('skills/deep-review-workflow/references/review-execution.md')],
+  ];
+
+  for (const [relativePath, source] of authorities) {
+    assert.match(
+      source,
+      /grok-carrier-coordinator\.mjs/u,
+      `${relativePath} must enter the Grok control plane through the shipped coordinator`,
+    );
+    assert.doesNotMatch(source, /\bdetectEnvironment\b/u, `${relativePath} must not call detectEnvironment`);
+    assert.doesNotMatch(source, /--version\b/u, `${relativePath} must not spawn a --version probe`);
+    assert.doesNotMatch(source, /--help\b/u, `${relativePath} must not spawn a --help probe`);
+    // No line in a public authority may make the standalone detector the Grok
+    // producer: `--grok-candidate` belongs to the coordinator's process A.
+    for (const line of source.split('\n')) {
+      if (!line.includes('detect-environment.mjs')) continue;
+      assert.doesNotMatch(
+        line,
+        /--grok-candidate/u,
+        `${relativePath} makes the standalone detector the Grok producer: ${line.trim()}`,
+      );
+    }
+  }
+
+  // The public skill is the dry-run/explain owner. It has no business naming the
+  // standalone detector at all, so the direct-invocation mutation is caught here.
+  const publicSkill = read('skills/deep-review/SKILL.md');
+  assert.doesNotMatch(
+    publicSkill,
+    /detect-environment\.mjs/u,
+    'public dry-run/explain must not invoke standalone detect-environment.mjs',
+  );
+  assert.match(publicSkill, /--mode dry-run/u);
+  // Dry-run still classifies — it just consumes the live coordinator's endpoint
+  // instead of being the Grok control-plane entrypoint itself.
+  assert.match(publicSkill, /classify-artifacts\.mjs/u);
+  assert.match(publicSkill, /--grok-coordinator-control/u);
+  assert.match(publicSkill, /GROK_COMPATIBILITY_CARRIER/u);
+
+  // Normal review: the classification invocations at §3.2 consume a fresh
+  // endpoint from the live coordinator and re-probe nothing.
+  const execution = read('skills/deep-review-workflow/references/review-execution.md');
+  for (const line of execution.split('\n')) {
+    if (!line.includes('classify-artifacts.mjs')) continue;
+    if (!line.includes('node ')) continue;
+    assert.match(
+      line,
+      /--grok-coordinator-control/u,
+      `a classification invocation bypasses the live coordinator: ${line.trim()}`,
+    );
+  }
+  assert.match(execution, /--mode review/u);
+  assert.match(execution, /fresh (?:readable )?endpoint/iu);
+  assert.match(execution, /unconfirmed[\s\S]{0,200}(?:fail closed|stop)/isu);
+});
+
+// D13 item 3 as ONE contract across the three loaded authorities plus init:
+// no single file can be updated alone. The public grammar resolves the flag,
+// the workflow skill's root contract and pipeline map place detection behind
+// that resolution, `review-execution.md` carries `--grok-candidate` on exactly
+// the candidate branch, and both config authorities expose the same four keys.
+test('the loaded authorities gate Grok candidacy on resolved flags and share one grok_* config schema', () => {
+  const publicSkill = read('skills/deep-review/SKILL.md');
+  const workflow = read('skills/deep-review-workflow/SKILL.md');
+  const execution = read('skills/deep-review-workflow/references/review-execution.md');
+  const init = read('skills/deep-review-workflow/references/init-setup.md');
+
+  // 1. The public grammar owns `--grok` / `--no-grok`.
+  const hint = publicSkill.match(/^argument-hint: (.+)$/mu)?.[1] ?? '';
+  assert.match(hint, /--grok\|--no-grok/u);
+  assert.match(publicSkill, /`--grok`[\s\S]{0,400}opt-in/isu);
+
+  // 2. Ordering, per authority.
+  for (const [relativePath, source, marker] of [
+    ['skills/deep-review/SKILL.md', publicSkill, /## Argument validation/u],
+    ['skills/deep-review-workflow/SKILL.md', workflow, /resolve reviewer flags/u],
+    ['skills/deep-review-workflow/references/review-execution.md', execution, /resolve reviewer flags/u],
+  ]) {
+    const flags = source.search(marker);
+    const detection = source.indexOf('grok-carrier-coordinator.mjs');
+    assert.ok(flags >= 0, `${relativePath} must name where reviewer flags are resolved`);
+    assert.ok(detection >= 0, `${relativePath} must name the coordinator`);
+    assert.ok(
+      detection > flags,
+      `${relativePath} must place Grok-candidate detection behind flag resolution`,
+    );
+  }
+
+  // 3. The workflow skill's reference map and pipeline map.
+  assert.match(workflow, /references\/grok-integration\.md/u);
+  assert.match(workflow, /--grok-candidate/u);
+  assert.match(workflow, /^1\. [\s\S]{0,400}--grok-candidate/mu);
+
+  // 4. `--grok-candidate` travels through the coordinator, on the candidate
+  //    branch only, and the standalone detector stays the non-candidate path.
+  assert.match(execution, /grok-carrier-coordinator\.mjs[\s\S]{0,900}--grok-candidate/isu);
+  assert.match(execution, /(?:not a candidate|non-candidate|no Grok)[\s\S]{0,240}detect-environment\.mjs|detect-environment\.mjs[\s\S]{0,240}(?:not a candidate|non-candidate|no Grok)/isu);
+
+  // 5. One config schema, in both authorities, with no enable-looking key.
+  for (const [relativePath, source] of [
+    ['skills/deep-review-workflow/SKILL.md', workflow],
+    ['skills/deep-review-workflow/references/init-setup.md', init],
+  ]) {
+    for (const key of [
+      'grok_notified',
+      'grok_sensitive_acked_fingerprint',
+      'grok_sensitive_acked_at',
+      'grok_fingerprint_mode',
+    ]) {
+      assert.match(source, new RegExp(`^\\s*${key}:`, 'mu'), `${relativePath} must carry ${key}`);
+    }
+    // The key itself, in the schema. The prose that explains its absence is
+    // required below, so deleting the disclaimer does not buy the key back.
+    assert.doesNotMatch(
+      source,
+      /^\s*grok_enabled\s*:/mu,
+      `${relativePath} must not introduce a second inert enable-looking key`,
+    );
+    assert.match(
+      source,
+      /no `grok_enabled` (?:config )?key/u,
+      `${relativePath} must say why there is no grok_enabled key`,
+    );
+  }
+  assert.match(init, /^grok_fingerprint_mode: hybrid$/mu);
+
+  // 6. Init never dispatches a reviewer, so its census stays candidacy-free.
+  assert.doesNotMatch(init, /--grok-candidate/u);
+  assert.doesNotMatch(init, /grok-carrier-coordinator\.mjs/u);
+  assert.match(init, /detect-environment\.mjs/u);
+
+  // 7. grok-integration.md documents the prose gate and both loud failures.
+  const grok = read('skills/deep-review-workflow/references/grok-integration.md');
+  assert.match(grok, /prose gate, not a code guarantee/u);
+  assert.match(grok, /--grok-candidate[\s\S]{0,500}operational_failure/isu);
+  assert.match(grok, /operational_failure[\s\S]{0,300}(?:entire|whole) review/isu);
+  assert.match(
+    grok,
+    /unsupported_grok_containment[\s\S]{0,500}(?:entire|whole) review/isu,
+  );
+  assert.match(grok, /four voices/iu);
+});
+
+// ---------------------------------------------------------------------------
+// SLICE-010a2 — the shell-free scan lists are pinned against disk.
+// ---------------------------------------------------------------------------
+
+// AGENTS.md's release invariant — "Keep runtime references shell-free and
+// capability-routed" — is enforced only for the files the two scan lists above
+// happen to name. Membership was hand-maintained, so deleting one line silently
+// retired the invariant for that file and no test noticed. The reconciliation
+// below makes membership a checked property: every `skills/**/*.md` on disk is
+// either scanned by one of the two lists or excluded here with a stated reason.
+//
+// An exclusion is a visible decision, not an omission. Blanking a reason fails,
+// and an excluded path may not also be enrolled — so a file cannot be dropped
+// from a scan by quietly deleting its justification.
+//
+// Which scan a file owes is derived from where it sits, not from a second list:
+// the `skills/receiving-review/` tree is the respond family and answers to the
+// respond scan; everything else under `skills/` answers to the runtime scan. A
+// union check alone would let an entry be *moved* between the two lists instead
+// of deleted — the file would stay "covered" while quietly swapping the runtime
+// pattern (`.sh`, `bash`, `python3`, `find`, `xargs`, `realpath`, …) for the
+// narrower respond one. Requiring the scan its location demands closes that.
+function requiredScan(relativePath) {
+  return relativePath.startsWith('skills/receiving-review/') ? 'respond' : 'runtime';
+}
+const SHELL_FREE_SCAN_EXCLUSIONS = [
+  {
+    path: 'skills/deep-review-workflow/references/review-criteria.md',
+    reason:
+      'names `extract-fp-doctrine.sh` on purpose, as the Unix parity oracle it is — and the '
+      + '"init is shell-free…" test in this file asserts that exact naming. Enrolling this file '
+      + 'would make the runtime scan\'s `\\.sh\\b` branch fire on a shipped sentence another test '
+      + 'requires, so the only way to pass would be to delete the sentence. The oracle is not a '
+      + 'supported path (AGENTS.md release invariants), so the invariant is not weakened by '
+      + 'leaving the file out; the naming is already pinned by the assertion that reads it.',
+  },
+  {
+    path: 'skills/receiving-review/references/forbidden-patterns.md',
+    reason:
+      'a receiving-review content reference — the banned-acknowledgment-phrase table and the '
+      + 'rationalization-blocking table. It invokes nothing and names no host tool, so it carries '
+      + 'no runtime-invocation surface for a shell-free scan to protect. Its two consumers '
+      + '(receiving-review/SKILL.md and references/response-protocol.md) are themselves enrolled '
+      + 'in the respond scan, so every path that *executes* around it is covered.',
+  },
+];
+
+test('every skills/**/*.md is either scanned shell-free or excluded with a stated reason', () => {
+  const onDisk = shippedInstructionFiles().filter((relativePath) => relativePath.startsWith('skills/'));
+  assert.ok(onDisk.length > 15, 'the skills sweep matched almost nothing — the walk has rotted');
+
+  // A listed path that no longer exists is dead coverage standing in for real
+  // coverage, so a rename cannot leave the scan pointing at nothing.
+  for (const relativePath of [...RUNTIME_REFERENCES, ...RESPOND_REFERENCES]) {
+    assert.ok(
+      fs.existsSync(path.join(root, relativePath)),
+      `${relativePath} is enrolled in a shell-free scan but is not on disk`,
+    );
+  }
+
+  const runtime = new Set(RUNTIME_REFERENCES);
+  const respond = new Set(RESPOND_REFERENCES);
+  const excluded = new Map();
+  for (const entry of SHELL_FREE_SCAN_EXCLUSIONS) {
+    assert.ok(
+      fs.existsSync(path.join(root, entry.path)),
+      `excluded ${entry.path} is not on disk — delete the exclusion with the file`,
+    );
+    assert.equal(typeof entry.reason, 'string', `${entry.path} is excluded without a reason`);
+    assert.ok(
+      entry.reason.trim().length >= 40,
+      `${entry.path} is excluded without a stated reason — say why the scan does not apply`,
+    );
+    assert.equal(excluded.has(entry.path), false, `${entry.path} is excluded twice`);
+    // An exclusion that is also an enrollment is a contradiction: one of the two
+    // is stale, and reading either alone gives the wrong answer.
+    assert.equal(runtime.has(entry.path), false, `${entry.path} is both runtime-scanned and excluded`);
+    assert.equal(respond.has(entry.path), false, `${entry.path} is both respond-scanned and excluded`);
+    excluded.set(entry.path, entry.reason);
+  }
+
+  // Disk is the authority. A new instruction file that nobody enrolled lands
+  // here, so it cannot be forgotten; a deleted entry lands here too, so the
+  // list cannot silently shrink; and an entry moved to the other list lands
+  // here as well, so coverage cannot be downgraded in place.
+  const enrolledIn = { runtime, respond };
+  assert.deepEqual(
+    onDisk
+      .filter((relativePath) => !excluded.has(relativePath))
+      .filter((relativePath) => !enrolledIn[requiredScan(relativePath)].has(relativePath))
+      .map((relativePath) => `${relativePath} (owes the ${requiredScan(relativePath)} scan)`),
+    [],
+    'unscanned instruction file(s): enroll each in the shell-free scan its location owes, or exclude it in SHELL_FREE_SCAN_EXCLUSIONS with a stated reason',
+  );
 });
