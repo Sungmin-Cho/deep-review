@@ -42,5 +42,9 @@ is a visible terminal status and contributes no vote.
 ## Synthesis identity
 
 Label a trusted success `agy`. It is one Google-family vote independent of
-`claude-opus`, `codex-review`, and `codex-adversarial`. Preserve a sole-family
-dissent in the report even when a majority verdict is otherwise reached.
+`claude-opus`, `codex-review`, and `codex-adversarial`. Preserve a dissent from
+this role as one entry in the `dissenters` array of
+`{plugin_root}/skills/deep-review-workflow/references/report-format.md` — `reviewer: agy`,
+`family: google` — even when a majority verdict is otherwise reached. It is one
+entry among however many the round produced, so a dissent confined to this family
+stays distinguishable from one that also spans another.

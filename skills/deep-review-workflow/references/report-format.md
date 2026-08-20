@@ -5,7 +5,15 @@
 `.deep-review/reports/{YYYY-MM-DD}-{HHmmss}-review.md`
 
 타임스탬프는 리뷰 완료(또는 합성 직전) 시점 기준. 같은 날 여러 번 실행해도
-파일이 충돌하지 않는다. 파일명 생성 예: `date "+%Y-%m-%d-%H%M%S"` → `2026-04-17-115156-review.md`.
+파일이 충돌하지 않는다. 파일명 생성의 정식(canonical) 경로는 Node 다 — 호스트 셸의
+`date` 는 POSIX 셸 없이 지원되는 native Windows 11 에서 대화형이고 의미가 다르므로
+런타임 지시문에 쓰지 않는다:
+
+```js
+const iso = new Date().toISOString();   // 2026-04-17T11:51:56.123Z
+const stamp = `${iso.slice(0, 10)}-${iso.slice(11, 19).replace(/:/gu, '')}`;
+// stamp → 2026-04-17-115156, 즉 2026-04-17-115156-review.md
+```
 
 ## 구조
 
@@ -13,7 +21,7 @@
 
 ## Summary
 - **Verdict**: {APPROVE | REQUEST_CHANGES | CONCERN}
-- **Review Mode**: {Claude Opus Only | Claude=ultracode(6-lens[, verified]) | 2-way Cross-Model | 3-way Cross-Model | 4-way Cross-Model | 1-way (codex-only) | 2-way (codex-only + agy) | 1-way (agy only) | (… agent-fanout fallback / UNVERIFIED fallback)}
+- **Review Mode**: {Claude Opus Only | Claude=ultracode(6-lens[, verified]) | N-way Cross-Model where `N` is the trusted reviewer count and `N ≥ 2` — 2-way Cross-Model / 3-way Cross-Model / 4-way Cross-Model / 5-way Cross-Model | 1-way (codex-only) | 2-way (codex-only + agy) | 1-way (agy only) | (… agent-fanout fallback / UNVERIFIED fallback)}
 - **Issues**: {🔴 N건, 🟡 N건, ℹ️ N건}
 - **Warnings**: {운영 경고 0건이면 생략. 페이로드 조립 실패(OCR_WARNINGS)를 포함한 운영 경고를 기록 — 예: `fp-doctrine extraction failed (injection skipped)`, `change_files unavailable (omitted)`. verdict 에는 영향 없음 — 감사용.}
 
@@ -23,11 +31,15 @@
 | {description} | {✅ PASS / ❌ FAIL / ⚠️ PARTIAL / ⏭️ SKIP} | {evidence} |
 
 ## Cross-Model Verification (Codex 사용 시)
-| 항목 | Claude (Opus) | Codex Review | Codex Adversarial | agy | Agreement |
-|---|---|---|---|---|---|
-| (issue) | ✓ / – | ✓ / – | ✓ / – | ✓ / – | unanimous_4 / majority_3_of_4 / split_2_of_4 / solo_1_of_4 |
+| 항목 | Claude (Opus) | Codex Review | Codex Adversarial | agy | Grok | Agreement |
+|---|---|---|---|---|---|---|
+| (issue) | ✓ / – | ✓ / – | ✓ / – | ✓ / – | ✓ / – | unanimous_5 / majority_4_of_5 / majority_3_of_5 / split_2_of_5 / solo_1_of_5 |
 
-> For N < 4 modes, the agy column is omitted (or shown as `(not run)`).
+> Columns are rendered for the reviewers actually selected: a reviewer that was
+> not selected has no column, or is shown as `(not run)`. Column order is
+> `canonicalReviewerIndex` order — the same total order the `dissenters` array
+> below uses. The `Agreement` cell instantiates the generic enum below at the
+> round's own `N`; the row above is the `N = 5` instantiation.
 > **XF-1**: When `claude_reviewer = ultracode-fanout`, render the "Claude (Opus)" column header as **"Claude (ultracode)"** — the cell holds the single collapsed voice (1 Anthropic vote; see [`{plugin_root}/skills/deep-review-workflow/references/ultracode-integration.md`](./ultracode-integration.md) §4).
 
 ## Routing Plan
@@ -110,13 +122,96 @@ when no checks passed.
 - **N_actual == 1 예외**: "🟡만 있고 전원 일치" 규칙 부적용 — N=1 이면 단독 리뷰어 전용 분기(🔴 1건 이상 → REQUEST_CHANGES(critical/security 단독 blocking) / 🟡만 → CONCERN / 🟢 → APPROVE)가 최종(final)이다(🟡 1건 = 전원 일치가 자명하므로 게이트 없이 두면 REQUEST_CHANGES 로 무력화되고, 🔴 은 severity 자체가 blocking 이라 단독이라도 REQUEST_CHANGES 유지). 전용 분기 정의의 SSOT 는 [`{plugin_root}/skills/deep-review-workflow/references/review-execution.md`](./review-execution.md) §5.1 N_actual == 1 전용 분기.
 - 🔴/🟡 판정은 `{plugin_root}/skills/deep-review-workflow/references/review-criteria.md`의 "severity 부여 원칙"(영향×도달 가능성, 보수적 기본값)을 따른다.
 
-### Per-finding annotations (4-way mode)
+### Per-finding annotations (N-way mode)
 
-When `Review Mode: 4-way Cross-Model`, each finding includes:
-- `agreement: unanimous_4 | majority_3_of_4 | split_2_of_4 | solo_1_of_4`
-- For `majority_3_of_4`: `dissenter: <reviewer-name>`, `dissenter_family: anthropic | openai | google`, `dissent_summary: <one line>`
+When `Review Mode` is an N-way Cross-Model mode, each finding includes:
 
-This preserves cross-vendor-family signal even when the majority threshold (3/4) is met — a dissent from the sole Google reviewer (agy) is treated as informationally distinct from intra-family dissent.
+- `agreement: unanimous_N | majority_K_of_N | split_K_of_N | solo_1_of_N`
+- `dissenters`, required whenever `agreement` is not `unanimous_N`:
+
+```yaml
+dissenters:
+  - reviewer: <canonical reviewer id>
+    family: anthropic | openai | google | xai
+    summary: <one line>
+```
+
+`dissenters.length` is derived from `agreement` and is never declared as a
+separate count: `N - K` for `majority_K_of_N` and `split_K_of_N`, `N - 1` for
+`solo_1_of_N`, and the key is absent for `unanimous_N`. An annotation therefore
+cannot disagree with its own agreement value.
+
+Entries are ordered by `canonicalReviewerIndex`
+(`{plugin_root}/hooks/scripts/lib/adaptive-review-routing.mjs`) — the same total order
+every other reviewer-set rendering already uses, so two reports over one round
+render byte-identically.
+
+`family` is per-dissenter and is never collapsed to one value for the whole
+array: two dissenters split across `xai` and `google` must stay distinguishable
+from two inside one family. That distinction is the entire reason the annotation
+exists. A dissent whose `dissenters` all share one `family` is one vendor's
+outlier, while a dissent spanning two or more families is a cross-vendor signal
+and is materially weaker support for the majority.
+
+The singular `dissenter`, `dissenter_family` and `dissent_summary` keys are
+retired, not kept as a first-dissenter convenience: a consumer reading a singular
+key gets a silently truncated answer and cannot tell that it was truncated.
+
+At `N = 5` the enum instantiates as:
+
+| agreement | `dissenters` |
+|---|---|
+| `unanimous_5` | (key absent) |
+| `majority_4_of_5` | 1 entry |
+| `majority_3_of_5` | 2 entries |
+| `split_2_of_5` | 3 entries |
+| `solo_1_of_5` | 4 entries |
+
+The headline case is a `majority_3_of_5` whose two dissenters sit in different
+vendor families. Both voices survive, and the report shows that the dissent spans
+`google` and `xai` rather than being one vendor's outlier:
+
+```yaml
+agreement: majority_3_of_5
+dissenters:
+  - reviewer: agy
+    family: google
+    summary: the rollback path is already exercised by an existing test
+  - reviewer: grok
+    family: xai
+    summary: the same path, reached from the containment argument instead
+```
+
+Two dissenters inside one family render the same shape with one family value
+repeated. The two cases carry different weight and must never be conflated:
+
+```yaml
+agreement: majority_3_of_5
+dissenters:
+  - reviewer: codex-review
+    family: openai
+    summary: the retry bound is unreachable on the timeout path
+  - reviewer: codex-adversarial
+    family: openai
+    summary: the same bound, reached from the adversarial pass
+```
+
+A `unanimous_5` finding carries no `dissenters` key at all:
+
+```yaml
+agreement: unanimous_5
+```
+
+Lower cardinalities use the identical shape — a `majority_3_of_4` renders a
+one-element array, never a singular key:
+
+```yaml
+agreement: majority_3_of_4
+dissenters:
+  - reviewer: agy
+    family: google
+    summary: the migration step is reversible, so this is advisory not blocking
+```
 
 ### Degraded mode marker
 

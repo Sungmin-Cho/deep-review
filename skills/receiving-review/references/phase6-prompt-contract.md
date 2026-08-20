@@ -41,7 +41,7 @@ The canonical template is:
 - title: finding title
 - severity: critical | warning | info
 - confidence: agreed | partial
-- source: Human | Opus + Codex (일치) | Opus only | Opus (ultracode) | Codex only | Adversarial only | agy | PR comment (@author, #id)
+- source: Human | Opus + Codex (일치) | Opus only | Opus (ultracode) | Codex only | Adversarial only | agy | Grok | PR comment (@author, #id)
 - file_refs:
   - "path/to/file.ext:LINE"
 - issue_summary: concise verified problem
