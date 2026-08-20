@@ -43,6 +43,12 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Compile Linux containment helper
+        if: runner.os == 'Linux'
+        env:
+          GROK_NATIVE_OUTPUT_ROOT: ${{ runner.temp }}/deep-review-native-build
+        run: npm run build:native
+
       - name: Run native tests
         run: npm test
 
@@ -75,6 +81,14 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compile Windows containment helper
+        env:
+          GROK_NATIVE_OUTPUT_ROOT: ${{ runner.temp }}\deep-review-native-build
+        run: npm run build:native
+
       - name: Run native test shard
         run: node scripts/run-windows-native-shard.mjs "${{ matrix.shard }}"
 
@@ -88,6 +102,91 @@ jobs:
         env:
           SHARD_RESULT: ${{ needs.windows-test-shards.result }}
         run: test "$SHARD_RESULT" = success
+
+  release-bundle:
+    runs-on: ubuntu-latest
+    name: native release bundle
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Windows cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-mingw-w64-x86-64
+
+      - name: Build both native helpers
+        run: |
+          GROK_NATIVE_TARGET=linux-x64 npm run build:native
+          GROK_NATIVE_TARGET=win32-x64 CC=x86_64-w64-mingw32-gcc GROK_NATIVE_COMPILER_FAMILY=gnu npm run build:native
+
+      - name: Integrity-bind native helpers
+        working-directory: hooks/scripts/lib/native
+        run: |
+          sha256sum linux-x64/grok-linux-pidns-owner win32-x64/grok-win32-job-owner.exe > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Pack into an isolated release tree
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-bundle"
+          mkdir -p "$RUNNER_TEMP/packed-tree"
+          npm pack --pack-destination "$RUNNER_TEMP/release-bundle"
+          PACK_ARCHIVE="$(find "$RUNNER_TEMP/release-bundle" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$PACK_ARCHIVE"
+          tar -xzf "$PACK_ARCHIVE" -C "$RUNNER_TEMP/packed-tree"
+
+      - name: Verify packed native inventory
+        working-directory: ${{ runner.temp }}/packed-tree/package/hooks/scripts/lib/native
+        run: |
+          test -x linux-x64/grok-linux-pidns-owner
+          test -f win32-x64/grok-win32-job-owner.exe
+          test -f SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Run packed-tree T-PACK-1 on Linux x86_64
+        env:
+          DEEP_REVIEW_PACKED_ROOT: ${{ runner.temp }}/packed-tree/package
+        run: node --test --test-name-pattern='T-PACK-1' "$DEEP_REVIEW_PACKED_ROOT/tests/native-release-smoke.test.js"
+
+      - name: Upload isolated release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: deep-review-native-release-bundle
+          path: ${{ runner.temp }}/release-bundle/*.tgz
+          if-no-files-found: error
+
+  release-bundle-windows-smoke:
+    needs: release-bundle
+    runs-on: windows-latest
+    name: packed native smoke (windows-latest)
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Download isolated release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: deep-review-native-release-bundle
+          path: ${{ runner.temp }}\release-bundle
+
+      - name: Extract isolated release bundle
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem "${{ runner.temp }}\release-bundle\*.tgz" | Select-Object -First 1
+          if ($null -eq $archive) { throw "release bundle missing" }
+          New-Item -ItemType Directory -Force "${{ runner.temp }}\packed-tree" | Out-Null
+          tar -xzf $archive.FullName -C "${{ runner.temp }}\packed-tree"
+
+      - name: Run packed-tree T-PACK-1 on native Windows x86_64
+        env:
+          DEEP_REVIEW_PACKED_ROOT: ${{ runner.temp }}\packed-tree\package
+        run: node --test --test-name-pattern='T-PACK-1' "$env:DEEP_REVIEW_PACKED_ROOT\tests\native-release-smoke.test.js"
 
   legacy-unix:
     strategy:

@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "test:legacy": "bash scripts/run-all-tests.sh"
+    "test:legacy": "bash scripts/run-all-tests.sh",
+    "build:native": "node -e \"const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{spawnSync}=require('node:child_process');const specs={'linux-x64':{source:'grok-linux-pidns-owner.c',output:'linux-x64/grok-linux-pidns-owner'},'win32-x64':{source:'grok-win32-job-owner.c',output:'win32-x64/grok-win32-job-owner.exe'}};const inferred=process.platform==='linux'&&process.arch==='x64'?'linux-x64':process.platform==='win32'&&process.arch==='x64'?'win32-x64':null;const target=process.env.GROK_NATIVE_TARGET||inferred;const spec=specs[target];if(!spec)throw new Error('build:native supports only linux-x64 and win32-x64');const sourceRoot=path.join('hooks','scripts','lib','native');const outputRoot=process.env.GROK_NATIVE_OUTPUT_ROOT||sourceRoot;const source=path.join(sourceRoot,spec.source);const output=path.join(outputRoot,...spec.output.split('/'));fs.mkdirSync(path.dirname(output),{recursive:true});const family=process.env.GROK_NATIVE_COMPILER_FAMILY||(target==='win32-x64'&&process.platform==='win32'?'msvc':'gnu');const compiler=process.env.CC||(family==='msvc'?'cl':'cc');const object=path.join(os.tmpdir(),'grok-win32-job-owner.obj');const args=family==='msvc'?['/nologo','/std:c11','/utf-8','/W4','/WX','/O2','/TC',source,'/Fo'+object,'/Fe'+output]:['-std=c11','-O2','-Wall','-Wextra','-Werror',...(target==='win32-x64'?['-municode']:[]),source,'-o',output];const result=spawnSync(compiler,args,{stdio:'inherit'});if(result.error)throw result.error;process.exit(result.status??1)\""
   }
 }

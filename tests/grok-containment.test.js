@@ -12,7 +12,16 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -56,6 +65,25 @@ function workspace(label) {
   return mkdtempSync(join(tmpdir(), `deep-review-${label}-`));
 }
 
+function sourceEntriesBelow(directory, prefix = '') {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const relativePath = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) return sourceEntriesBelow(join(directory, entry.name), relativePath);
+    return [relativePath];
+  });
+}
+
+test('the native source inventory observes symlinks instead of silently dropping them', {
+  skip: process.platform === 'win32' ? 'file symlink creation is not guaranteed for unprivileged Windows CI' : false,
+}, (t) => {
+  const root = workspace('native-symlink-inventory');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'source.c'), 'int main(void) { return 0; }\n');
+  symlinkSync('source.c', join(root, 'SHA256SUMS'));
+  assert.deepEqual(sourceEntriesBelow(root).sort(), ['SHA256SUMS', 'source.c']);
+});
+
 // ---------------------------------------------------------------------------
 // D21 — the platform/arch gate, evaluated before anything else exists.
 // ---------------------------------------------------------------------------
@@ -95,14 +123,18 @@ test('resolveGrokContainmentPlatform refuses every unsupported platform/arch pai
   }
 });
 
-test('the inventoried native helpers are absent from this tree, so D21 fails closed on every platform', () => {
-  assert.equal(existsSync(join(pluginRoot, 'hooks', 'scripts', 'lib', 'native')), false,
-    'SLICE-008c must not create the native helpers or any prebuilt binary');
+test('the native source tree contains no built artifact, so D21 still fails closed on every platform', () => {
+  const nativeDirectory = join(pluginRoot, 'hooks', 'scripts', 'lib', 'native');
   for (const [key, entry] of Object.entries(GROK_CONTAINMENT_INVENTORY)) {
     const [platform, arch] = key.split('/');
     const gate = resolveGrokContainmentPlatform({ platform, arch });
     assert.equal(existsSync(gate.helper_path), false, `${entry.helper} must not be present`);
   }
+  const nativeEntries = sourceEntriesBelow(nativeDirectory);
+  assert.equal(nativeEntries.includes('SHA256SUMS'), false,
+    'SHA256SUMS is release-automation output and must not exist in the source tree');
+  assert.deepEqual(nativeEntries.filter((relativePath) => !relativePath.endsWith('.c')), [],
+    'only reproducible C sources may exist under the native source tree');
 });
 
 test('preflightGrokContainment on this host refuses before provider spawn and issues no containment_ready_token', () => {
