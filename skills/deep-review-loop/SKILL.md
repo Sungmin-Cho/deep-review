@@ -82,6 +82,8 @@ this session — never re-mint mid-session.
   `--model`, `--effort`, `--reviewer-model`, and `--reviewer-effort`. It never
   uses substring replacement or consumes a neighbouring non-Grok value.
 
+  For ultracode-consumed loops, Rounds 2+ remove `--ultracode`; the cadence normally injects `--no-opus --no-agy`, but a Codex-unavailable round must withhold only the injected `--no-opus`.
+
 <!-- ultracode-round-2-normalizer:start -->
 ```javascript
 (argv, { codexUnavailable = false } = {}) => {

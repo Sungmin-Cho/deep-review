@@ -10,8 +10,37 @@ const { pathToFileURL } = require('node:url');
 
 const root = path.resolve(__dirname, '..');
 const readinessUrl = pathToFileURL(path.join(root, 'hooks/scripts/document-readiness.mjs')).href;
+const reviewerIdsUrl = pathToFileURL(path.join(root, 'hooks/scripts/lib/reviewer-ids.mjs')).href;
 const payloadUrl = pathToFileURL(path.join(root, 'hooks/scripts/build-reviewer-payload.mjs')).href;
 const synthesisUrl = pathToFileURL(path.join(root, 'hooks/scripts/review-synthesis.mjs')).href;
+
+async function observeReadinessReviewerProviders() {
+  // The readiness map intentionally remains private. Warm its dependencies,
+  // then observe the map that the real module constructs without exporting it
+  // or re-parsing its source text solely for this oracle.
+  await import(readinessUrl);
+  const NativeMap = globalThis.Map;
+  const observedMaps = [];
+  globalThis.Map = class extends NativeMap {
+    constructor(entries) {
+      super(entries);
+      observedMaps.push(this);
+    }
+  };
+  try {
+    await import(`${readinessUrl}?reviewer-provider-oracle`);
+  } finally {
+    globalThis.Map = NativeMap;
+  }
+  const candidates = observedMaps.filter((candidate) => (
+    candidate.get('claude-opus') === 'claude'
+      && candidate.get('codex-review') === 'codex'
+      && candidate.get('codex-adversarial') === 'codex'
+      && candidate.get('agy') === 'agy'
+  ));
+  assert.equal(candidates.length, 1, 'the private readiness reviewer-provider map must be observable');
+  return Object.fromEntries(candidates[0]);
+}
 
 function repoFixture() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'deep-review-readiness-'));
@@ -74,6 +103,11 @@ function canonicalJsonV22(value) {
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
+
+test('document readiness reviewer-provider map equals the canonical identity map', async () => {
+  const { REVIEWER_PROVIDERS } = await import(reviewerIdsUrl);
+  assert.deepEqual(await observeReadinessReviewerProviders(), REVIEWER_PROVIDERS);
+});
 
 // The same sealed Warning/advisory evidence under either receipt label. The
 // `1.0` arm is the genuine pre-2.3 artifact; the `2.0` arm is the same bytes

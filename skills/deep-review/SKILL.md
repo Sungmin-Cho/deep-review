@@ -30,8 +30,7 @@ The returned JSON is the executable route authority. Stop on `ok=false`; use
 its expanded `argv` and terminal `route` without independently reparsing them.
 The runtime enforces this grammar:
 
-1. Expand `--codex-only` to `--codex --no-opus --no-agy --no-grok` before
-   validation.
+1. Expand `--codex-only` to `--codex --no-opus --no-agy --no-grok` before validation.
 2. Reject `--ultracode` with `--no-opus`, reject `--codex` with `--no-codex`,
    and reject `--grok` with `--no-grok` (and therefore with `--codex-only`).
 3. `--contract` consumes the next token only when it matches `SLICE-[0-9]+`.

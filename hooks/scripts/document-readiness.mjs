@@ -79,6 +79,7 @@ const REVIEWER_PROVIDERS = new Map([
   ['codex-review', 'codex'],
   ['codex-adversarial', 'codex'],
   ['agy', 'agy'],
+  ['grok', 'grok'],
 ]);
 
 function utf8Compare(left, right) {
