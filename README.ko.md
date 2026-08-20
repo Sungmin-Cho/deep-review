@@ -2,9 +2,9 @@
 
 # deep-review
 
-![version](https://img.shields.io/github/package-json/v/Sungmin-Cho/claude-deep-review?label=version)
-![license](https://img.shields.io/github/license/Sungmin-Cho/claude-deep-review)
-[![part of deep-suite](https://img.shields.io/badge/part%20of-deep--suite-5b8def)](https://github.com/Sungmin-Cho/claude-deep-suite)
+![version](https://img.shields.io/github/package-json/v/Sungmin-Cho/deep-review?label=version)
+![license](https://img.shields.io/github/license/Sungmin-Cho/deep-review)
+[![part of deep-suite](https://img.shields.io/badge/part%20of-deep--suite-5b8def)](https://github.com/Sungmin-Cho/deep-suite)
 
 AI 코딩 에이전트를 위한 독립 Evaluator 플러그인 — Codex 연동 교차 모델 코드 리뷰와 Sprint Contract 지원.
 
@@ -12,11 +12,11 @@ AI 코딩 에이전트에는 구조적 맹점이 있습니다: 자신이 작성�
 
 ## deep-suite에서의 역할
 
-deep-review는 [claude-deep-suite](https://github.com/Sungmin-Cho/claude-deep-suite)의 **독립 평가자**로, [Harness Engineering](https://martinfowler.com/articles/harness-engineering.html) 프레임워크의 Generator–Evaluator 분리를 구현합니다:
+deep-review는 [deep-suite](https://github.com/Sungmin-Cho/deep-suite)의 **독립 평가자**로, [Harness Engineering](https://martinfowler.com/articles/harness-engineering.html) 프레임워크의 Generator–Evaluator 분리를 구현합니다:
 
 - **Inferential 센서** — Generator 컨텍스트 없는 독립 Opus 서브에이전트 리뷰. computational 센서가 잡지 못하는 의미론적 문제의 주요 품질 게이트.
 - **교차 모델 검증** — Opus + Codex review + Codex adversarial (+ opt-in agy/Grok). 프레임워크의 "LLM-as-judge" 개념을 초과.
-- **Fitness 인지 리뷰** — [deep-work](https://github.com/Sungmin-Cho/claude-deep-work)의 `fitness.json` 규칙과 `health_report`를 소비하여 아키텍처 의도 인지 평가.
+- **Fitness 인지 리뷰** — [deep-work](https://github.com/Sungmin-Cho/deep-work)의 `fitness.json` 규칙과 `health_report`를 소비하여 아키텍처 의도 인지 평가.
 - **Sprint Contract 검증** — 구조화된 성공 기준 확인.
 
 ## 설치
@@ -306,7 +306,7 @@ review를 유지합니다.
 ## 링크
 
 - [변경 기록](./CHANGELOG.ko.md)
-- [claude-deep-suite](https://github.com/Sungmin-Cho/claude-deep-suite) — marketplace 및 형제 플러그인
+- [deep-suite](https://github.com/Sungmin-Cho/deep-suite) — marketplace 및 형제 플러그인
 - [기여 가이드](./CONTRIBUTING.md) · [보안 정책](./SECURITY.md)
 
 ## 라이선스

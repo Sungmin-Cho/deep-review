@@ -2,9 +2,9 @@
 
 # deep-review
 
-![version](https://img.shields.io/github/package-json/v/Sungmin-Cho/claude-deep-review?label=version)
-![license](https://img.shields.io/github/license/Sungmin-Cho/claude-deep-review)
-[![part of deep-suite](https://img.shields.io/badge/part%20of-deep--suite-5b8def)](https://github.com/Sungmin-Cho/claude-deep-suite)
+![version](https://img.shields.io/github/package-json/v/Sungmin-Cho/deep-review?label=version)
+![license](https://img.shields.io/github/license/Sungmin-Cho/deep-review)
+[![part of deep-suite](https://img.shields.io/badge/part%20of-deep--suite-5b8def)](https://github.com/Sungmin-Cho/deep-suite)
 
 An independent Evaluator plugin for AI coding agents — cross-model code review with Codex integration and Sprint Contract support.
 
@@ -12,11 +12,11 @@ AI coding agents have a structural blind spot: they review their own work. The a
 
 ## Role in deep-suite
 
-deep-review is the **independent evaluator** of the [claude-deep-suite](https://github.com/Sungmin-Cho/claude-deep-suite), implementing the Generator–Evaluator separation from the [Harness Engineering](https://martinfowler.com/articles/harness-engineering.html) framework:
+deep-review is the **independent evaluator** of the [deep-suite](https://github.com/Sungmin-Cho/deep-suite), implementing the Generator–Evaluator separation from the [Harness Engineering](https://martinfowler.com/articles/harness-engineering.html) framework:
 
 - **Inferential sensor** — an independent Opus subagent review with zero Generator context, the primary quality gate for semantic issues computational sensors cannot catch.
 - **Cross-model verification** — Opus + Codex review + Codex adversarial (+ opt-in agy/Grok), exceeding the framework's "LLM-as-judge" concept.
-- **Fitness-aware review** — consumes `fitness.json` rules and the `health_report` from [deep-work](https://github.com/Sungmin-Cho/claude-deep-work) for architecture-intent-aware evaluation.
+- **Fitness-aware review** — consumes `fitness.json` rules and the `health_report` from [deep-work](https://github.com/Sungmin-Cho/deep-work) for architecture-intent-aware evaluation.
 - **Sprint Contract verification** — structured success-criteria checking.
 
 ## Install
@@ -308,7 +308,7 @@ implementation phase retains normal code review, not this document policy.
 ## Links
 
 - [Changelog](./CHANGELOG.md)
-- [claude-deep-suite](https://github.com/Sungmin-Cho/claude-deep-suite) — the marketplace and sibling plugins
+- [deep-suite](https://github.com/Sungmin-Cho/deep-suite) — the marketplace and sibling plugins
 - [Contributing](./CONTRIBUTING.md) · [Security policy](./SECURITY.md)
 
 ## License

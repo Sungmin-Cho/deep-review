@@ -395,7 +395,7 @@ echo "=== M5.5 #5: stale-recovery preserves user staging ==="
 # Test 10 exercises restore_mutation directly and Test 12 doesn't stage
 # anything pre-recovery.
 #
-# Spec: claude-deep-suite/docs/superpowers/plans/2026-05-12-m5.5-remaining-
+# Spec: deep-suite/docs/superpowers/plans/2026-05-12-m5.5-remaining-
 # tests-handoff.md §2 #5 (deep-review row).
 
 # Test 26 (M5.5 #5-A): leftover lock + state + user staging → recover + preserve

@@ -3,7 +3,7 @@
 
 /**
  * validate-envelope-emit.js — Self-test validator for deep-review's M3
- * envelope emission. Mirrors the suite-side schema (claude-deep-suite/
+ * envelope emission. Mirrors the suite-side schema (deep-suite/
  * schemas/artifact-envelope.schema.json) without external deps so this
  * works as a release-lint inside the deep-review plugin's own test
  * pipeline.
@@ -242,7 +242,7 @@ function validateRoot(obj, errors) {
   validateEnvelopeBlock(obj.envelope, errors);
 
   // Payload shape: minimal — non-null, non-array object. Domain-specific
-  // payload schema lives in claude-deep-suite payload-registry (Phase 3).
+  // payload schema lives in deep-suite payload-registry (Phase 3).
   if (obj.payload === null || typeof obj.payload !== 'object' || Array.isArray(obj.payload)) {
     errors.push('payload: must be a non-null, non-array object');
   }

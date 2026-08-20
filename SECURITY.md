@@ -4,13 +4,13 @@
 
 Security fixes are delivered through the latest release of deep-review. The version
 is tracked in `.claude-plugin/plugin.json` (and mirrored in `.codex-plugin/plugin.json`
-and `package.json`); the [claude-deep-suite](https://github.com/Sungmin-Cho/claude-deep-suite)
+and `package.json`); the [deep-suite](https://github.com/Sungmin-Cho/deep-suite)
 marketplace pins the published commit.
 
 ## Reporting a vulnerability
 
 Please report security issues **privately** via
-[GitHub Security Advisories](https://github.com/Sungmin-Cho/claude-deep-review/security/advisories/new)
+[GitHub Security Advisories](https://github.com/Sungmin-Cho/deep-review/security/advisories/new)
 rather than opening a public issue.
 
 We aim to acknowledge reports within a few days and will coordinate a fix and a
@@ -52,7 +52,7 @@ backstop for every possible mutation.
 - **Hooks execute shell commands.** Review bridges and the mutation/lock protocol run
   shell (`git`, fingerprinting, the reviewer CLIs). Review `hooks/` and the recommended
   denylist in the suite's
-  [`guides/hook-patterns.md`](https://github.com/Sungmin-Cho/claude-deep-suite/blob/main/guides/hook-patterns.md)
+  [`guides/hook-patterns.md`](https://github.com/Sungmin-Cho/deep-suite/blob/main/guides/hook-patterns.md)
   before enabling them.
 
 When reporting, please indicate which runtime (Claude Code / Codex) and which reviewer
