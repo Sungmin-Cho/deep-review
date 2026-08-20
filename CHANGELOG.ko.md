@@ -10,6 +10,20 @@ deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Ke
 
 - **디자인 리뷰 readiness 모드** — 설계 문서와 ADR은 이제 구현 가능성과 설계 건전성을 검토하고, 실행 가능한 계획은 실용적 full readiness를 유지합니다. 두 모드 모두 문구 완결성을 차단 사유로 삼지 않으며, 두 host는 동일하게 검증된 inline-route 정책을 받습니다.
 
+## [2.6.0] — 2026-08-20
+
+### 추가
+
+- **Opt-in Grok/xAI reviewer** — `--grok` / `--no-grok`과 명시적인 Grok model/effort routing이 외부 privacy preflight 뒤에만 별도의 xAI-family vote를 추가합니다. 탐지와 일반 무플래그 리뷰는 Grok을 dispatch하거나 저장소 내용을 보내지 않습니다.
+
+### 변경
+
+- **닫힌 Codex-only expansion** — `--codex-only`가 이제 `--codex --no-opus --no-agy --no-grok`으로 확장되므로 Grok 활성화가 플래그의 문자 그대로인 provider 약속과 모순될 수 없습니다.
+
+### 보안
+
+- **관찰된 Grok 쓰기 강제** — `--permission-mode plan`만 테스트된 쓰기를 방지한다고 관찰된 control이며, 필수 `--sandbox read-only`는 v1.0.3에서 쓰기 장벽이 아니었습니다. 전후 mutation 제외는 완전한 coverage라고 주장하지 않고 제한된 hybrid fingerprint surface에 연결됩니다.
+
 ## [2.5.0] — 2026-08-17
 
 ### 추가

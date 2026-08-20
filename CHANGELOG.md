@@ -10,6 +10,20 @@ All notable changes to deep-review are documented here. Follows [Keep a Changelo
 
 - **Design review readiness modes** — design documents and ADRs now review implementation feasibility and design soundness, while executable plans retain practical full readiness. Neither mode treats prose completeness as blocking, and both hosts receive the same validated inline-route policy.
 
+## [2.6.0] — 2026-08-20
+
+### Added
+
+- **Opt-in Grok/xAI reviewer** — `--grok` / `--no-grok` and explicit Grok model/effort routing add a separate xAI-family vote only after the external privacy preflight; detection and ordinary no-flag reviews do not dispatch Grok or send it repository content.
+
+### Changed
+
+- **Closed Codex-only expansion** — `--codex-only` now expands to `--codex --no-opus --no-agy --no-grok`, so enabling Grok cannot contradict the flag's literal provider promise.
+
+### Security
+
+- **Observed Grok write enforcement** — `--permission-mode plan` is the only control observed to prevent the tested writes; required `--sandbox read-only` was not a write barrier in v1.0.3. Pre/post mutation exclusion remains tied to the bounded hybrid fingerprint surface rather than claimed as complete coverage.
+
 ## [2.5.0] — 2026-08-17
 
 ### Added

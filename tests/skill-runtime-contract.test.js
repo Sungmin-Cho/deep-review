@@ -835,7 +835,7 @@ test('document instructions use practical blockers and readiness-owned final ver
   }
 
   for (const relativePath of ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {
-    assert.equal(JSON.parse(read(relativePath)).version, '2.5.0', relativePath);
+    assert.equal(JSON.parse(read(relativePath)).version, '2.6.0', relativePath);
   }
 
   const changelog = read('CHANGELOG.md');
@@ -942,8 +942,17 @@ function sandboxPreventionClaims(source) {
 // keeping the Grok reference honest while another authority promotes the
 // sandbox flag to a write barrier does not satisfy this test.
 test('T-DOC-2: instructions attribute prevention only to permission-mode plan', () => {
-  const scanned = shippedInstructionFiles();
-  assert.ok(scanned.length > 10, 'the instruction sweep matched almost nothing — the walk has rotted');
+  const instructionFiles = shippedInstructionFiles();
+  assert.ok(
+    instructionFiles.length > 10,
+    'the instruction sweep matched almost nothing — the walk has rotted',
+  );
+  const scanned = [
+    ...instructionFiles,
+    'SECURITY.md',
+    'README.md',
+    'README.ko.md',
+  ];
   for (const relativePath of scanned) {
     assert.deepEqual(
       sandboxPreventionClaims(read(relativePath)),
