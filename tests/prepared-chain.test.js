@@ -143,14 +143,21 @@ test('prepared chain rejects a shebangless text PATH target and unsupported sheb
   const launcher = executable(root, 'grok', '#!/usr/bin/env node\n');
   executable(root, 'node', 'console.log("implicit shell fallback")\n');
   const unsupported = executable(root, 'unsupported', '#!/usr/bin/env -Snode\n');
-  const { prepareSpawnChain } = await runtimePromise;
+  const { classifyPosixExecutableType, prepareSpawnChain } = await runtimePromise;
+  const host = classifyPosixExecutableType(process.execPath);
+  assert.equal(host.ok, true, host.reason);
+  assert.match(host.type, /^native-(?:elf|macho)$/u);
+  const shebanglessReason = host.type === 'native-elf'
+    ? /^invalid_elf_header$/u
+    : /unrecognized_posix_executable|shebangless_text/u;
+  assert.doesNotMatch('accepted_for_any_reason', shebanglessReason);
 
   const fallback = prepareSpawnChain(launcher, [], {
     cwd: root,
     env: { ...process.env, PATH: root },
   });
   assert.equal(fallback.ok, false);
-  assert.match(fallback.reason, /unrecognized_posix_executable|shebangless_text/u);
+  assert.match(fallback.reason, shebanglessReason);
 
   const grammar = prepareSpawnChain(unsupported, [], {
     cwd: root,

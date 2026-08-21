@@ -385,14 +385,21 @@ test('missing shebang is never native: text, empty, truncated, and malformed car
 test('foreign-endian Mach-O and foreign-platform ELF fail closed', async () => {
   const root = workspace('foreign');
   const { classifyPosixExecutableType } = await runtimePromise;
+  const host = classifyPosixExecutableType(process.execPath);
+  assert.equal(host.ok, true, host.reason);
+  assert.match(host.type, /^native-(?:elf|macho)$/u);
+  const malformedNativeReason = host.type === 'native-elf'
+    ? /^invalid_elf_header$/u
+    : /foreign|unrecognized|malformed/u;
+  assert.doesNotMatch('accepted_for_any_reason', malformedNativeReason);
   const foreignEndian = Buffer.alloc(32);
   foreignEndian.writeUInt32BE(0xfeedfacf, 0);
 
   const macho = classifyPosixExecutableType(executable(root, 'foreign-endian', foreignEndian));
   assert.equal(macho.ok, false);
-  assert.match(macho.reason, /foreign|unrecognized|malformed/u);
+  assert.match(macho.reason, malformedNativeReason);
 
-  if (process.platform === 'darwin') {
+  if (host.type === 'native-macho') {
     const elf = classifyPosixExecutableType(executable(root, 'foreign-elf', elf64Carrier()));
     assert.equal(elf.ok, false);
     assert.match(elf.reason, /foreign|unrecognized|malformed/u);
