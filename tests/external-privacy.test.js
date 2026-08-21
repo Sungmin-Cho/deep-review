@@ -18,10 +18,15 @@ import {
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const agyCliPath = join(pluginRoot, 'hooks', 'scripts', 'agy-privacy-preflight.mjs');
+const SENSITIVE_PATTERNS_RELATIVE_PATH = 'hooks/scripts/lib/sensitive-patterns.list';
 
 // Pinned to the commit this slice starts from, not HEAD, so the hard-gate
 // replay-and-diff stays meaningful once this slice's own commit lands.
 const BASELINE_COMMIT = '52c1f6b101b75568cd71f2c2889a59a409cdca07';
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
 
 function workspace(label) {
   // The CLI entry-point self-check compares argv[1] to import.meta.url. Use the
@@ -161,7 +166,31 @@ test("provider: 'grok' renders a distinct, non-colliding namespace", async () =>
 // asserted.
 // ---------------------------------------------------------------------------
 
-function extractBaseline(commit) {
+function matchCheckoutLineEndings(bytes, checkoutBytes) {
+  const baselineText = bytes.toString('utf8');
+  const checkoutText = checkoutBytes.toString('utf8');
+  assert.deepEqual(Buffer.from(baselineText, 'utf8'), bytes, 'baseline patterns must be UTF-8');
+  assert.deepEqual(Buffer.from(checkoutText, 'utf8'), checkoutBytes, 'checkout patterns must be UTF-8');
+
+  const checkoutHasCrlf = checkoutText.includes('\r\n');
+  const checkoutWithoutCrlf = checkoutText.replaceAll('\r\n', '');
+  assert.equal(
+    checkoutHasCrlf && checkoutWithoutCrlf.includes('\n'),
+    false,
+    'checkout patterns must not mix LF and CRLF',
+  );
+  assert.equal(checkoutWithoutCrlf.includes('\r'), false, 'checkout patterns must not contain bare CR');
+  assert.equal(
+    baselineText.replaceAll('\r\n', '').includes('\r'),
+    false,
+    'baseline patterns must not contain bare CR',
+  );
+
+  const normalized = baselineText.replaceAll('\r\n', '\n');
+  return Buffer.from(checkoutHasCrlf ? normalized.replaceAll('\n', '\r\n') : normalized, 'utf8');
+}
+
+function extractBaseline(commit, checkoutRoot = pluginRoot) {
   const dest = workspace('external-privacy-baseline');
   const list = spawnSync('git', ['ls-tree', '-r', '--name-only', commit, '--', 'hooks/scripts'], {
     cwd: pluginRoot, encoding: 'utf8',
@@ -175,7 +204,26 @@ function extractBaseline(commit) {
     assert.equal(show.status, 0, show.stderr && show.stderr.toString());
     const destPath = join(dest, relPath);
     mkdirSync(dirname(destPath), { recursive: true });
-    writeFileSync(destPath, show.stdout);
+    const bytes = relPath === SENSITIVE_PATTERNS_RELATIVE_PATH
+      ? matchCheckoutLineEndings(
+        show.stdout,
+        readFileSync(join(checkoutRoot, SENSITIVE_PATTERNS_RELATIVE_PATH)),
+      )
+      : show.stdout;
+    writeFileSync(destPath, bytes);
+  }
+  return dest;
+}
+
+function extractCurrentScripts() {
+  const dest = workspace('external-privacy-current');
+  const paths = git(['ls-files', 'hooks/scripts']).trim().split('\n').filter(Boolean);
+  assert.ok(paths.includes(SENSITIVE_PATTERNS_RELATIVE_PATH));
+  for (const relPath of paths) {
+    const sourcePath = join(pluginRoot, relPath);
+    const destPath = join(dest, relPath);
+    mkdirSync(dirname(destPath), { recursive: true });
+    writeFileSync(destPath, readFileSync(sourcePath));
   }
   return dest;
 }
@@ -217,6 +265,39 @@ test('the pinned CLI replay invokes the canonical target when its entry path is 
   );
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /"outcome":"auto_ack"/u);
+});
+
+test('the pinned CLI replay compares a CRLF checkout against like-for-like pattern bytes', () => {
+  const currentRoot = extractCurrentScripts();
+  const currentPatternsPath = join(currentRoot, SENSITIVE_PATTERNS_RELATIVE_PATH);
+  const originalPatterns = readFileSync(currentPatternsPath);
+  const originalPatternsDigest = sha256(originalPatterns);
+  const crlfPatterns = Buffer.from(
+    originalPatterns.toString('utf8').replace(/\r?\n/gu, '\r\n'),
+    'utf8',
+  );
+  assert.equal(crlfPatterns.includes(Buffer.from('\r\n')), true);
+
+  try {
+    writeFileSync(currentPatternsPath, crlfPatterns);
+    const baselineRoot = extractBaseline(BASELINE_COMMIT, currentRoot);
+    const baselineCliPath = join(baselineRoot, 'hooks', 'scripts', 'agy-privacy-preflight.mjs');
+    const currentCliPath = join(currentRoot, 'hooks', 'scripts', 'agy-privacy-preflight.mjs');
+    const repo = repository('external-privacy-crlf-replay', { withHits: true });
+    const configPath = config(repo);
+
+    const before = runCli(baselineCliPath, baselineRoot, repo, configPath, 'auto');
+    const after = runCli(currentCliPath, currentRoot, repo, configPath, 'auto');
+
+    assert.deepEqual(after, before, 'CRLF checkout must replay the complete CLI result byte-for-byte');
+  } finally {
+    writeFileSync(currentPatternsPath, originalPatterns);
+    assert.equal(
+      sha256(readFileSync(currentPatternsPath)),
+      originalPatternsDigest,
+      'CRLF simulation must restore the current mirror byte-for-byte',
+    );
+  }
 });
 
 function buildMatrixCases() {
@@ -313,24 +394,57 @@ test("agy-privacy-preflight.mjs CLI output is unchanged for every existing input
 
   assert.deepEqual(differences, [], `agy CLI output diverged for: ${differences.map((d) => d.key).join(', ')}`);
 
-  // Positive control: prove the comparison can actually observe a
-  // difference, by mutating the extracted baseline's domain-separation
-  // string and re-running one case. A comparison that cannot fail proves
-  // nothing.
-  const mutatedLibPath = join(baselineRoot, 'hooks', 'scripts', 'lib', 'agy-privacy.mjs');
-  const originalLib = readFileSync(mutatedLibPath, 'utf8');
-  assert.ok(originalLib.includes('deep-review-agy-privacy-v1'));
-  writeFileSync(mutatedLibPath, originalLib.replace('deep-review-agy-privacy-v1', 'deep-review-agy-privacy-MUTATED'));
+  // Positive controls: prove the exact stdout comparison still observes both
+  // a changed existing field and an added field. Each mutation is restored
+  // byte-for-byte and digest-checked before the next one runs.
+  const originalCli = readFileSync(baselineCliPath);
+  const originalCliDigest = sha256(originalCli);
+  const originalCliText = originalCli.toString('utf8');
+  const resultAnchor = 'const result = await prepareAgyPrivacy(options);';
+  assert.equal(originalCliText.split(resultAnchor).length, 2, 'preflight result anchor must be unique');
+  const controlRepo = repository('external-privacy-output-controls', { withHits: true });
+  const controlConfigPath = config(controlRepo);
 
-  const controlShape = matrix[0].shape;
-  const controlConfigPath = controlShape.makeConfig
-    ? controlShape.makeConfig()
-    : (mkdirSync(join(controlShape.repo, '.deep-review'), { recursive: true }), controlShape.configPath);
-  const controlBefore = runCli(baselineCliPath, baselineRoot, controlShape.repo, controlConfigPath, 'auto');
-  const controlAfter = runCli(agyCliPath, pluginRoot, controlShape.repo, controlConfigPath, 'auto');
-  assert.notEqual(controlBefore.stdout, controlAfter.stdout, 'positive control failed to detect a mutated baseline');
+  const controls = [
+    {
+      name: 'different outcome',
+      replacement: "const result = { ...(await prepareAgyPrivacy(options)), outcome: 'mutated_outcome' };",
+      observe: (value) => assert.equal(value.outcome, 'mutated_outcome'),
+    },
+    {
+      name: 'extra field',
+      replacement: 'const result = { ...(await prepareAgyPrivacy(options)), replay_extra_field: true };',
+      observe: (value) => assert.equal(value.replay_extra_field, true),
+    },
+  ];
 
-  writeFileSync(mutatedLibPath, originalLib);
+  for (const control of controls) {
+    const mutatedCli = Buffer.from(originalCliText.replace(resultAnchor, control.replacement), 'utf8');
+    assert.notEqual(sha256(mutatedCli), originalCliDigest, `${control.name} must change the preflight bytes`);
+    try {
+      writeFileSync(baselineCliPath, mutatedCli);
+      const controlBefore = runCli(
+        baselineCliPath, baselineRoot, controlRepo, controlConfigPath, 'auto',
+      );
+      const controlAfter = runCli(
+        agyCliPath, pluginRoot, controlRepo, controlConfigPath, 'auto',
+      );
+      assert.equal(controlBefore.status, 0, controlBefore.stderr);
+      control.observe(JSON.parse(controlBefore.stdout));
+      assert.notEqual(
+        controlBefore.stdout,
+        controlAfter.stdout,
+        `${control.name} positive control must be visible to the full stdout diff`,
+      );
+    } finally {
+      writeFileSync(baselineCliPath, originalCli);
+      assert.equal(
+        sha256(readFileSync(baselineCliPath)),
+        originalCliDigest,
+        `${control.name} mutation must restore the baseline preflight byte-for-byte`,
+      );
+    }
+  }
 });
 
 test('a pre-existing agy_sensitive_acked_fingerprint computed before this slice still validates after it', async () => {
