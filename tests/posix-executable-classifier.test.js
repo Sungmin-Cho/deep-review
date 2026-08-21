@@ -9,7 +9,7 @@ const {
   writeFileSync,
 } = require('node:fs');
 const { tmpdir } = require('node:os');
-const { dirname, join } = require('node:path');
+const { delimiter, dirname, join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 
 const processModuleUrl = pathToFileURL(join(
@@ -47,6 +47,16 @@ function incompleteFatHeader() {
   bytes.writeUInt32BE(0xcafebabe, 0);
   bytes.writeUInt32BE(1, 4);
   return bytes;
+}
+
+function derivePosixHostCapability(classifyPosixExecutableType) {
+  const host = classifyPosixExecutableType(process.execPath);
+  if (host.ok) {
+    assert.match(host.type, /^native-(?:elf|macho)$/u);
+    return host.type;
+  }
+  assert.equal(host.reason, 'unsupported_posix_platform');
+  return 'unsupported-posix';
 }
 
 const CPU_TYPE_X86_64 = 0x01000007;
@@ -385,12 +395,12 @@ test('missing shebang is never native: text, empty, truncated, and malformed car
 test('foreign-endian Mach-O and foreign-platform ELF fail closed', async () => {
   const root = workspace('foreign');
   const { classifyPosixExecutableType } = await runtimePromise;
-  const host = classifyPosixExecutableType(process.execPath);
-  assert.equal(host.ok, true, host.reason);
-  assert.match(host.type, /^native-(?:elf|macho)$/u);
-  const malformedNativeReason = host.type === 'native-elf'
+  const hostType = derivePosixHostCapability(classifyPosixExecutableType);
+  const malformedNativeReason = hostType === 'native-elf'
     ? /^invalid_elf_header$/u
-    : /foreign|unrecognized|malformed/u;
+    : hostType === 'native-macho'
+      ? /foreign|unrecognized|malformed/u
+      : /^unsupported_posix_platform$/u;
   assert.doesNotMatch('accepted_for_any_reason', malformedNativeReason);
   const foreignEndian = Buffer.alloc(32);
   foreignEndian.writeUInt32BE(0xfeedfacf, 0);
@@ -399,22 +409,29 @@ test('foreign-endian Mach-O and foreign-platform ELF fail closed', async () => {
   assert.equal(macho.ok, false);
   assert.match(macho.reason, malformedNativeReason);
 
-  if (host.type === 'native-macho') {
-    const elf = classifyPosixExecutableType(executable(root, 'foreign-elf', elf64Carrier()));
-    assert.equal(elf.ok, false);
-    assert.match(elf.reason, /foreign|unrecognized|malformed/u);
-  }
+  const elf = classifyPosixExecutableType(executable(root, 'foreign-elf', elf64Carrier()));
+  assert.equal(elf.ok, false);
+  const elfReason = hostType === 'native-macho'
+    ? /^foreign_platform_elf$/u
+    : hostType === 'native-elf'
+      ? /^invalid_elf_type_or_cpu$/u
+      : /^unsupported_posix_platform$/u;
+  assert.match(elf.reason, elfReason);
 });
 
 test('resolveEnvPathTarget binds only an absolute, non-empty PATH authority', async () => {
   const root = workspace('path');
   const target = executable(root, 'node', Buffer.from('#!/invalid nested\n'));
-  const { resolveEnvPathTarget } = await runtimePromise;
+  const { classifyPosixExecutableType, resolveEnvPathTarget } = await runtimePromise;
+  const hostType = derivePosixHostCapability(classifyPosixExecutableType);
 
-  assert.equal(resolveEnvPathTarget('node', { PATH: root }, root), target);
-  assert.equal(resolveEnvPathTarget('node', { PATH: `:${root}` }, root), null);
-  assert.equal(resolveEnvPathTarget('node', { PATH: `${root}:` }, root), null);
-  assert.equal(resolveEnvPathTarget('node', { PATH: `relative:${root}` }, root), null);
+  assert.equal(
+    resolveEnvPathTarget('node', { PATH: root }, root),
+    hostType === 'unsupported-posix' ? null : target,
+  );
+  assert.equal(resolveEnvPathTarget('node', { PATH: ['', root].join(delimiter) }, root), null);
+  assert.equal(resolveEnvPathTarget('node', { PATH: [root, ''].join(delimiter) }, root), null);
+  assert.equal(resolveEnvPathTarget('node', { PATH: ['relative', root].join(delimiter) }, root), null);
   assert.equal(resolveEnvPathTarget('-Snode', { PATH: root }, root), null);
   assert.equal(resolveEnvPathTarget('../node', { PATH: root }, root), null);
 });

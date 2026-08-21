@@ -57,8 +57,9 @@ import { synthesizeReviewRound } from '../hooks/scripts/review-synthesis.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const BASELINE_COMMIT = '1c3ef2d';
-const SUPPORTED_HERE = resolveGrokContainmentPlatform().supported;
-const PLATFORM_SKIP = `${process.platform}/${process.arch} is not a Grok containment platform`;
+const HOST_CONTAINMENT_GATE = resolveGrokContainmentPlatform();
+const SUPPORTED_HERE = HOST_CONTAINMENT_GATE.supported;
+const PLATFORM_SKIP = `${HOST_CONTAINMENT_GATE.key} is not a Grok containment platform`;
 const HELPER_SKIP = 'the inventoried native containment helpers are not present in this tree';
 
 function workspace(label) {
@@ -286,8 +287,14 @@ test('a report with no token to bind it to can never confirm termination', () =>
 
 test('runGrokContainedProcess and runGrokContainedProcessSync refuse on this host before any child', async () => {
   const spawned = [];
+  const token = SUPPORTED_HERE
+    ? liveToken({
+      platform: HOST_CONTAINMENT_GATE.platform,
+      arch: HOST_CONTAINMENT_GATE.arch,
+    })
+    : liveToken();
   const options = {
-    containmentToken: liveToken(),
+    containmentToken: token,
     spawner: (...args) => { spawned.push(args); throw new Error('a refused containment must never spawn'); },
   };
   const expected = SUPPORTED_HERE

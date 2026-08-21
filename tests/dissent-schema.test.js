@@ -51,11 +51,17 @@ function instructionFiles() {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.name.endsWith('.md')) out.push(path.relative(root, full));
+      else if (entry.name.endsWith('.md')) {
+        out.push(canonicalInstructionPath(path.relative(root, full)));
+      }
     }
   };
   for (const dir of ['skills', 'agents', 'commands']) walk(path.join(root, dir));
   return out;
+}
+
+function canonicalInstructionPath(relativePath, separator = path.sep) {
+  return relativePath.split(separator).join('/');
 }
 
 function paragraphContaining(source, needle, label) {
@@ -607,6 +613,18 @@ test('T-DISSENT-1 both Grok and agy dissenters survive the composing-agent contr
     alternatives,
     [],
     `a shipped instruction file states an alternative to a rule D14 makes deterministic — the composing agent reads both and follows the last one:\n  ${alternatives.join('\n  ')}`,
+  );
+});
+
+test('the instruction sweep compares canonical paths under native Windows separators', () => {
+  const windowsRoot = 'C:\\deep-review';
+  const windowsReport = path.win32.join(
+    windowsRoot,
+    ...REPORT_FORMAT.split('/'),
+  );
+  assert.equal(
+    canonicalInstructionPath(path.win32.relative(windowsRoot, windowsReport), path.win32.sep),
+    REPORT_FORMAT,
   );
 });
 

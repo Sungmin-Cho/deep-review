@@ -8,7 +8,9 @@ const {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } = require('node:fs');
 const { tmpdir } = require('node:os');
@@ -34,6 +36,34 @@ const GROK_HELP = [
 ].join(' ');
 const temporaryRoots = new Set();
 
+function environmentValue(env, name) {
+  let value;
+  const wanted = name.toLowerCase();
+  for (const [key, candidate] of Object.entries(env)) {
+    if (key.toLowerCase() === wanted) value = candidate;
+  }
+  return value;
+}
+
+function hostExecutableOnPath(name, env = process.env) {
+  const pathValue = environmentValue(env, 'PATH');
+  if (!pathValue) return null;
+  const pathExt = environmentValue(env, 'PATHEXT');
+  const extensions = ['', ...(pathExt ? pathExt.split(';').filter(Boolean) : [])];
+  for (const rawDirectory of pathValue.split(delimiter)) {
+    const directory = rawDirectory.replace(/^"|"$/gu, '') || '.';
+    for (const extension of extensions) {
+      const candidate = join(directory, `${name}${extension}`);
+      try {
+        if (statSync(candidate).isFile()) return realpathSync.native(candidate);
+      } catch {
+        // Continue to the next host PATH candidate.
+      }
+    }
+  }
+  return null;
+}
+
 function temporaryDirectory(prefix) {
   const directory = mkdtempSync(join(tmpdir(), prefix));
   temporaryRoots.add(directory);
@@ -45,9 +75,11 @@ function isolatedEnvironment(bin, overrides = {}) {
   for (const key of Object.keys(env)) {
     if (/^(?:CODEX_|CLAUDE_|PLUGIN_ROOT$)/iu.test(key)) delete env[key];
   }
+  const gitExecutable = hostExecutableOnPath('git', env);
+  if (!gitExecutable) throw new Error('the Grok candidacy fixture requires Git on the host PATH');
   return {
     ...env,
-    PATH: [bin, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter),
+    PATH: [...new Set([bin, dirname(process.execPath), dirname(gitExecutable)])].join(delimiter),
     ...overrides,
   };
 }
@@ -104,6 +136,16 @@ function initializeGitRepository(repo) {
 
 test.after(() => {
   for (const directory of temporaryRoots) rmSync(directory, { recursive: true, force: true });
+});
+
+test('the isolated Grok fixture derives its required host tool authorities', () => {
+  const fixture = makeGrokFixture('grok-derived-host-tools');
+  const gitExecutable = hostExecutableOnPath('git');
+  assert.ok(gitExecutable, 'the test host must expose Git on PATH');
+  assert.deepEqual(
+    isolatedEnvironment(fixture.bin).PATH.split(delimiter),
+    [...new Set([fixture.bin, dirname(process.execPath), dirname(gitExecutable)])],
+  );
 });
 
 test('no Grok candidacy spawns no Grok child and writes no Grok state', async () => {

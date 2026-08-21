@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
-  mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -24,11 +24,10 @@ const agyCliPath = join(pluginRoot, 'hooks', 'scripts', 'agy-privacy-preflight.m
 const BASELINE_COMMIT = '52c1f6b101b75568cd71f2c2889a59a409cdca07';
 
 function workspace(label) {
-  // realpathSync because macOS's tmpdir() is a symlink (/var -> /private/var);
-  // the CLI entry-point self-check compares argv[1] to import.meta.url and
-  // node resolves the latter through the realpath, so an un-resolved tmp
-  // path silently skips main() instead of running it.
-  return realpathSync(mkdtempSync(join(tmpdir(), `deep-review-${label}-`)));
+  // The CLI entry-point self-check compares argv[1] to import.meta.url. Use the
+  // native canonicalizer so macOS's /var alias and Windows short/long path
+  // aliases resolve the same way as Node's main-module loader.
+  return realpathSync.native(mkdtempSync(join(tmpdir(), `deep-review-${label}-`)));
 }
 
 function git(args, options = {}) {
@@ -182,8 +181,9 @@ function extractBaseline(commit) {
 }
 
 function runCli(cliPath, cliPluginRoot, repo, configPath, approval) {
+  const canonicalCliPath = realpathSync.native(cliPath);
   const result = spawnSync(process.execPath, [
-    cliPath,
+    canonicalCliPath,
     '--repo', repo,
     '--plugin-root', cliPluginRoot,
     '--config', configPath,
@@ -195,6 +195,29 @@ function runCli(cliPath, cliPluginRoot, repo, configPath, approval) {
     stderr: result.stderr,
   };
 }
+
+test('the pinned CLI replay invokes the canonical target when its entry path is an alias', (t) => {
+  const baselineRoot = extractBaseline(BASELINE_COMMIT);
+  const aliasRoot = workspace('external-privacy-alias');
+  const alias = join(aliasRoot, 'plugin-link');
+  try {
+    symlinkSync(baselineRoot, alias, 'dir');
+  } catch (error) {
+    t.skip(`directory aliases unavailable: ${error.code || error.message}`);
+    return;
+  }
+  const repo = repository('external-privacy-alias-repo');
+  const configPath = config(repo);
+  const result = runCli(
+    join(alias, 'hooks', 'scripts', 'agy-privacy-preflight.mjs'),
+    baselineRoot,
+    repo,
+    configPath,
+    'auto',
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /"outcome":"auto_ack"/u);
+});
 
 function buildMatrixCases() {
   // Five repo/config shapes crossed with the three --approval values, per

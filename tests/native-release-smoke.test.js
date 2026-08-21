@@ -127,12 +127,29 @@ function assertOrdered(source, earlier, later, label) {
 }
 
 function sourceBetween(source, start, end, label) {
-  const startIndex = source.indexOf(start);
-  assert.notEqual(startIndex, -1, `${label}: missing start marker ${start}`);
-  const endIndex = source.indexOf(end, startIndex + start.length);
-  assert.notEqual(endIndex, -1, `${label}: missing end marker ${end}`);
-  return source.slice(startIndex, endIndex);
+  const canonicalSource = source.replace(/\r\n|\r/gu, '\n');
+  const canonicalStart = start.replace(/\r\n|\r/gu, '\n');
+  const canonicalEnd = end.replace(/\r\n|\r/gu, '\n');
+  const startIndex = canonicalSource.indexOf(canonicalStart);
+  assert.notEqual(startIndex, -1, `${label}: missing start marker ${canonicalStart}`);
+  const endIndex = canonicalSource.indexOf(canonicalEnd, startIndex + canonicalStart.length);
+  assert.notEqual(endIndex, -1, `${label}: missing end marker ${canonicalEnd}`);
+  return canonicalSource.slice(startIndex, endIndex);
 }
+
+test('source-shape slicing treats checkout CRLF as formatting rather than C semantics', () => {
+  assert.equal(
+    sourceBetween('prefix\r\nstart\r\nbody\r\nend\r\n', 'start\nbody', 'end', 'CRLF source'),
+    'start\nbody\n',
+  );
+});
+
+test('the recursive legacy job fetches the pinned replay history it executes', () => {
+  const workflow = readFileSync(path.join(sourceRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
+  const legacy = workflowJob(workflow, 'legacy-unix');
+  assert.match(legacy, /uses:\s*actions\/checkout@v4[\s\S]{0,120}fetch-depth:\s*0/u);
+  assert.match(workflowStep(legacy, 'Run recursive legacy oracle'), /run:\s*npm run test:legacy/u);
+});
 
 function readChecksums(nativeRoot) {
   const sums = new Map();

@@ -195,7 +195,9 @@ function runDriver(spec, fixture) {
     env: {
       ...environment,
       HOME: fixture.home,
+      USERPROFILE: fixture.home,
       XDG_CONFIG_HOME: fixture.configHome,
+      APPDATA: fixture.configHome,
       PATH: [instrument.bin, path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter),
       NODE_OPTIONS: `--require ${instrument.preload}`,
       DR_SPEC: JSON.stringify(spec),
