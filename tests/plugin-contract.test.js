@@ -105,7 +105,7 @@ test('release CI has exact Node 22 native and Unix legacy matrices', () => {
   assert.match(windowsShards, /runs-on:\s*windows-latest/u);
   assert.match(
     windowsShards,
-    /timeout-minutes:\s*\$\{\{ matrix\.shard == 'group-07' && 60 \|\| 30 \}\}/u,
+    /timeout-minutes:\s*\$\{\{ \(matrix\.shard == 'group-07' \|\| matrix\.shard == 'r5-c3-c4'\) && 60 \|\| 30 \}\}/u,
   );
   assert.match(windowsShards, /actions\/setup-node@v4/u);
   assert.match(windowsShards, /node-version:\s*['"]22['"]/u);
