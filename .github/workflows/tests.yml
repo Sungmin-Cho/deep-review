@@ -73,7 +73,7 @@ jobs:
           - r5-c3-c4
           - r6
     runs-on: windows-latest
-    timeout-minutes: ${{ matrix.shard == 'group-07' && 60 || 30 }}
+    timeout-minutes: ${{ (matrix.shard == 'group-07' || matrix.shard == 'r5-c3-c4') && 60 || 30 }}
     name: Windows native shard (${{ matrix.shard }})
     steps:
       - uses: actions/checkout@v4
