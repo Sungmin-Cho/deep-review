@@ -4,12 +4,6 @@
 
 deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)와 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)을 따릅니다.
 
-## [Unreleased]
-
-### 변경
-
-- **디자인 리뷰 readiness 모드** — 설계 문서와 ADR은 이제 구현 가능성과 설계 건전성을 검토하고, 실행 가능한 계획은 실용적 full readiness를 유지합니다. 두 모드 모두 문구 완결성을 차단 사유로 삼지 않으며, 두 host는 동일하게 검증된 inline-route 정책을 받습니다.
-
 ## [2.6.0] — 2026-08-20
 
 ### 추가
@@ -18,6 +12,7 @@ deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Ke
 
 ### 변경
 
+- **디자인 리뷰 readiness 모드** — 설계 문서와 ADR은 이제 구현 가능성과 설계 건전성을 검토하고, 실행 가능한 계획은 실용적 full readiness를 유지합니다. 두 모드 모두 문구 완결성을 차단 사유로 삼지 않으며, 두 host는 동일하게 검증된 inline-route 정책을 받습니다.
 - **닫힌 Codex-only expansion** — `--codex-only`가 이제 `--codex --no-opus --no-agy --no-grok`으로 확장되므로 Grok 활성화가 플래그의 문자 그대로인 provider 약속과 모순될 수 없습니다.
 
 ### 보안

@@ -4,12 +4,6 @@
 
 All notable changes to deep-review are documented here. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Changed
-
-- **Design review readiness modes** — design documents and ADRs now review implementation feasibility and design soundness, while executable plans retain practical full readiness. Neither mode treats prose completeness as blocking, and both hosts receive the same validated inline-route policy.
-
 ## [2.6.0] — 2026-08-20
 
 ### Added
@@ -18,6 +12,7 @@ All notable changes to deep-review are documented here. Follows [Keep a Changelo
 
 ### Changed
 
+- **Design review readiness modes** — design documents and ADRs now review implementation feasibility and design soundness, while executable plans retain practical full readiness. Neither mode treats prose completeness as blocking, and both hosts receive the same validated inline-route policy.
 - **Closed Codex-only expansion** — `--codex-only` now expands to `--codex --no-opus --no-agy --no-grok`, so enabling Grok cannot contradict the flag's literal provider promise.
 
 ### Security
