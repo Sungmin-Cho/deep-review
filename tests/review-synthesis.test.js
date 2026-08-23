@@ -168,6 +168,131 @@ const candidates = [
   },
 ];
 
+// A protocol-3 Grok route is admissible only while carrying the sealed D18
+// compatibility evidence, so a synthesis fixture that admits Grok has to seal
+// one the same way the production carrier does.
+const GROK_REQUIRED_HELP_FLAGS = Object.freeze([
+  '--cwd',
+  '--max-turns',
+  '--model',
+  '--no-memory',
+  '--no-subagents',
+  '--output-format',
+  '--permission-mode',
+  '--prompt-file',
+  '--reasoning-effort',
+  '--sandbox',
+  '--session-id',
+  '--single',
+]);
+
+function canonicalStringify(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(',')}]`;
+  return `{${Object.keys(value).sort().map(
+    (key) => `${JSON.stringify(key)}:${canonicalStringify(value[key])}`,
+  ).join(',')}}`;
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function grokPlatformIdentity() {
+  return {
+    kind: 'posix-dev-ino-v1',
+    fields: {
+      dev: '1', ino: '2', type: 'regular-file', uid: '0',
+    },
+  };
+}
+
+function grokChainMember(memberPath, purpose) {
+  return {
+    path: memberPath,
+    real_path: memberPath,
+    platform_identity: grokPlatformIdentity(),
+    sha256: 'a'.repeat(64),
+    size: 12,
+    classification_purpose: purpose,
+  };
+}
+
+function grokCompatibilityEvidence() {
+  const chain = {
+    schema_version: '1.0',
+    prepared_kind: 'direct',
+    launcher: grokChainMember('/opt/grok', 'effective-executable'),
+    shim: null,
+    interpreter: null,
+    shebang: null,
+    posix_executable_type: 'native-elf',
+    native_loader: grokChainMember('/lib64/ld-linux-x86-64.so.2', 'native-loader'),
+  };
+  const evidence = {
+    schema_version: '1.0',
+    launcher_path: '/opt/grok',
+    real_path: '/opt/grok',
+    platform_identity: grokPlatformIdentity(),
+    executable_sha256: 'a'.repeat(64),
+    executable_size: 12,
+    prepared_spawn_chain: {
+      ...chain,
+      chain_sha256: sha256(Buffer.from(canonicalStringify(chain), 'utf8')),
+    },
+    version: '1.0.4',
+    version_build: 'd846eb93d94d',
+    version_banner_sha256: 'b'.repeat(64),
+    help_sha256: 'c'.repeat(64),
+    help_size: 1024,
+    required_help_flags: [...GROK_REQUIRED_HELP_FLAGS],
+  };
+  return {
+    ...evidence,
+    evidence_sha256: sha256(Buffer.from(canonicalStringify(evidence), 'utf8')),
+  };
+}
+
+const grokCandidate = {
+  reviewer_id: 'grok',
+  provider: 'grok',
+  adapter_id: 'grok-cli',
+  assignment_roles: ['standard', 'feasibility', 'adversarial'],
+  last_status: 'success',
+};
+
+function grokRoute() {
+  return {
+    reviewer_id: 'grok',
+    provider: 'grok',
+    adapter_id: 'grok-cli',
+    assignment_role: 'feasibility',
+    rubric_id: 'feasibility-v1',
+    wave: 1,
+    required: false,
+    selection_reason: 'initial feasibility route',
+    resolved: { model: 'grok', effort: 'high' },
+    grok_compatibility_evidence: grokCompatibilityEvidence(),
+  };
+}
+
+function agyRoute() {
+  return {
+    reviewer_id: 'agy',
+    provider: 'agy',
+    adapter_id: 'agy-cli',
+    assignment_role: 'adversarial',
+    rubric_id: 'adversarial-v1',
+    wave: 1,
+    required: false,
+    selection_reason: 'initial adversarial route',
+    resolved: { model: null, effort: 'high' },
+  };
+}
+
 // Kept separate from routingPlan() so nested `routingPlan().routes` callers
 // (building an override routes array from the two standard routes) get a
 // fresh, context-free route pair every time — never a copy that already
@@ -1247,20 +1372,59 @@ test('N_actual=0 remains fail-closed when no expansion candidate exists', async 
 
 test('implementation approval is floored when a verified readiness receipt still has deferred evidence', async () => {
   const { synthesizeReviewRound } = await import(synthesisUrl);
+  // O20/O21 (D17) — the carrier crossing this seam is the reviewer-scoped ref,
+  // so two reviewers who both call their own finding DOC-1 arrive as two
+  // obligations. A bare-id carrier would deliver one, and verifying either
+  // reviewer would lift the floor for both.
   const result = synthesizeReviewRound({
     attempts: [attempt('claude-opus'), attempt('codex-review')],
     consensus: { findings: [] },
     routingPlan: routingPlan(),
     deferredAcceptance: {
       complete: false,
-      pending_finding_ids: ['DOC-1'],
-      verified_finding_ids: [],
+      pending_finding_refs: [
+        { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
+        { finding_id: 'DOC-1', reviewer_id: 'codex-review' },
+      ],
     },
   });
   assert.equal(result.status, 'reviewed');
   assert.equal(result.verdict, 'CONCERN');
   assert.equal(result.deferred_acceptance_floor, true);
-  assert.deepEqual(result.pending_deferred_finding_ids, ['DOC-1']);
+  assert.deepEqual(result.pending_deferred_finding_refs, [
+    { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
+    { finding_id: 'DOC-1', reviewer_id: 'codex-review' },
+  ]);
+  // The bare list is a display projection on the same terms as
+  // `blocking_finding_ids`: one entry per authoritative ref, same order, so the
+  // shared local id renders twice and no authority can read identity out of it.
+  assert.deepEqual(result.pending_deferred_finding_ids, ['DOC-1', 'DOC-1']);
+  assert.equal(
+    result.pending_deferred_finding_ids.length,
+    result.pending_deferred_finding_refs.length,
+  );
+
+  // A bare-id carrier is not a deferred-acceptance carrier at all.
+  assert.throws(() => synthesizeReviewRound({
+    attempts: [attempt('claude-opus'), attempt('codex-review')],
+    consensus: { findings: [] },
+    routingPlan: routingPlan(),
+    deferredAcceptance: { complete: false, pending_finding_ids: ['DOC-1'] },
+  }), /deferredAcceptance is malformed/);
+  // Nor is a ref whose reviewer identity is missing or meaningless.
+  for (const malformed of [
+    { finding_id: 'DOC-1' },
+    { finding_id: 'DOC-1', reviewer_id: '' },
+    { finding_id: 'DOC-1', reviewer_id: null },
+    { finding_id: 'DOC-1', reviewer_id: 'claude-opus', scope: 'legacy_global' },
+  ]) {
+    assert.throws(() => synthesizeReviewRound({
+      attempts: [attempt('claude-opus'), attempt('codex-review')],
+      consensus: { findings: [] },
+      routingPlan: routingPlan(),
+      deferredAcceptance: { complete: false, pending_finding_refs: [malformed] },
+    }), /deferredAcceptance is malformed/);
+  }
 });
 
 test('shadow mode records but does not apply adaptive expansion or confidence floors', async () => {
@@ -1302,13 +1466,28 @@ test('shadow mode still enforces critical implementation and explicit deferred r
       routes: [baseRoutes()[0]],
       candidate_reviewers: candidates.slice(0, 1),
     }),
+    // O22 (D17) — shadow mode consumes the same structured carrier as an active
+    // round. A shadow-only bare-id seam is how a shadow run stops predicting the
+    // active one, so the fixture that feeds it is deliberately identical.
     deferredAcceptance: {
       complete: false,
-      pending_finding_ids: ['DOC-1'],
+      pending_finding_refs: [{ finding_id: 'DOC-1', reviewer_id: 'claude-opus' }],
     },
   });
   assert.equal(deferred.verdict, 'CONCERN');
   assert.equal(deferred.deferred_acceptance_floor, true);
+  assert.deepEqual(deferred.pending_deferred_finding_refs, [
+    { finding_id: 'DOC-1', reviewer_id: 'claude-opus' },
+  ]);
+  assert.throws(() => synthesizeReviewRound({
+    attempts: [attempt('claude-opus')],
+    routingPlan: routingPlan({
+      shadow_mode: true,
+      routes: [baseRoutes()[0]],
+      candidate_reviewers: candidates.slice(0, 1),
+    }),
+    deferredAcceptance: { complete: false, pending_finding_ids: ['DOC-1'] },
+  }), /deferredAcceptance is malformed/);
 });
 
 test('protocol-3 synthesis rejects duplicate or non-canonical reviewer voices before N_actual', async () => {
@@ -1409,6 +1588,82 @@ test('protocol-3 synthesis rejects candidate voices without a selected route', a
   assert.equal(result.verdict, null);
 });
 
+// A canonical Grok voice is one voice, not a bonus one: it raises N_actual and
+// the provider-family count by exactly one each (I2).
+test('T-SYN-1 a trusted Grok attempt contributes one canonical voice', async () => {
+  const { synthesizeReviewRound } = await import(synthesisUrl);
+  const threeVoicePlan = () => routingPlan({
+    candidate_reviewers: [...candidates, grokCandidate],
+    routes: [...baseRoutes(), agyRoute()],
+  });
+  const fourVoicePlan = () => routingPlan({
+    candidate_reviewers: [...candidates, grokCandidate],
+    routes: [...baseRoutes(), agyRoute(), grokRoute()],
+  });
+  const withoutGrok = synthesizeReviewRound({
+    attempts: [attempt('claude-opus'), attempt('codex-review'), attempt('agy')],
+    consensus: { findings: [] },
+    routingPlan: threeVoicePlan(),
+  });
+  assert.equal(withoutGrok.status, 'reviewed');
+  assert.equal(withoutGrok.n_actual, 3);
+  assert.equal(withoutGrok.provider_families, 3);
+
+  const withGrok = synthesizeReviewRound({
+    attempts: [
+      attempt('claude-opus'),
+      attempt('codex-review'),
+      attempt('agy'),
+      attempt('grok'),
+    ],
+    consensus: { findings: [] },
+    routingPlan: fourVoicePlan(),
+  });
+  assert.equal(withGrok.status, 'reviewed');
+  assert.equal(withGrok.verdict, 'APPROVE');
+  assert.equal(withGrok.phase6_allowed, true);
+  assert.deepEqual(withGrok.exclusions, []);
+  assert.equal(withGrok.needs_expansion, false);
+  // Exactly one voice and exactly one new provider family, against the same
+  // round without it — neither uncounted nor counted twice.
+  assert.equal(withGrok.n_actual, withoutGrok.n_actual + 1);
+  assert.equal(withGrok.provider_families, withoutGrok.provider_families + 1);
+  assert.equal(withGrok.n_actual, 4);
+  assert.equal(withGrok.provider_families, 4);
+});
+
+test('T-SYN-2 plan-absent or duplicate Grok voice is operational failure with Phase 6 false', async () => {
+  const { synthesizeReviewRound } = await import(synthesisUrl);
+  // Absent from the trusted plan: a Grok voice no route selected.
+  const planAbsent = synthesizeReviewRound({
+    attempts: [attempt('claude-opus'), attempt('codex-review'), attempt('grok')],
+    consensus: { findings: [] },
+    routingPlan: routingPlan(),
+  });
+  assert.equal(planAbsent.status, 'operational_failure');
+  assert.equal(planAbsent.error, 'invalid_reviewer_identity');
+  assert.equal(planAbsent.verdict, null);
+  assert.equal(planAbsent.phase6_allowed, false);
+
+  // Routed, but speaking twice.
+  const duplicate = synthesizeReviewRound({
+    attempts: [attempt('claude-opus'), attempt('grok'), attempt('grok')],
+    consensus: { findings: [] },
+    routingPlan: routingPlan({
+      candidate_reviewers: [...candidates, grokCandidate],
+      routes: [...baseRoutes(), agyRoute(), grokRoute()],
+    }),
+  });
+  assert.equal(duplicate.status, 'operational_failure');
+  assert.equal(duplicate.error, 'invalid_reviewer_identity');
+  assert.equal(duplicate.verdict, null);
+  assert.equal(duplicate.phase6_allowed, false);
+  // `n_actual` is deliberately unpinned on this branch: it is diagnostic here,
+  // because the shared counter may already have counted one canonical id before
+  // the identity failure was raised. The non-canonical `security-reviewer`
+  // polarity keeps its own `n_actual: 0` and is not restated through Grok.
+});
+
 test('a routing-plan operational failure cannot emit a verdict or allow Phase 6', async () => {
   const { synthesizeReviewRound } = await import(synthesisUrl);
   const result = synthesizeReviewRound({
@@ -1425,4 +1680,247 @@ test('a routing-plan operational failure cannot emit a verdict or allow Phase 6'
   assert.equal(result.phase6_allowed, false);
   assert.equal(result.error, 'routing_plan_operational_failure');
   assert.deepEqual(result.routing_shortfalls, ['required_provider:codex']);
+});
+
+// T-READY-8 (D17) — readiness independence is never something a report can
+// claim for itself. Dispatch binds a fresh opaque `attempt_id` to one parsed
+// protocol-3 route before the attempt runs; final production synthesis
+// re-derives every admitted field from that trusted dispatch record and the
+// immutable routing plan, seals the result once, and the coordinator hands the
+// carrier to document readiness verbatim. No field is reconstructed from a
+// reviewer id, a provider string, a report path, or prose inside the report.
+function executionRouteFor(plan, reviewerId) {
+  const route = (plan.routes || []).find((item) => item.reviewer_id === reviewerId);
+  if (!route) throw new Error(`fixture has no planned route for ${reviewerId}`);
+  return { protocol_version: '3.0', ...route };
+}
+
+function dispatchRecordFor(plan, reviewerId, overrides = {}) {
+  const route = executionRouteFor(plan, reviewerId);
+  return {
+    attempt_id: `attempt-${reviewerId}`,
+    reviewer_id: reviewerId,
+    provider_family: route.provider,
+    execution_route: route,
+    route_sha256: sha256(canonicalStringify(route)),
+    output_sha256: sha256(`review:${reviewerId}`),
+    model: route.resolved.model ?? null,
+    session_id: `session-${reviewerId}`,
+    compatibility_evidence_sha256: route.grok_compatibility_evidence?.evidence_sha256 ?? null,
+    ...overrides,
+  };
+}
+
+function trustedDispatch(plan, reviewerIds, overrides = {}) {
+  return {
+    round_id: 'round-1',
+    routing_plan_sha256: sha256(canonicalStringify(plan)),
+    records: reviewerIds.map((reviewerId) => dispatchRecordFor(plan, reviewerId)),
+    ...overrides,
+  };
+}
+
+// Rebuilt here from the record's own fields rather than imported, so the seal
+// is checked against an independent computation and not against itself.
+function admissionRecordDigest(record) {
+  return sha256(canonicalStringify({
+    attempt_id: record.attempt_id,
+    output_sha256: record.output_sha256,
+    provider_family: record.provider_family,
+    reviewer_id: record.reviewer_id,
+    route_sha256: record.route_sha256,
+  }));
+}
+
+test('T-READY-8 final synthesis seals trusted attempt and route evidence for readiness', async () => {
+  const { synthesizeReviewRound } = await import(synthesisUrl);
+  const plan = routingPlan();
+  const attempts = [attempt('claude-opus'), attempt('codex-review')];
+  const round = synthesizeReviewRound({
+    attempts,
+    consensus: { findings: [] },
+    routingPlan: plan,
+    dispatch: trustedDispatch(plan, ['claude-opus', 'codex-review']),
+  });
+  assert.equal(round.status, 'reviewed');
+  assert.equal(round.verdict, 'APPROVE');
+  assert.equal(round.phase6_allowed, true);
+
+  const carrier = round.readiness_admission;
+  assert.ok(carrier, 'final production synthesis emits one sealed readiness_admission');
+  assert.equal(carrier.schema_version, '1.0');
+  assert.equal(carrier.round_id, 'round-1');
+  assert.equal(carrier.routing_plan_sha256, sha256(canonicalStringify(plan)));
+  assert.deepEqual(
+    carrier.records.map((record) => record.attempt_id),
+    ['attempt-claude-opus', 'attempt-codex-review'],
+  );
+  for (const record of carrier.records) {
+    const planned = executionRouteFor(plan, record.reviewer_id);
+    // Every admitted field is the trusted route's, recomputed here from the
+    // plan — not the dispatch record's own assertion echoed back.
+    assert.equal(record.provider_family, planned.provider);
+    assert.equal(record.route_sha256, sha256(canonicalStringify(planned)));
+    assert.equal(record.output_sha256, sha256(`review:${record.reviewer_id}`));
+    assert.equal(record.admission_sha256, admissionRecordDigest(record));
+    // The carrier is closed: the execution route, model, and session that
+    // authorised the record stay in the dispatch record and never leak into
+    // the sealed evidence.
+    assert.deepEqual(Object.keys(record).sort(), [
+      'admission_sha256',
+      'attempt_id',
+      'output_sha256',
+      'provider_family',
+      'reviewer_id',
+      'route_sha256',
+    ]);
+  }
+  const { carrier_sha256: seal, ...carrierBody } = carrier;
+  assert.equal(seal, sha256(canonicalStringify(carrierBody)));
+
+  const refused = (dispatch, roundAttempts = attempts) => synthesizeReviewRound({
+    attempts: roundAttempts,
+    consensus: { findings: [] },
+    routingPlan: plan,
+    dispatch,
+  });
+  const mutatedDispatch = (mutate) => {
+    const dispatch = trustedDispatch(plan, ['claude-opus', 'codex-review']);
+    mutate(dispatch);
+    return dispatch;
+  };
+
+  // Every failure mode names itself, so one negative cannot pass for another
+  // negative's reason.
+  for (const [reason, dispatch] of [
+    // Reconstructing the output digest from anything but the admitted attempt.
+    ['output_digest_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.records[0].output_sha256 = sha256('review:some-other-report');
+    })],
+    // A provider string the trusted route did not authorise.
+    ['provider_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.records[0].provider_family = 'codex';
+    })],
+    ['model_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.records[0].model = 'forged-model';
+    })],
+    ['session_identity_invalid', mutatedDispatch((dispatch) => {
+      dispatch.records[0].session_id = '';
+    })],
+    ['session_identity_invalid', mutatedDispatch((dispatch) => {
+      dispatch.records[1].session_id = dispatch.records[0].session_id;
+    })],
+    ['route_digest_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.records[0].route_sha256 = sha256('not this route');
+    })],
+    // Self-consistent, parseable, and absent from the immutable plan.
+    ['unplanned_route', mutatedDispatch((dispatch) => {
+      const route = { ...dispatch.records[0].execution_route, selection_reason: 'off-plan route' };
+      dispatch.records[0].execution_route = route;
+      dispatch.records[0].route_sha256 = sha256(canonicalStringify(route));
+    })],
+    ['duplicate_attempt_id', mutatedDispatch((dispatch) => {
+      dispatch.records[1].attempt_id = dispatch.records[0].attempt_id;
+    })],
+    ['duplicate_route_identity', mutatedDispatch((dispatch) => {
+      dispatch.records[1] = dispatchRecordFor(plan, 'claude-opus', {
+        attempt_id: 'attempt-replayed',
+        session_id: 'session-replayed',
+      });
+    })],
+    ['routing_plan_seal_mismatch', mutatedDispatch((dispatch) => {
+      dispatch.routing_plan_sha256 = sha256('a different routing plan');
+    })],
+    ['admission_join_not_one_to_one', trustedDispatch(plan, ['claude-opus'])],
+    ['dispatch_malformed', mutatedDispatch((dispatch) => {
+      dispatch.round_id = '';
+    })],
+  ]) {
+    const result = refused(dispatch);
+    assert.equal(result.status, 'operational_failure', reason);
+    assert.equal(result.error, 'invalid_readiness_admission', reason);
+    assert.equal(result.readiness_admission_error, reason);
+    assert.equal(result.verdict, null, reason);
+    assert.equal(result.phase6_allowed, false, reason);
+    assert.equal(Object.hasOwn(result, 'readiness_admission'), false, reason);
+  }
+
+  // An admission record nobody consumed is the same failure from the other
+  // side: one attempt, one record, never one-and-a-spare.
+  const spare = refused(
+    trustedDispatch(plan, ['claude-opus', 'codex-review']),
+    [attempt('claude-opus')],
+  );
+  assert.equal(spare.error, 'invalid_readiness_admission');
+  assert.equal(spare.readiness_admission_error, 'admission_join_not_one_to_one');
+
+  // Grok's compatibility evidence is validated for that exact attempt id, and
+  // no other reviewer may claim any.
+  const grokIds = ['claude-opus', 'codex-review', 'agy', 'grok'];
+  const grokPlan = routingPlan({
+    candidate_reviewers: [...candidates, grokCandidate],
+    routes: [...baseRoutes(), agyRoute(), grokRoute()],
+  });
+  const grokAttempts = grokIds.map((reviewerId) => attempt(reviewerId));
+  const grokAdmitted = synthesizeReviewRound({
+    attempts: grokAttempts,
+    consensus: { findings: [] },
+    routingPlan: grokPlan,
+    dispatch: trustedDispatch(grokPlan, grokIds),
+  });
+  assert.equal(grokAdmitted.status, 'reviewed');
+  assert.equal(grokAdmitted.readiness_admission.records.length, 4);
+  for (const mutate of [
+    (dispatch) => { dispatch.records[3].compatibility_evidence_sha256 = 'f'.repeat(64); },
+    (dispatch) => { dispatch.records[0].compatibility_evidence_sha256 = 'f'.repeat(64); },
+    (dispatch) => { dispatch.records[3].compatibility_evidence_sha256 = null; },
+  ]) {
+    const dispatch = trustedDispatch(grokPlan, grokIds);
+    mutate(dispatch);
+    const result = synthesizeReviewRound({
+      attempts: grokAttempts,
+      consensus: { findings: [] },
+      routingPlan: grokPlan,
+      dispatch,
+    });
+    assert.equal(result.status, 'operational_failure');
+    assert.equal(result.readiness_admission_error, 'compatibility_evidence_mismatch');
+  }
+
+  // The carrier is emitted only by *final production* synthesis. A shadow round
+  // is not production and an expansion round is not final.
+  const shadowPlan = routingPlan({
+    shadow_mode: true,
+    routes: [baseRoutes()[0]],
+    candidate_reviewers: candidates.slice(0, 1),
+  });
+  const shadow = synthesizeReviewRound({
+    attempts: [attempt('claude-opus')],
+    consensus: { findings: [] },
+    routingPlan: shadowPlan,
+    dispatch: trustedDispatch(shadowPlan, ['claude-opus']),
+  });
+  assert.equal(shadow.status, 'reviewed');
+  assert.equal(shadow.shadow_mode, true);
+  assert.equal(Object.hasOwn(shadow, 'readiness_admission'), false);
+
+  const expanding = synthesizeReviewRound({
+    attempts,
+    consensus: { findings: [] },
+    routingPlan: plan,
+    readinessMismatch: true,
+    dispatch: trustedDispatch(plan, ['claude-opus', 'codex-review']),
+  });
+  assert.equal(expanding.status, 'needs_expansion');
+  assert.equal(Object.hasOwn(expanding, 'readiness_admission'), false);
+
+  // And a round that was never handed a dispatch record emits nothing at all,
+  // rather than inventing a carrier from the attempts it happens to hold.
+  const undispatched = synthesizeReviewRound({
+    attempts,
+    consensus: { findings: [] },
+    routingPlan: plan,
+  });
+  assert.equal(undispatched.status, 'reviewed');
+  assert.equal(Object.hasOwn(undispatched, 'readiness_admission'), false);
 });

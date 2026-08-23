@@ -35,9 +35,42 @@ merge materially identical items. The collapsed result contributes exactly one
 
 ## Loop cadence
 
-`deep-review-loop` forwards `--ultracode` only in round 1. After that successful
-attempt it sets `ultracode_consumed=true`, removes `--ultracode`, and normally
-injects `--no-opus --no-agy` while retaining Codex. If Codex was unavailable,
-the next round withholds `--no-opus` so at least one reviewer remains. A loop
-that never requested ultracode keeps its original reviewer flags on every
-round.
+`deep-review-loop` forwards `--ultracode` only in round 1. For every
+ultracode-consumed round 2+, derive the Review argv with the token-aware
+normalizer below. It removes `--ultracode`, every `--grok` and existing
+`--no-grok` token, and only complete Grok-keyed pairs for `--model`, `--effort`,
+`--reviewer-model`, and `--reviewer-effort`. It never uses substring replacement
+or consumes a neighbouring non-Grok value.
+
+<!-- ultracode-round-2-normalizer:start -->
+```javascript
+(argv, { codexUnavailable = false } = {}) => {
+  const grokAssignments = new Set([
+    '--model', '--effort', '--reviewer-model', '--reviewer-effort',
+  ]);
+  const normalized = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === '--ultracode' || token === '--grok' || token === '--no-grok') continue;
+    const value = argv[index + 1];
+    if (grokAssignments.has(token) && typeof value === 'string' && /^grok=.+$/u.test(value)) {
+      index += 1;
+      continue;
+    }
+    normalized.push(token);
+  }
+  if (!codexUnavailable) normalized.push('--no-opus');
+  normalized.push('--no-agy', '--no-grok');
+  return normalized;
+}
+```
+<!-- ultracode-round-2-normalizer:end -->
+
+A malformed pair stays in argv so `parsePublicRoute` returns the public-route
+error instead of accepting laundered input. Otherwise pass the derived argv
+through `parsePublicRoute` and continue only with `ok: true`. This retains Codex
+and appends exactly one `--no-grok` after the cadence disables. If Codex was
+unavailable, set `codexUnavailable=true`: only the injected `--no-opus` is
+withheld; Grok selectors are still stripped and `--no-grok` is still appended.
+A loop that never requested ultracode keeps its original reviewer flags on
+every round.

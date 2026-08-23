@@ -18,7 +18,8 @@ function detected(overrides = {}) {
   return {
     claude_cli: false, claude_cli_path: '', codex_cli: false, codex_cli_path: '',
     codex_plugin: false, codex_companion_path: '', agy_cli: false, agy_cli_path: '',
-    agy_version: '', ...overrides,
+    agy_version: '', grok_cli: false, grok_cli_path: '', grok_version: '',
+    grok_compatibility_verified: false, ...overrides,
   };
 }
 
@@ -37,9 +38,10 @@ test('buildCapabilities emits codex-exec while preserving protocol 2.0 and legac
       codex: { ok: true, version: 'codex-cli 0.42.0', help: CODEX_EXEC_HELP },
     },
   });
-  assert.equal(capabilities.length, 6);
+  assert.equal(capabilities.length, 7);
   assert.deepEqual(capabilities.map((item) => item.adapter_id), [
     'claude-native-agent', 'claude-cli', 'codex-exec', 'codex-native-generic', 'codex-companion', 'agy-cli',
+    'grok-cli',
   ]);
   for (const item of capabilities) {
     assert.equal(item.protocol_version, '2.0');

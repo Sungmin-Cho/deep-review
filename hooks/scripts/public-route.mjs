@@ -4,6 +4,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isReviewerId, REVIEWER_PROVIDERS } from './lib/reviewer-ids.mjs';
+import { loadReviewPolicy, loadUserConfig, mergeRoutingConfig } from './lib/review-policy.mjs';
 
 const REVIEW_FLAGS = new Set([
   '--entropy',
@@ -13,11 +14,13 @@ const REVIEW_FLAGS = new Set([
   '--no-opus',
   '--no-agy',
   '--agy',
+  '--no-grok',
+  '--grok',
 ]);
 
 const ROUTING_POLICIES = new Set(['auto', 'fast', 'balanced', 'quality']);
 const REVIEWER_STRATEGIES = new Set(['adaptive', 'static']);
-const PROVIDERS = new Set(['claude', 'codex', 'agy']);
+const PROVIDERS = new Set(['claude', 'codex', 'agy', 'grok']);
 
 function routeError(message) {
   return { ok: false, route: 'error', error: message };
@@ -30,13 +33,71 @@ function normalizeHost(host) {
   return host;
 }
 
+// D5: --codex-only must remain literally true, so the expansion disables grok
+// too. Without --no-grok, `--grok --codex-only` would dispatch a non-Codex
+// reviewer under a flag that promises otherwise.
 function expandCodexOnly(argv) {
   const expanded = [];
   for (const token of argv) {
-    if (token === '--codex-only') expanded.push('--codex', '--no-opus', '--no-agy');
+    if (token === '--codex-only') expanded.push('--codex', '--no-opus', '--no-agy', '--no-grok');
     else expanded.push(token);
   }
   return expanded;
+}
+
+// D13: the one normalized effective-candidacy predicate. Policy denial (D23)
+// applies to this, not to any single flag — `--grok` is only one of the sources
+// that make Grok a candidate.
+export function effectiveGrokCandidacy(expanded = [], overrides = {}) {
+  const providers = overrides.providers || {};
+  const reviewers = overrides.reviewers || {};
+  const targeted = Object.hasOwn(providers, 'grok') || Object.hasOwn(reviewers, 'grok');
+  // `--no-grok` without a Grok-targeting override is successful silent negative
+  // selection. The combination *with* one never reaches here: parseReview
+  // rejects it as ERROR_CONFLICTING_REVIEWER_SELECTION first.
+  if (expanded.includes('--no-grok') && !targeted) return false;
+  if (expanded.includes('--grok') || targeted) return true;
+  const contains = (list) => Array.isArray(list) && list.includes('grok');
+  return contains(overrides.enabled_providers) || contains(overrides.required_providers);
+}
+
+// I43: both denial representations. Production validateConstraints
+// (model-router.mjs:234-238) returns the same code for an allowed_providers
+// exclusion as for denied_providers membership; this pre-coordinator owner
+// mirrors that polarity exactly.
+function grokDeniedByConstraints(constraints) {
+  if (constraints.allowed_providers && !constraints.allowed_providers.includes('grok')) return 'allowed_providers';
+  if (constraints.denied_providers?.includes('grok')) return 'denied_providers';
+  return null;
+}
+
+// The documented user/project precedence merge: defaults <- user <- project.
+// mergeRoutingConfig wholesale-replaces merged constraints with
+// structuredClone(project.constraints) whenever project.constraints is defined,
+// so a user allowed_providers that excludes grok does not survive a defined
+// project constraints object.
+function effectiveConstraints(cwd, env) {
+  const user = loadUserConfig(env)?.policy ?? {};
+  const project = loadReviewPolicy(cwd)?.policy ?? {};
+  return mergeRoutingConfig({ defaults: { constraints: {} }, user, project }).constraints ?? {};
+}
+
+// D23/I43: an invocation-level zero-side-effect gate. It is resolved before
+// coordinator creation, executable lookup, carrier creation, or compatibility
+// probes, and it reads policy only for a positive candidate — so a no-flag or
+// `--no-grok` review still touches nothing it did not touch before.
+export function grokDenialGate(expanded = [], overrides = {}, cwd = process.cwd(), env = process.env) {
+  if (!effectiveGrokCandidacy(expanded, overrides)) return null;
+  let constraints;
+  try {
+    constraints = effectiveConstraints(cwd, env);
+  } catch (error) {
+    return `ERROR_POLICY_INVALID: ${error.message}`;
+  }
+  const reason = grokDeniedByConstraints(constraints);
+  return reason === null
+    ? null
+    : `ERROR_PROVIDER_DENIED: grok is denied by the effective review policy (${reason})`;
 }
 
 function validateReviewerFlags(argv) {
@@ -50,6 +111,11 @@ function validateReviewerFlags(argv) {
   // rejected here too.
   if (argv.includes('--agy') && argv.includes('--no-agy')) {
     return '--agy cannot be combined with --no-agy/--codex-only';
+  }
+  // D23: `--grok` plus either invocation-disable is a selection conflict, not a
+  // policy denial. --codex-only expands to --no-grok before this runs.
+  if (argv.includes('--grok') && argv.includes('--no-grok')) {
+    return '--grok cannot be combined with --no-grok/--codex-only';
   }
   return null;
 }
@@ -266,6 +332,9 @@ function parseReview(argv, host, cwd, provenance = {}) {
   if (expanded.includes('--no-agy') && Object.hasOwn(overrides.providers, 'agy')) {
     return { ...routeError('ERROR_CONFLICTING_REVIEWER_SELECTION: agy override conflicts with --no-agy'), host, argv: expanded };
   }
+  if (expanded.includes('--no-grok') && Object.hasOwn(overrides.providers, 'grok')) {
+    return { ...routeError('ERROR_CONFLICTING_REVIEWER_SELECTION: grok override conflicts with --no-grok/--codex-only'), host, argv: expanded };
+  }
   for (const reviewerId of Object.keys(overrides.reviewers)) {
     const provider = REVIEWER_PROVIDERS[reviewerId];
     if (provider === 'claude' && expanded.includes('--no-opus')) {
@@ -276,6 +345,9 @@ function parseReview(argv, host, cwd, provenance = {}) {
     }
     if (provider === 'agy' && expanded.includes('--no-agy')) {
       return { ...routeError(`ERROR_CONFLICTING_REVIEWER_SELECTION: reviewer override ${reviewerId} conflicts with --no-agy`), host, argv: expanded };
+    }
+    if (provider === 'grok' && expanded.includes('--no-grok')) {
+      return { ...routeError(`ERROR_CONFLICTING_REVIEWER_SELECTION: reviewer override ${reviewerId} conflicts with --no-grok/--codex-only`), host, argv: expanded };
     }
   }
   const requiredReviewers = new Set(Object.keys(overrides.reviewers));
@@ -288,10 +360,16 @@ function parseReview(argv, host, cwd, provenance = {}) {
   // overrides only restore candidacy, so their required-ness stays as it is
   // today and a privacy decline cannot void the whole verdict.
   if (expanded.includes('--agy')) requiredProviders.add('agy');
+  // grok mirrors agy exactly: `--grok` permits candidacy and requires selection,
+  // while a Grok-targeting override only restores candidacy (D13).
+  if (expanded.includes('--grok')) requiredProviders.add('grok');
   const enabledProviders = new Set();
   if (expanded.includes('--agy')
     || Object.hasOwn(overrides.providers, 'agy')
     || Object.hasOwn(overrides.reviewers, 'agy')) enabledProviders.add('agy');
+  if (expanded.includes('--grok')
+    || Object.hasOwn(overrides.providers, 'grok')
+    || Object.hasOwn(overrides.reviewers, 'grok')) enabledProviders.add('grok');
   if (enabledProviders.size > 0) {
     overrides.enabled_providers = [...enabledProviders].sort();
     hasOverrides = true;
@@ -311,10 +389,16 @@ function parseReview(argv, host, cwd, provenance = {}) {
   if (expanded.includes('--no-opus')) disabledProviders.push('claude');
   if (expanded.includes('--no-codex')) disabledProviders.push('codex');
   if (expanded.includes('--no-agy')) disabledProviders.push('agy');
+  if (expanded.includes('--no-grok')) disabledProviders.push('grok');
   if (disabledProviders.length > 0) {
     overrides.disabled_providers = [...new Set(disabledProviders)].sort();
     hasOverrides = true;
   }
+  // D23/I43: the pre-coordinator denial gate. It runs after the selection
+  // conflicts above — so an invocation-disable combination is never reported as
+  // a denial — and before any route, coordinator, or Grok state exists.
+  const denial = grokDenialGate(expanded, overrides, cwd);
+  if (denial !== null) return { ...routeError(denial), host, argv: expanded };
   const route = { ok: true, route: 'review', host, argv: expanded };
   if (dryRun) route.dryRun = true;
   if (explainRouting) route.explainRouting = true;

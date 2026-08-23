@@ -178,6 +178,7 @@ verification:
 | Codex review | evidence와 대조. 코드가 지적과 다르면 반박 가능 |
 | Codex adversarial | 회의적 검증. false positive 가능성 항상 고려 |
 | agy | evidence와 대조. cross-vendor signal로 취급; Opus와 일치 시 확신도 높임 |
+| Grok | evidence와 대조. cross-vendor signal로 취급; 다른 family와 일치 시 확신도 높임 |
 | PR comment (외부) | 5-point 체크리스트 적용 (아래 참조) |
 
 ### 외부 리뷰어(PR comment) 5-Point 체크리스트
@@ -194,11 +195,18 @@ verification:
 |------|--------|------|
 | Opus + Codex 일치 | 높음 | 수락 우선. 반박하려면 강한 코드 증거 필요 |
 | Opus + agy 일치 | 높음 | cross-vendor confirmation. 수락 우선 |
-| 3/4 이상 일치 | 높음 | 수락 우선. 반박하려면 강한 코드 증거 필요 |
+| Opus + Grok 일치 | 높음 | cross-vendor confirmation. 수락 우선 |
+| `majority_K_of_N` 다수 일치 + `dissenters` 전원 동일 family | 높음 | 반대가 한 vendor 의 outlier 다. 수락 우선, 반대 요지는 기록 |
+| `majority_K_of_N` 다수 일치 + `dissenters.length` ≥ 2 이고 2개 이상 provider family 에 걸침 | 중간 | 두 family 가 동시에 반대하면 outlier 가 아니다. 단일 family 반대보다 다수 의견의 확신도가 **더 낮다** — 수락 전 재검증 필수 |
 | Opus만 지적 | 중간 | VERIFY 결과에 따라 판단 |
 | Codex만 지적 | 낮음 | 회의적 검증. 코드 증거 없으면 기각 가능 |
 | agy만 지적 | 낮음 | 회의적 검증. cross-vendor이지만 단독 지적은 참고 수준 |
+| Grok만 지적 | 낮음 | 회의적 검증. cross-vendor이지만 단독 지적은 참고 수준 |
 | Adversarial만 지적 | 매우 낮음 | 참고 수준. 기각이 기본, 수락하려면 증거 필요 |
+
+> `agreement` 와 `dissenters` 의 정의는 `{plugin_root}/skills/deep-review-workflow/references/report-format.md`
+> 가 단일 출처다. `dissenters` 는 리뷰어당 한 항목이고 `family` 는 항목마다 붙으므로,
+> 반대가 몇 개 family 에 걸쳤는지는 배열에서 직접 읽는다 — 개수를 따로 선언하지 않는다.
 
 ---
 

@@ -105,7 +105,7 @@ test('release CI has exact Node 22 native and Unix legacy matrices', () => {
   assert.match(windowsShards, /runs-on:\s*windows-latest/u);
   assert.match(
     windowsShards,
-    /timeout-minutes:\s*\$\{\{ matrix\.shard == 'group-07' && 60 \|\| 30 \}\}/u,
+    /timeout-minutes:\s*\$\{\{ \(matrix\.shard == 'group-07' \|\| matrix\.shard == 'r5-c3-c4'\) && 60 \|\| 30 \}\}/u,
   );
   assert.match(windowsShards, /actions\/setup-node@v4/u);
   assert.match(windowsShards, /node-version:\s*['"]22['"]/u);
@@ -169,13 +169,113 @@ test('both workflows cover every release-relevant path class', () => {
   }
 });
 
-test('release version is exactly 2.5.0 on all three package surfaces', () => {
+const PUBLISHED_RELEASE_BASELINE = '2.5.0';
+const PLANNED_RELEASE = '2.6.0';
+
+function semverParts(version) {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(version);
+  assert.ok(match, `invalid release SemVer: ${version}`);
+  return match.slice(1).map(Number);
+}
+
+function compareReleaseVersions(left, right) {
+  const leftParts = semverParts(left);
+  const rightParts = semverParts(right);
+  for (let index = 0; index < leftParts.length; index += 1) {
+    if (leftParts[index] !== rightParts[index]) return leftParts[index] - rightParts[index];
+  }
+  return 0;
+}
+
+function recordedReleaseVersions(source) {
+  return [...source.matchAll(/^## \[((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\](?:\s|$)/gmu)]
+    .map((match) => match[1]);
+}
+
+test('planned release is strictly greater than the post-2.5.0 published baseline, absent from the baseline release set, and unique across both changelogs and all three package surfaces; a planned target already exists in the released baseline fails before any manifest, changelog, or version-oracle edit', () => {
+  const changelogSources = [read('CHANGELOG.md'), read('CHANGELOG.ko.md')];
+  const releasedSets = changelogSources.map((source) => new Set(
+    recordedReleaseVersions(source)
+      .filter((version) => compareReleaseVersions(version, PUBLISHED_RELEASE_BASELINE) <= 0),
+  ));
+  const sorted = (versions) => [...versions].sort(compareReleaseVersions);
+  assert.deepEqual(
+    sorted(releasedSets[0]),
+    sorted(releasedSets[1]),
+    'the bilingual changelogs must derive the same published release baseline set',
+  );
+  assert.equal(
+    releasedSets[0].has(PUBLISHED_RELEASE_BASELINE),
+    true,
+    'the published baseline must be derived from the changelog history',
+  );
+
+  const availabilityErrors = [];
+  if (compareReleaseVersions(PLANNED_RELEASE, PUBLISHED_RELEASE_BASELINE) <= 0) {
+    availabilityErrors.push(
+      `${PLANNED_RELEASE} is not strictly greater than ${PUBLISHED_RELEASE_BASELINE}`,
+    );
+  }
+  if (releasedSets.some((versions) => versions.has(PLANNED_RELEASE))) {
+    availabilityErrors.push(`${PLANNED_RELEASE} already exists in the released baseline`);
+  }
+  assert.deepEqual(availabilityErrors, [], 'planned release availability gate failed');
+
+  assert.deepEqual(
+    changelogSources.map(
+      (source) => recordedReleaseVersions(source)
+        .filter((version) => version === PLANNED_RELEASE).length,
+    ),
+    [1, 1],
+    'the bilingual planned-release heading structure must be parallel and unique',
+  );
+  const releaseBlocks = changelogSources.map(
+    (source) => releaseBlockAnyDate(source, PLANNED_RELEASE),
+  );
+  assert.deepEqual(
+    ['### Added', '### Changed', '### Security']
+      .map((heading) => bulletCount(releaseBlocks[0], heading)),
+    ['### 추가', '### 변경', '### 보안']
+      .map((heading) => bulletCount(releaseBlocks[1], heading)),
+    'the bilingual planned-release sections must have parallel structure',
+  );
+  for (const block of releaseBlocks) {
+    for (const anchor of [
+      /Grok/iu,
+      /xAI/iu,
+      /--grok/u,
+      /--no-grok/u,
+      /--codex-only[\s\S]{0,200}--no-grok/iu,
+      /--permission-mode plan/u,
+      /--sandbox read-only/u,
+      /v1\.0\.3/u,
+      /bounded.{0,40}hybrid fingerprint|제한된.{0,40}hybrid fingerprint/iu,
+      /no-flag|무플래그/iu,
+    ]) assert.match(block, anchor);
+  }
+  for (const relativePath of [
+    '.claude-plugin/plugin.json',
+    '.codex-plugin/plugin.json',
+    'package.json',
+  ]) {
+    const source = read(relativePath);
+    const versionFields = [...source.matchAll(/"version"\s*:\s*"([^"]+)"/gu)];
+    assert.deepEqual(
+      versionFields.map((match) => match[1]),
+      [PLANNED_RELEASE],
+      `${relativePath} must contain one planned version field`,
+    );
+    assert.equal(JSON.parse(source).version, PLANNED_RELEASE, relativePath);
+  }
+});
+
+test('release version is exactly 2.6.0 on all three package surfaces', () => {
   const versions = [
     JSON.parse(read('.claude-plugin/plugin.json')).version,
     JSON.parse(read('.codex-plugin/plugin.json')).version,
     JSON.parse(read('package.json')).version,
   ];
-  assert.deepEqual(versions, ['2.5.0', '2.5.0', '2.5.0']);
+  assert.deepEqual(versions, ['2.6.0', '2.6.0', '2.6.0']);
 });
 
 test('evergreen bilingual READMEs advertise both native hosts and portable runtime', () => {

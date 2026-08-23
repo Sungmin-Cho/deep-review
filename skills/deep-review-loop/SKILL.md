@@ -2,7 +2,7 @@
 name: deep-review-loop
 description: Alternate independent review and evidence-based response until convergence on Claude Code or Codex.
 user-invocable: true
-argument-hint: "[--contract [SLICE-NNN]] [--entropy] [--ultracode] [--codex|--no-codex] [--no-opus] [--agy|--no-agy] [--codex-only] [--reviewer-strategy adaptive|static] [--readiness-receipt PATH] [--routing auto|fast|balanced|quality] [--model PROVIDER=MODEL] [--effort PROVIDER=EFFORT] [--reviewer-model REVIEWER=MODEL] [--reviewer-effort REVIEWER=EFFORT] [--allow-fallback|--no-fallback] [--allow-classifier] [--max=N] [--session-doc]"
+argument-hint: "[--contract [SLICE-NNN]] [--entropy] [--ultracode] [--codex|--no-codex] [--no-opus] [--agy|--no-agy] [--grok|--no-grok] [--codex-only] [--reviewer-strategy adaptive|static] [--readiness-receipt PATH] [--routing auto|fast|balanced|quality] [--model PROVIDER=MODEL] [--effort PROVIDER=EFFORT] [--reviewer-model REVIEWER=MODEL] [--reviewer-effort REVIEWER=EFFORT] [--allow-fallback|--no-fallback] [--allow-classifier] [--max=N] [--session-doc]"
 ---
 
 # deep-review-loop — Review and Respond loop
@@ -76,10 +76,45 @@ this session — never re-mint mid-session.
   reviewer-strategy, routing, model/effort, fallback/classifier, and explicit
   readiness-receipt flags. A leaf adapter receives only its selected route.
 - If round 1 requested `--ultracode`, mark `ultracode_consumed=true` after that
-  attempt. Rounds 2+ remove `--ultracode`, retain Codex, and inject
-  `--no-opus --no-agy`.
-- If that round reports Codex unavailable, withhold the injected `--no-opus`
-  on the next round so at least one reviewer remains. Do not repeat ultracode.
+  attempt. For every ultracode-consumed round 2+, derive the Review argv with
+  the token-aware normalizer below. It removes `--ultracode`, every `--grok`
+  and existing `--no-grok` token, and only complete Grok-keyed pairs for
+  `--model`, `--effort`, `--reviewer-model`, and `--reviewer-effort`. It never
+  uses substring replacement or consumes a neighbouring non-Grok value.
+
+  For ultracode-consumed loops, Rounds 2+ remove `--ultracode`; the cadence normally injects `--no-opus --no-agy`, but a Codex-unavailable round must withhold only the injected `--no-opus`.
+
+<!-- ultracode-round-2-normalizer:start -->
+```javascript
+(argv, { codexUnavailable = false } = {}) => {
+  const grokAssignments = new Set([
+    '--model', '--effort', '--reviewer-model', '--reviewer-effort',
+  ]);
+  const normalized = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === '--ultracode' || token === '--grok' || token === '--no-grok') continue;
+    const value = argv[index + 1];
+    if (grokAssignments.has(token) && typeof value === 'string' && /^grok=.+$/u.test(value)) {
+      index += 1;
+      continue;
+    }
+    normalized.push(token);
+  }
+  if (!codexUnavailable) normalized.push('--no-opus');
+  normalized.push('--no-agy', '--no-grok');
+  return normalized;
+}
+```
+<!-- ultracode-round-2-normalizer:end -->
+
+  A malformed pair stays in argv so `parsePublicRoute` returns the public-route
+  error instead of accepting laundered input. Otherwise pass the derived argv
+  through `parsePublicRoute` and continue only with `ok: true`. This retains
+  Codex and appends exactly one `--no-grok` after the cadence disables.
+- If that round reports Codex unavailable, set `codexUnavailable=true`: only
+  the injected `--no-opus` is withheld on the next round. Grok selectors are
+  still stripped, `--no-grok` is still appended, and ultracode is not repeated.
 - When the user never requested ultracode, preserve the original reviewer
   constraints on every round. Adaptive routing derives each round's role-fit
   selected set; `--codex-only` loops remain Codex-only.

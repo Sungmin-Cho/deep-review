@@ -3,6 +3,7 @@ export const REVIEWER_IDS = Object.freeze([
   'codex-review',
   'codex-adversarial',
   'agy',
+  'grok',
 ]);
 
 const REVIEWER_ID_SET = new Set(REVIEWER_IDS);
@@ -16,4 +17,5 @@ export const REVIEWER_PROVIDERS = Object.freeze({
   'codex-review': 'codex',
   'codex-adversarial': 'codex',
   agy: 'agy',
+  grok: 'grok',
 });

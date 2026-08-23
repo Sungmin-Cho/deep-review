@@ -24,6 +24,7 @@ does not create an additional `N_actual` voice.
 | Codex standard reviewer | Node Codex exec bridge | generic subagent that reads `{plugin_root}/agents/code-reviewer.md` |
 | Codex adversarial reviewer | Node Codex exec bridge | generic subagent that reads `{plugin_root}/agents/code-reviewer.md` |
 | agy reviewer | Node agy bridge | Node agy bridge |
+| grok reviewer | Node grok bridge | Node grok bridge |
 
 ## Selection invariants
 
@@ -54,7 +55,12 @@ does not create an additional `N_actual` voice.
   inline route and payload, so every canonical assignment rubric and the
   selected model/effort reach the leaf transport.
 - `--no-codex` disables both the standard and adversarial Codex roles. It does
-  not affect `claude-opus` or `agy`.
+  not affect `claude-opus`, `agy`, or `grok`.
+- `--no-grok` disables `grok`, and disables it completely: no coordinator
+  process, no carrier, no compatibility probe, and no Grok config state. It does
+  not affect `claude-opus`, `agy`, or either Codex role. `grok` is opt-in and is
+  never a default candidate, so a review with no reviewer flag selects it not at
+  all; the expanded `--codex-only` route carries `--no-grok`.
 - If an explicit model or effort is rejected as unsupported, retry the leaf at
   most once only when `--allow-fallback` authorizes it, omitting only the
   rejected dimension. Authentication, timeout, empty output, and generic
@@ -72,3 +78,12 @@ attempt. The untrusted result is excluded from synthesis.
 Use the same fingerprint API, `lib/fingerprint.mjs` `captureFingerprint`, with
 identical `repo`, `pluginRoot`, and `mode` options for both snapshots. Record the
 exclusion in the final report; never silently reduce `N_actual`.
+
+The Grok bridge is preventive but only partly so, and its status is stated that
+way: `--permission-mode plan` is the control observed to prevent a workspace
+write, `--sandbox read-only` is required but was not observed to stop one, and
+the pre/post hybrid fingerprint is a bounded detector with enumerated escape
+classes rather than a total backstop. The Grok seat also captures its
+post-review fingerprint only after confirmed whole-tree termination.
+`{plugin_root}/skills/deep-review-workflow/references/grok-integration.md` states
+each of those limits exactly.

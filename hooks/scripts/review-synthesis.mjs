@@ -4,12 +4,15 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { canonicalStringify, isFindingRef } from './document-readiness.mjs';
 import { rubricIdForRole } from './lib/assignment-rubrics.mjs';
-import { parseExecutionPlanDocument } from './lib/execution-plan.mjs';
+import { parseExecutionPlanDocument, parseExecutionRoute } from './lib/execution-plan.mjs';
 import { REVIEWER_IDS, REVIEWER_PROVIDERS } from './lib/reviewer-ids.mjs';
+import { UNSUPPORTED_GROK_CONTAINMENT } from './lib/grok-process-supervisor.mjs';
 
 const VERDICTS = new Set(['APPROVE', 'CONCERN', 'REQUEST_CHANGES']);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const READINESS_ADMISSION_SCHEMA = '1.0';
 
 function matchesFor(output, pattern) {
   return [...output.matchAll(pattern)];
@@ -417,6 +420,124 @@ function chooseExpansionAssignment({ attempts, routingPlan, reasons }) {
   };
 }
 
+// C-READINESS-ADMISSION (D17) — the readiness independence carrier.
+//
+// Report bytes prove nothing about independence: two trusted paths may hold
+// byte-identical reports and still be two genuine attempts, and one attempt
+// copied to a second path is still one attempt. Independence is therefore
+// carried, not inferred. Dispatch binds a fresh opaque `attempt_id` to one
+// parsed protocol-3 route and the immutable routing plan before an attempt
+// runs; this function re-derives every admitted field from that trusted record
+// and the plan, and seals the result once. Nothing here is reconstructed from a
+// reviewer id, a provider string, a report path, or prose inside the report —
+// the report contributes exactly one thing, the digest of its own bytes, and
+// even that is only ever *compared*, never copied in.
+function admissionFailure(reason) {
+  const error = new Error(`readiness admission is invalid: ${reason}`);
+  error.reason = reason;
+  return error;
+}
+
+function admissionSha256(value) {
+  return createHash('sha256').update(Buffer.from(value, 'utf8')).digest('hex');
+}
+
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function sealReadinessAdmission({ dispatch, routingPlan, included }) {
+  if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch)
+      || !isNonEmptyString(dispatch.round_id)
+      || !SHA256_PATTERN.test(dispatch.routing_plan_sha256 || '')
+      || !Array.isArray(dispatch.records) || dispatch.records.length === 0) {
+    throw admissionFailure('dispatch_malformed');
+  }
+  const routingPlanSha256 = admissionSha256(canonicalStringify(routingPlan));
+  if (routingPlanSha256 !== dispatch.routing_plan_sha256) {
+    throw admissionFailure('routing_plan_seal_mismatch');
+  }
+  // The expected route identity comes from the immutable plan, so a dispatch
+  // record cannot authorise a route the plan never selected by presenting a
+  // self-consistent digest of its own.
+  const plannedRouteDigests = new Map((routingPlan.routes || []).map((route) => [
+    route.reviewer_id,
+    admissionSha256(canonicalStringify({ protocol_version: '3.0', ...route })),
+  ]));
+  const digestByReviewer = new Map(
+    included.map((attempt) => [attemptReviewerId(attempt), attempt.output_digest]),
+  );
+  const attemptIds = new Set();
+  const routeIdentities = new Set();
+  const sessionIds = new Set();
+  const consumed = new Set();
+  const records = dispatch.records.map((record) => {
+    if (!record || typeof record !== 'object' || Array.isArray(record)
+        || !isNonEmptyString(record.attempt_id)
+        || !isNonEmptyString(record.reviewer_id)
+        || !isNonEmptyString(record.provider_family)
+        || !SHA256_PATTERN.test(record.route_sha256 || '')
+        || !SHA256_PATTERN.test(record.output_sha256 || '')
+        || !Object.hasOwn(record, 'model')
+        || !Object.hasOwn(record, 'compatibility_evidence_sha256')) {
+      throw admissionFailure('dispatch_malformed');
+    }
+    if (attemptIds.has(record.attempt_id)) throw admissionFailure('duplicate_attempt_id');
+    attemptIds.add(record.attempt_id);
+    let route;
+    try {
+      route = parseExecutionRoute(record.execution_route, record.reviewer_id);
+    } catch {
+      throw admissionFailure('unplanned_route');
+    }
+    const routeSha256 = admissionSha256(canonicalStringify(record.execution_route));
+    if (routeSha256 !== record.route_sha256) throw admissionFailure('route_digest_mismatch');
+    if (plannedRouteDigests.get(record.reviewer_id) !== routeSha256) {
+      throw admissionFailure('unplanned_route');
+    }
+    if (routeIdentities.has(routeSha256)) throw admissionFailure('duplicate_route_identity');
+    routeIdentities.add(routeSha256);
+    if (record.provider_family !== REVIEWER_PROVIDERS[record.reviewer_id]) {
+      throw admissionFailure('provider_mismatch');
+    }
+    if (record.model !== route.model) throw admissionFailure('model_mismatch');
+    if (!isNonEmptyString(record.session_id) || sessionIds.has(record.session_id)) {
+      throw admissionFailure('session_identity_invalid');
+    }
+    sessionIds.add(record.session_id);
+    if (record.compatibility_evidence_sha256
+        !== (route.grokCompatibilityEvidence?.evidence_sha256 ?? null)) {
+      throw admissionFailure('compatibility_evidence_mismatch');
+    }
+    if (!digestByReviewer.has(record.reviewer_id) || consumed.has(record.reviewer_id)) {
+      throw admissionFailure('admission_join_not_one_to_one');
+    }
+    if (digestByReviewer.get(record.reviewer_id) !== record.output_sha256) {
+      throw admissionFailure('output_digest_mismatch');
+    }
+    consumed.add(record.reviewer_id);
+    const body = {
+      attempt_id: record.attempt_id,
+      output_sha256: record.output_sha256,
+      provider_family: record.provider_family,
+      reviewer_id: record.reviewer_id,
+      route_sha256: record.route_sha256,
+    };
+    return { ...body, admission_sha256: admissionSha256(canonicalStringify(body)) };
+  }).sort((left, right) => Buffer.compare(
+    Buffer.from(left.attempt_id, 'utf8'),
+    Buffer.from(right.attempt_id, 'utf8'),
+  ));
+  if (consumed.size !== included.length) throw admissionFailure('admission_join_not_one_to_one');
+  const body = {
+    schema_version: READINESS_ADMISSION_SCHEMA,
+    round_id: dispatch.round_id,
+    routing_plan_sha256: routingPlanSha256,
+    records,
+  };
+  return { ...body, carrier_sha256: admissionSha256(canonicalStringify(body)) };
+}
+
 function providerFamilyCount(attempts, routingPlan) {
   return new Set(
     attempts.filter((attempt) => attempt?.included === true)
@@ -438,6 +559,7 @@ export function synthesizeReviewRound({
   expansionWavesUsed = 0,
   readinessMismatch = false,
   deferredAcceptance = null,
+  dispatch = null,
 } = {}) {
   if (!Array.isArray(attempts)) throw new TypeError('attempts must be an array');
   if (!routingPlan || routingPlan.protocol_version !== '3.0') {
@@ -447,6 +569,9 @@ export function synthesizeReviewRound({
     throw new Error('expansionWavesUsed must be a non-negative integer');
   }
   if (routingPlan.operational_failure === true) {
+    const routingShortfalls = Array.isArray(routingPlan.shortfalls)
+      ? [...routingPlan.shortfalls]
+      : [];
     return {
       status: 'operational_failure',
       needs_expansion: false,
@@ -455,9 +580,14 @@ export function synthesizeReviewRound({
       phase6_allowed: false,
       exclusions: [],
       error: 'routing_plan_operational_failure',
-      routing_shortfalls: Array.isArray(routingPlan.shortfalls)
-        ? [...routingPlan.shortfalls]
-        : [],
+      routing_shortfalls: routingShortfalls,
+      // D21 / I41 — the terminal reader of the containment carrier. A `--grok`
+      // review on a host with no enforceable containment fails the *entire*
+      // review here, with `n_actual: 0`; it is never degraded to a four-voice
+      // round.
+      operational_failure_reason: routingShortfalls.includes(UNSUPPORTED_GROK_CONTAINMENT)
+        ? UNSUPPORTED_GROK_CONTAINMENT
+        : null,
     };
   }
   if (routingIdentityError(routingPlan)) {
@@ -486,13 +616,20 @@ export function synthesizeReviewRound({
   const effectiveExpansionWavesUsed = hasMaterializedWave2
     ? Math.max(1, expansionWavesUsed)
     : expansionWavesUsed;
+  // C-DEFERRED-REF (D17) — the deferred carrier crossing this boundary is the
+  // reviewer-scoped ref, in shadow mode and active mode alike. The bare local id
+  // is a display projection this authority never reads back: two reviewers who
+  // each name a finding `DOC-1` are two pending obligations, and a bare-id
+  // carrier delivers one, so verifying either reviewer would lift the floor for
+  // both. `isFindingRef` is imported rather than restated so both modes admit a
+  // carrier by exactly the definition readiness sealed it with.
   if (deferredAcceptance !== null && (
     !deferredAcceptance
     || typeof deferredAcceptance !== 'object'
     || Array.isArray(deferredAcceptance)
     || typeof deferredAcceptance.complete !== 'boolean'
-    || !Array.isArray(deferredAcceptance.pending_finding_ids)
-    || deferredAcceptance.pending_finding_ids.some((id) => typeof id !== 'string' || id.length === 0)
+    || !Array.isArray(deferredAcceptance.pending_finding_refs)
+    || deferredAcceptance.pending_finding_refs.some((ref) => !isFindingRef(ref))
   )) {
     throw new Error('deferredAcceptance is malformed');
   }
@@ -525,6 +662,27 @@ export function synthesizeReviewRound({
   }
   const shadowMode = routingPlan.shadow_mode === true;
   const included = attempts.filter((attempt) => attempt?.included === true);
+  // The carrier is emitted only by final *production* synthesis, so a shadow
+  // round never seals one. A dispatch record that does not reconcile with the
+  // plan and the admitted attempts is an operational failure with Phase 6
+  // false, ahead of any verdict.
+  let readinessAdmission = null;
+  if (dispatch !== null && !shadowMode) {
+    try {
+      readinessAdmission = sealReadinessAdmission({ dispatch, routingPlan, included });
+    } catch (error) {
+      return {
+        status: 'operational_failure',
+        needs_expansion: false,
+        n_actual: included.length,
+        verdict: null,
+        phase6_allowed: false,
+        exclusions: [],
+        error: 'invalid_readiness_admission',
+        readiness_admission_error: error.reason || 'dispatch_malformed',
+      };
+    }
+  }
   const synthesis = synthesizeReviewAttempts(attempts, consensus);
   const includedIds = new Set(included.map(attemptReviewerId));
   const missingSelectedRoutes = (routingPlan.routes || [])
@@ -655,9 +813,20 @@ export function synthesizeReviewRound({
     confidence_floor_applied: confidenceFloorApplied,
     deferred_acceptance_floor: deferredAcceptanceFloor,
     provider_families: providerFamilies,
+    // Document readiness receives this verbatim from the trusted coordinator.
+    ...(readinessAdmission ? { readiness_admission: readinessAdmission } : {}),
     ...(shadowMode ? { shadow_mode: true, adaptive_plan_applied: false } : {}),
     ...(deferredAcceptanceFloor
-      ? { pending_deferred_finding_ids: [...deferredAcceptance.pending_finding_ids] }
+      ? {
+        pending_deferred_finding_refs: deferredAcceptance.pending_finding_refs.map((ref) => ({
+          finding_id: ref.finding_id,
+          reviewer_id: ref.reviewer_id,
+        })),
+        // Display projection only: one entry per authoritative ref, same order,
+        // so a local id shared by two reviewers renders twice. Never read back.
+        pending_deferred_finding_ids: deferredAcceptance.pending_finding_refs
+          .map((ref) => ref.finding_id),
+      }
       : {}),
     ...(documentBlocked ? { document_blocked: true } : {}),
     ...(expansionRejected ? { expansion_rejected: expansionRejected } : {}),

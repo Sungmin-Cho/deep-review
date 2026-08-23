@@ -24,6 +24,13 @@ assert_grep() {
     no "$1" "$4 (missing /$3/ in $(basename "$2"))"
   fi
 }
+assert_grep_flat() {
+  if tr '\n' ' ' < "$2" | grep -qE -e "$3" 2>/dev/null; then
+    ok "$1" "$4"
+  else
+    no "$1" "$4 (missing /$3/ in $(basename "$2"))"
+  fi
+}
 assert_absent() {
   if grep -qE -e "$3" "$2" 2>/dev/null; then
     no "$1" "$4 (unexpected /$3/ in $(basename "$2"))"
@@ -46,7 +53,7 @@ t_precedence() {
   assert_grep PR2 "$REVEXEC" '\-\-no-opus.*claude-opus' "--no-opus disables Claude role"
   assert_grep PR3 "$ULTRA" '\-\-ultracode.*six focused lenses' "--ultracode selects six-lens fan-out"
   assert_grep PR4 "$REVEXEC" 'named Claude agent or the Claude CLI bridge' "Claude capability fallback is explicit"
-  assert_grep PR5 "$REVEXEC" 'any error excludes.*agy' "agy decline remains per-run exclusion"
+  assert_grep_flat PR5 "$REVEXEC" 'Decline or[[:space:]]+any error excludes that provider; no reviewer process receives project access\.' "decline or error excludes that provider without exposing project access"
   assert_grep PR6 "$CODEXREF" 'N_actual.*trusted successful roles' "N_actual counts trusted roles only"
   assert_grep PR7 "$REVEXEC" 'N_actual == 0.*no verdict' "single-shot N=0 fails closed"
 }

@@ -1,9 +1,16 @@
 import {
   accessSync,
+  closeSync,
   constants,
   existsSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { spawnSync } from 'node:child_process';
 import {
@@ -11,6 +18,7 @@ import {
   extname,
   isAbsolute,
   join,
+  normalize,
   resolve,
 } from 'node:path';
 
@@ -28,6 +36,1241 @@ const WINDOWS_TASKKILL_FALLBACK_DIAGNOSTIC =
   'Windows taskkill failed; sent direct SIGKILL fallback\n';
 const WINDOWS_BATCH_UNSAFE_ARGUMENT_DIAGNOSTIC =
   'Windows batch arguments containing quotes or line breaks require a sibling PowerShell shim\n';
+const PREPARED_CHAIN_MISMATCH_DIAGNOSTIC =
+  'prepared spawn chain identity mismatch; no child was invoked\n';
+const POSIX_EXECUTABLE_PREFIX_BYTES = 256;
+const POSIX_EXECUTABLE_METADATA_BYTES = 8192;
+const POSIX_EXECUTABLE_MAX_READS = 3;
+const POSIX_ENV_NAME = /^[A-Za-z0-9._+][A-Za-z0-9._+-]*$/u;
+const CLASSIFICATION_PURPOSES = new Set(['effective-executable', 'native-loader']);
+
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+const MACHO_THIN_32_MAGIC = Buffer.from([0xce, 0xfa, 0xed, 0xfe]);
+const MACHO_THIN_64_MAGIC = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
+const MACHO_THIN_32_FOREIGN_MAGIC = Buffer.from([0xfe, 0xed, 0xfa, 0xce]);
+const MACHO_THIN_64_FOREIGN_MAGIC = Buffer.from([0xfe, 0xed, 0xfa, 0xcf]);
+const MACHO_FAT_32_MAGIC = Buffer.from([0xca, 0xfe, 0xba, 0xbe]);
+const MACHO_FAT_64_MAGIC = Buffer.from([0xca, 0xfe, 0xba, 0xbf]);
+const MACHO_FAT_32_FOREIGN_MAGIC = Buffer.from([0xbe, 0xba, 0xfe, 0xca]);
+const MACHO_FAT_64_FOREIGN_MAGIC = Buffer.from([0xbf, 0xba, 0xfe, 0xca]);
+
+const CPU_TYPES = Object.freeze({
+  x64: 0x01000007,
+  arm64: 0x0100000c,
+  ia32: 7,
+  arm: 12,
+});
+const ELF_MACHINES = Object.freeze({ x64: 62, arm64: 183, ia32: 3, arm: 40 });
+
+class ClassificationError extends Error {
+  constructor(reason) {
+    super(reason);
+    this.reason = reason;
+  }
+}
+
+function reject(reason) {
+  return { ok: false, reason };
+}
+
+function startsWith(buffer, prefix) {
+  return buffer.length >= prefix.length && buffer.subarray(0, prefix.length).equals(prefix);
+}
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function canonicalStringify(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('canonical JSON numbers must be finite');
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(',')}]`;
+  if (!value || typeof value !== 'object') throw new TypeError('unsupported canonical JSON value');
+  return `{${Object.keys(value).sort().map(
+    (key) => `${JSON.stringify(key)}:${canonicalStringify(value[key])}`,
+  ).join(',')}}`;
+}
+
+function bigintToSafeNumber(value, reason) {
+  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new ClassificationError(reason);
+  return Number(value);
+}
+
+function checkedRange(start, size, limit, reason) {
+  if (start < 0n || size < 0n) throw new ClassificationError(reason);
+  const end = start + size;
+  if (end < start || end > limit) throw new ClassificationError(reason);
+  return end;
+}
+
+class BoundedFileReader {
+  constructor(filePath) {
+    this.fd = openSync(filePath, 'r');
+    try {
+      const stat = fstatSync(this.fd, { bigint: true });
+      if (!stat.isFile()) throw new ClassificationError('not_regular_file');
+      this.stat = stat;
+      this.sizeBigInt = stat.size;
+      this.size = bigintToSafeNumber(stat.size, 'file_too_large');
+      this.reads = 0;
+      this.prefix = this.#readFromFile(0, Math.min(this.size, POSIX_EXECUTABLE_PREFIX_BYTES));
+    } catch (error) {
+      closeSync(this.fd);
+      throw error;
+    }
+  }
+
+  #readFromFile(offset, length) {
+    if (this.reads >= POSIX_EXECUTABLE_MAX_READS) {
+      throw new ClassificationError('executable_metadata_read_budget_exceeded');
+    }
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length)
+        || offset < 0 || length < 0 || length > POSIX_EXECUTABLE_METADATA_BYTES
+        || offset + length > this.size) {
+      throw new ClassificationError('invalid_executable_metadata_range');
+    }
+    const buffer = Buffer.alloc(length);
+    let consumed = 0;
+    while (consumed < length) {
+      const count = readSync(this.fd, buffer, consumed, length - consumed, offset + consumed);
+      if (count === 0) throw new ClassificationError('truncated_executable_metadata');
+      consumed += count;
+    }
+    this.reads += 1;
+    return buffer;
+  }
+
+  read(offset, length) {
+    if (offset >= 0 && length >= 0 && offset + length <= this.prefix.length) {
+      return this.prefix.subarray(offset, offset + length);
+    }
+    return this.#readFromFile(offset, length);
+  }
+
+  close() {
+    closeSync(this.fd);
+  }
+}
+
+class BufferReader {
+  constructor(bytes) {
+    this.bytes = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    this.size = this.bytes.length;
+    this.sizeBigInt = BigInt(this.size);
+    this.prefix = this.bytes.subarray(0, POSIX_EXECUTABLE_PREFIX_BYTES);
+  }
+
+  read(offset, length) {
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length)
+        || offset < 0 || length < 0 || offset + length > this.size) {
+      throw new ClassificationError('invalid_executable_metadata_range');
+    }
+    return this.bytes.subarray(offset, offset + length);
+  }
+
+  close() {}
+}
+
+function purposeForMemberPosition(position) {
+  switch (position) {
+    case 'launcher':
+    case 'shebang-interpreter':
+    case 'path-target':
+      return 'effective-executable';
+    case 'native-loader':
+      return 'native-loader';
+    default:
+      throw new ClassificationError('unknown_prepared_chain_member_position');
+  }
+}
+
+function validatePurpose(purpose) {
+  if (!CLASSIFICATION_PURPOSES.has(purpose)) {
+    throw new ClassificationError('invalid_classification_purpose');
+  }
+}
+
+function hostCpuType(arch) {
+  const value = CPU_TYPES[arch];
+  if (value === undefined) throw new ClassificationError('unsupported_host_cpu');
+  return value;
+}
+
+function hostElfMachine(arch) {
+  const value = ELF_MACHINES[arch];
+  if (value === undefined) throw new ClassificationError('unsupported_host_cpu');
+  return value;
+}
+
+function readUInt64(buffer, offset, littleEndian, reason) {
+  if (offset < 0 || offset + 8 > buffer.length) throw new ClassificationError(reason);
+  return littleEndian ? buffer.readBigUInt64LE(offset) : buffer.readBigUInt64BE(offset);
+}
+
+function readUInt32(buffer, offset, littleEndian, reason) {
+  if (offset < 0 || offset + 4 > buffer.length) throw new ClassificationError(reason);
+  return littleEndian ? buffer.readUInt32LE(offset) : buffer.readUInt32BE(offset);
+}
+
+function readInt32(buffer, offset, littleEndian, reason) {
+  if (offset < 0 || offset + 4 > buffer.length) throw new ClassificationError(reason);
+  return littleEndian ? buffer.readInt32LE(offset) : buffer.readInt32BE(offset);
+}
+
+function machoSubtype(rawSubtype, arch, acceptedPointerAuthVersions, discovery = false) {
+  const raw = rawSubtype >>> 0;
+  const base = raw & 0x00ffffff;
+  const capabilities = (raw & 0xff000000) >>> 0;
+  if (arch === 'arm64') {
+    if (base !== 0 && base !== 1 && base !== 2) return null;
+    if (base !== 2 && capabilities !== 0) return null;
+    if (base === 2) {
+      const unknown = (capabilities & 0x70000000) >>> 0;
+      if (unknown !== 0) return null;
+      const version = (raw & 0x0f000000) >>> 24;
+      if (!discovery && !acceptedPointerAuthVersions?.has(version)) return null;
+      return { base, version, grade: 3 };
+    }
+    return { base, version: null, grade: base === 1 ? 2 : 1 };
+  }
+  if (arch === 'x64') {
+    if (base !== 3 && base !== 8) return null;
+    if (capabilities !== 0 && capabilities !== 0x80000000) return null;
+    return { base, version: null, grade: base === 8 ? 2 : 1 };
+  }
+  if (arch === 'ia32') {
+    if (capabilities !== 0) return null;
+    return base === 3 || base === 4 ? { base, version: null, grade: 1 } : null;
+  }
+  if (arch === 'arm') {
+    if (capabilities !== 0) return null;
+    return base <= 11 ? { base, version: null, grade: 1 } : null;
+  }
+  return null;
+}
+
+function exactDylinkerCommand(command, expectedCommand) {
+  if (command.length !== 32
+      || command.readUInt32LE(0) !== expectedCommand
+      || command.readUInt32LE(4) !== 32
+      || command.readUInt32LE(8) !== 12) return false;
+  const expected = Buffer.alloc(20);
+  Buffer.from('/usr/lib/dyld\0', 'utf8').copy(expected);
+  return command.subarray(12).equals(expected);
+}
+
+function parseUnixThread(command, arch) {
+  const expectedFlavor = arch === 'arm64' ? 6 : arch === 'x64' ? 4 : null;
+  const expectedCount = arch === 'arm64' ? 68 : arch === 'x64' ? 42 : null;
+  const pcOffset = arch === 'arm64' ? 256 : arch === 'x64' ? 128 : null;
+  if (expectedFlavor === null) throw new ClassificationError('unsupported_macho_thread_state');
+  let cursor = 8;
+  let triples = 0;
+  const pcs = new Set();
+  while (cursor < command.length) {
+    if (cursor + 8 > command.length) throw new ClassificationError('invalid_macho_unixthread_layout');
+    const flavor = command.readUInt32LE(cursor);
+    const count = command.readUInt32LE(cursor + 4);
+    const stateBytes = count * 4;
+    if (!Number.isSafeInteger(stateBytes) || cursor + 8 + stateBytes > command.length) {
+      throw new ClassificationError('invalid_macho_unixthread_layout');
+    }
+    if (flavor === expectedFlavor) {
+      if (count !== expectedCount || pcOffset + 8 > stateBytes) {
+        throw new ClassificationError('invalid_macho_unixthread_state');
+      }
+      const stateStart = cursor + 8;
+      pcs.add(command.readBigUInt64LE(stateStart + pcOffset).toString());
+    }
+    triples += 1;
+    cursor += 8 + stateBytes;
+  }
+  if (cursor !== command.length || triples === 0 || pcs.size === 0) {
+    throw new ClassificationError('invalid_macho_unixthread_layout');
+  }
+  if (pcs.size !== 1) throw new ClassificationError('conflicting_macho_unixthread_pc');
+  return BigInt([...pcs][0]);
+}
+
+function parseThinMacho(reader, sliceOffset, sliceSize, context, expectedArch = null) {
+  const sliceMetadata = sliceOffset + 32 <= reader.prefix.length
+    ? reader.read(sliceOffset, Math.min(sliceSize, 32))
+    : reader.read(sliceOffset, Math.min(sliceSize, POSIX_EXECUTABLE_METADATA_BYTES));
+  const headerPrefix = sliceMetadata.subarray(0, Math.min(sliceMetadata.length, 32));
+  const is64 = startsWith(headerPrefix, MACHO_THIN_64_MAGIC);
+  const is32 = startsWith(headerPrefix, MACHO_THIN_32_MAGIC);
+  if (!is64 && !is32) {
+    if (startsWith(headerPrefix, MACHO_THIN_64_FOREIGN_MAGIC)
+        || startsWith(headerPrefix, MACHO_THIN_32_FOREIGN_MAGIC)) {
+      throw new ClassificationError('foreign_macho_endian');
+    }
+    throw new ClassificationError('invalid_macho_header');
+  }
+  const headerSize = is64 ? 32 : 28;
+  if (sliceSize < headerSize || headerPrefix.length < headerSize) {
+    throw new ClassificationError('truncated_macho_header');
+  }
+  const cpuType = headerPrefix.readInt32LE(4);
+  const rawSubtype = headerPrefix.readUInt32LE(8);
+  const filetype = headerPrefix.readUInt32LE(12);
+  const ncmds = headerPrefix.readUInt32LE(16);
+  const sizeofcmds = headerPrefix.readUInt32LE(20);
+  if (cpuType !== hostCpuType(context.arch)) throw new ClassificationError('foreign_macho_cpu');
+  if (expectedArch && (cpuType !== expectedArch.cpuType || rawSubtype !== expectedArch.rawSubtype)) {
+    throw new ClassificationError('macho_fat_slice_header_mismatch');
+  }
+  const subtype = machoSubtype(
+    rawSubtype,
+    context.arch,
+    context.acceptedPointerAuthVersions,
+    context.discovery,
+  );
+  if (!subtype) throw new ClassificationError('incompatible_macho_cpu_subtype');
+  if (context.purpose === 'effective-executable' && filetype !== 2) {
+    throw new ClassificationError('invalid_macho_executable_filetype');
+  }
+  if (context.purpose === 'native-loader' && filetype !== 7) {
+    throw new ClassificationError('invalid_macho_loader_filetype');
+  }
+  if (ncmds < 1 || ncmds > 128
+      || sizeofcmds < ncmds * 8 || sizeofcmds > 8160
+      || headerSize + sizeofcmds > sliceSize) {
+    throw new ClassificationError('invalid_macho_load_command_table');
+  }
+  const image = headerSize + sizeofcmds <= sliceMetadata.length
+    ? sliceMetadata.subarray(0, headerSize + sizeofcmds)
+    : reader.read(sliceOffset, headerSize + sizeofcmds);
+  const commandsEnd = headerSize + sizeofcmds;
+  let cursor = headerSize;
+  let mainCount = 0;
+  let unixThreadCount = 0;
+  let loadDylinkerCount = 0;
+  let idDylinkerCount = 0;
+  let platformCount = 0;
+  let entryoff = null;
+  const threadPcs = [];
+  const segments = [];
+
+  for (let index = 0; index < ncmds; index += 1) {
+    if (cursor + 8 > commandsEnd) throw new ClassificationError('invalid_macho_load_command_table');
+    const commandType = image.readUInt32LE(cursor);
+    const commandSize = image.readUInt32LE(cursor + 4);
+    // 64-bit load commands are eight-byte aligned; only 32-bit images are four.
+    const commandAlignment = is64 ? 8 : 4;
+    if (commandSize < 8 || commandSize % commandAlignment !== 0
+        || cursor + commandSize > commandsEnd) {
+      throw new ClassificationError('invalid_macho_load_command');
+    }
+    const command = image.subarray(cursor, cursor + commandSize);
+    if (commandType === 0x19) {
+      if (!is64 || commandSize < 72) throw new ClassificationError('invalid_macho_segment');
+      const nsects = command.readUInt32LE(64);
+      if (commandSize !== 72 + nsects * 80) throw new ClassificationError('invalid_macho_segment');
+      const vmaddr = command.readBigUInt64LE(24);
+      const vmsize = command.readBigUInt64LE(32);
+      const fileoff = command.readBigUInt64LE(40);
+      const filesize = command.readBigUInt64LE(48);
+      const initprot = command.readInt32LE(60);
+      if (filesize > vmsize) throw new ClassificationError('macho_filesize_exceeds_vmsize');
+      const fileEnd = checkedRange(fileoff, filesize, BigInt(sliceSize), 'invalid_macho_segment_file_range');
+      const vmEnd = checkedRange(vmaddr, vmsize, 0xffffffffffffffffn, 'invalid_macho_segment_vm_range');
+      segments.push({ fileoff, fileEnd, vmaddr, vmEnd, executable: (initprot & 0x4) !== 0 });
+    } else if (commandType === 0x1) {
+      if (is64 || commandSize < 56) throw new ClassificationError('invalid_macho_segment');
+      const nsects = command.readUInt32LE(48);
+      if (commandSize !== 56 + nsects * 68) throw new ClassificationError('invalid_macho_segment');
+      const vmaddr = BigInt(command.readUInt32LE(24));
+      const vmsize = BigInt(command.readUInt32LE(28));
+      const fileoff = BigInt(command.readUInt32LE(32));
+      const filesize = BigInt(command.readUInt32LE(36));
+      const initprot = command.readInt32LE(44);
+      if (filesize > vmsize) throw new ClassificationError('macho_filesize_exceeds_vmsize');
+      const fileEnd = checkedRange(fileoff, filesize, BigInt(sliceSize), 'invalid_macho_segment_file_range');
+      const vmEnd = checkedRange(vmaddr, vmsize, 0xffffffffn, 'invalid_macho_segment_vm_range');
+      segments.push({ fileoff, fileEnd, vmaddr, vmEnd, executable: (initprot & 0x4) !== 0 });
+    } else if (commandType === 0x80000028) {
+      if (commandSize !== 24) throw new ClassificationError('invalid_macho_lc_main');
+      mainCount += 1;
+      entryoff = command.readBigUInt64LE(8);
+    } else if (commandType === 0x5) {
+      unixThreadCount += 1;
+      threadPcs.push(parseUnixThread(command, context.arch));
+    } else if (commandType === 0xe) {
+      loadDylinkerCount += 1;
+      if (!exactDylinkerCommand(command, 0xe)) throw new ClassificationError('invalid_macho_load_dylinker');
+    } else if (commandType === 0xf) {
+      idDylinkerCount += 1;
+      if (!exactDylinkerCommand(command, 0xf)) throw new ClassificationError('invalid_macho_id_dylinker');
+    } else if (commandType === 0x24) {
+      if (commandSize !== 16) throw new ClassificationError('invalid_macho_version_command');
+      platformCount += 1;
+    } else if (commandType === 0x25 || commandType === 0x2f || commandType === 0x30) {
+      throw new ClassificationError('foreign_macho_platform');
+    } else if (commandType === 0x32) {
+      if (commandSize < 24) throw new ClassificationError('invalid_macho_build_version');
+      const platform = command.readUInt32LE(8);
+      const ntools = command.readUInt32LE(20);
+      if (platform !== 1) throw new ClassificationError('foreign_macho_platform');
+      if (commandSize !== 24 + ntools * 8) throw new ClassificationError('invalid_macho_build_version');
+      platformCount += 1;
+    }
+    cursor += commandSize;
+  }
+  if (cursor !== commandsEnd) throw new ClassificationError('invalid_macho_load_command_table');
+
+  if (context.purpose === 'effective-executable') {
+    if (!((mainCount === 1 && unixThreadCount === 0)
+        || (mainCount === 0 && unixThreadCount === 1))) {
+      throw new ClassificationError('invalid_macho_entry_command_set');
+    }
+    if (loadDylinkerCount !== 1 || idDylinkerCount !== 0) {
+      throw new ClassificationError('invalid_macho_dylinker_command_set');
+    }
+    const entry = mainCount === 1 ? entryoff : threadPcs[0];
+    const entryMapped = segments.some((segment) => {
+      if (!segment.executable) return false;
+      return mainCount === 1
+        ? entry >= segment.fileoff && entry < segment.fileEnd
+        : entry >= segment.vmaddr && entry < segment.vmEnd;
+    });
+    if (!entryMapped) throw new ClassificationError('macho_entry_outside_executable_mapping');
+  } else {
+    if (mainCount !== 0 || loadDylinkerCount !== 0 || idDylinkerCount !== 1
+        || unixThreadCount < 1 || platformCount < 1
+        || !segments.some((segment) => segment.executable)) {
+      throw new ClassificationError('invalid_macho_native_loader_structure');
+    }
+  }
+
+  return {
+    ok: true,
+    type: 'native-macho',
+    classification_purpose: context.purpose,
+    native_loader_path: context.purpose === 'effective-executable' ? '/usr/lib/dyld' : null,
+    macho: {
+      cpu_type: cpuType,
+      cpu_subtype: rawSubtype,
+      filetype,
+      is_64: is64,
+      fat_arch_index: expectedArch?.index ?? null,
+    },
+  };
+}
+
+function parseFatArchTable(reader, is64) {
+  if (reader.size < 8) throw new ClassificationError('truncated_macho_fat_header');
+  const header = reader.read(0, 8);
+  const nfatArch = header.readUInt32BE(4);
+  const recordSize = is64 ? 32 : 20;
+  if (nfatArch < 1 || nfatArch > 16) throw new ClassificationError('invalid_macho_fat_arch_count');
+  const tableSize = 8 + nfatArch * recordSize;
+  if (tableSize > reader.size) throw new ClassificationError('truncated_macho_fat_arch_table');
+  const table = reader.read(0, tableSize);
+  const records = [];
+  for (let index = 0; index < nfatArch; index += 1) {
+    const cursor = 8 + index * recordSize;
+    const cpuType = table.readInt32BE(cursor);
+    const rawSubtype = table.readUInt32BE(cursor + 4);
+    const offsetBig = is64 ? table.readBigUInt64BE(cursor + 8) : BigInt(table.readUInt32BE(cursor + 8));
+    const sizeBig = is64 ? table.readBigUInt64BE(cursor + 16) : BigInt(table.readUInt32BE(cursor + 12));
+    const align = table.readUInt32BE(cursor + (is64 ? 24 : 16));
+    if (align > 31) throw new ClassificationError('invalid_macho_fat_alignment');
+    const endBig = checkedRange(offsetBig, sizeBig, reader.sizeBigInt, 'invalid_macho_fat_slice_range');
+    const alignment = 1n << BigInt(align);
+    if (offsetBig % alignment !== 0n) throw new ClassificationError('invalid_macho_fat_offset_congruence');
+    records.push({
+      index,
+      cpuType,
+      rawSubtype,
+      offset: bigintToSafeNumber(offsetBig, 'macho_fat_slice_too_large'),
+      size: bigintToSafeNumber(sizeBig, 'macho_fat_slice_too_large'),
+      offsetBig,
+      endBig,
+    });
+  }
+  const byOffset = [...records].sort((left, right) => left.offset - right.offset);
+  for (let index = 1; index < byOffset.length; index += 1) {
+    if (byOffset[index].offsetBig < byOffset[index - 1].endBig) {
+      throw new ClassificationError('overlapping_macho_fat_slices');
+    }
+  }
+  return records;
+}
+
+function parseMacho(reader, context) {
+  const prefix = reader.prefix;
+  const thin = startsWith(prefix, MACHO_THIN_32_MAGIC) || startsWith(prefix, MACHO_THIN_64_MAGIC);
+  if (thin) return parseThinMacho(reader, 0, reader.size, context);
+  if (startsWith(prefix, MACHO_THIN_32_FOREIGN_MAGIC)
+      || startsWith(prefix, MACHO_THIN_64_FOREIGN_MAGIC)
+      || startsWith(prefix, MACHO_FAT_32_FOREIGN_MAGIC)
+      || startsWith(prefix, MACHO_FAT_64_FOREIGN_MAGIC)) {
+    throw new ClassificationError('foreign_macho_endian');
+  }
+  const fat64 = startsWith(prefix, MACHO_FAT_64_MAGIC);
+  const fat32 = startsWith(prefix, MACHO_FAT_32_MAGIC);
+  if (!fat32 && !fat64) throw new ClassificationError('unrecognized_posix_executable');
+  const records = parseFatArchTable(reader, fat64);
+  const candidates = records
+    .filter((record) => record.cpuType === hostCpuType(context.arch))
+    .map((record) => ({
+      ...record,
+      subtype: machoSubtype(
+        record.rawSubtype,
+        context.arch,
+        context.acceptedPointerAuthVersions,
+        context.discovery,
+      ),
+    }))
+    .filter((record) => record.subtype)
+    .sort((left, right) => right.subtype.grade - left.subtype.grade || left.index - right.index);
+  if (candidates.length === 0) throw new ClassificationError('no_compatible_macho_fat_slice');
+  const selected = candidates[0];
+  return parseThinMacho(reader, selected.offset, selected.size, context, selected);
+}
+
+function parseElf(reader, context) {
+  const prefix = reader.prefix;
+  if (prefix.length < 16 || !startsWith(prefix, ELF_MAGIC)) {
+    throw new ClassificationError('invalid_elf_header');
+  }
+  const elfClass = prefix[4];
+  const expectedClass = context.arch === 'x64' || context.arch === 'arm64' ? 2 : 1;
+  if (elfClass !== expectedClass) throw new ClassificationError('foreign_elf_class');
+  if (prefix[5] !== 1) throw new ClassificationError('foreign_elf_endian');
+  if (prefix[6] !== 1) throw new ClassificationError('invalid_elf_ident_version');
+  const is64 = elfClass === 2;
+  const headerSize = is64 ? 64 : 52;
+  if (reader.size < headerSize) throw new ClassificationError('truncated_elf_header');
+  const header = reader.read(0, headerSize);
+  const type = header.readUInt16LE(16);
+  const machine = header.readUInt16LE(18);
+  const version = header.readUInt32LE(20);
+  const entry = is64 ? header.readBigUInt64LE(24) : BigInt(header.readUInt32LE(24));
+  const phoff = is64 ? header.readBigUInt64LE(32) : BigInt(header.readUInt32LE(28));
+  const ehsize = header.readUInt16LE(is64 ? 52 : 40);
+  const phentsize = header.readUInt16LE(is64 ? 54 : 42);
+  const phnum = header.readUInt16LE(is64 ? 56 : 44);
+  const expectedPhent = is64 ? 56 : 32;
+  if ((type !== 2 && type !== 3) || machine !== hostElfMachine(context.arch) || version !== 1) {
+    throw new ClassificationError('invalid_elf_type_or_cpu');
+  }
+  if (ehsize !== headerSize || phentsize !== expectedPhent || phnum < 1 || phnum > 128) {
+    throw new ClassificationError('invalid_elf_program_header_table');
+  }
+  const tableSizeBig = BigInt(phnum) * BigInt(phentsize);
+  checkedRange(phoff, tableSizeBig, reader.sizeBigInt, 'invalid_elf_program_header_table');
+  if (tableSizeBig > BigInt(POSIX_EXECUTABLE_METADATA_BYTES)) {
+    throw new ClassificationError('invalid_elf_program_header_table');
+  }
+  const table = reader.read(
+    bigintToSafeNumber(phoff, 'invalid_elf_program_header_table'),
+    bigintToSafeNumber(tableSizeBig, 'invalid_elf_program_header_table'),
+  );
+  let loadCount = 0;
+  let executableMapping = false;
+  const interpreterHeaders = [];
+  for (let index = 0; index < phnum; index += 1) {
+    const cursor = index * phentsize;
+    const phType = table.readUInt32LE(cursor);
+    const flags = is64 ? table.readUInt32LE(cursor + 4) : table.readUInt32LE(cursor + 24);
+    const offset = is64 ? table.readBigUInt64LE(cursor + 8) : BigInt(table.readUInt32LE(cursor + 4));
+    const vaddr = is64 ? table.readBigUInt64LE(cursor + 16) : BigInt(table.readUInt32LE(cursor + 8));
+    const filesz = is64 ? table.readBigUInt64LE(cursor + 32) : BigInt(table.readUInt32LE(cursor + 16));
+    const memsz = is64 ? table.readBigUInt64LE(cursor + 40) : BigInt(table.readUInt32LE(cursor + 20));
+    const align = is64 ? table.readBigUInt64LE(cursor + 48) : BigInt(table.readUInt32LE(cursor + 28));
+    if (phType === 1 || phType === 3 || phType === 6) {
+      checkedRange(offset, filesz, reader.sizeBigInt, 'invalid_elf_program_file_range');
+    }
+    if (phType === 1) {
+      loadCount += 1;
+      if (filesz > memsz) throw new ClassificationError('elf_filesize_exceeds_memsize');
+      if (align !== 0n && align !== 1n && (align & (align - 1n)) !== 0n) {
+        throw new ClassificationError('invalid_elf_alignment');
+      }
+      if (align > 1n && vaddr % align !== offset % align) {
+        throw new ClassificationError('invalid_elf_virtual_file_congruence');
+      }
+      const vmEnd = checkedRange(vaddr, memsz, 0xffffffffffffffffn, 'invalid_elf_virtual_range');
+      if ((flags & 0x1) !== 0 && entry >= vaddr && entry < vmEnd) executableMapping = true;
+    } else if (phType === 3) {
+      interpreterHeaders.push({ offset, filesz });
+    }
+  }
+  if (loadCount === 0) throw new ClassificationError('missing_elf_load_segment');
+  if (!executableMapping) throw new ClassificationError('elf_entry_outside_executable_mapping');
+  if (interpreterHeaders.length > 1) throw new ClassificationError('multiple_elf_interpreters');
+  let nativeLoaderPath = null;
+  if (interpreterHeaders.length === 1) {
+    if (context.purpose === 'native-loader') throw new ClassificationError('nested_elf_native_loader');
+    const [{ offset, filesz }] = interpreterHeaders;
+    if (filesz < 2n || filesz > 4096n) throw new ClassificationError('invalid_elf_interpreter');
+    const bytes = reader.read(
+      bigintToSafeNumber(offset, 'invalid_elf_interpreter'),
+      bigintToSafeNumber(filesz, 'invalid_elf_interpreter'),
+    );
+    if (bytes.at(-1) !== 0 || bytes.subarray(0, -1).includes(0) || bytes[0] !== 0x2f) {
+      throw new ClassificationError('invalid_elf_interpreter');
+    }
+    try {
+      nativeLoaderPath = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, -1));
+    } catch {
+      throw new ClassificationError('invalid_elf_interpreter');
+    }
+  }
+  return {
+    ok: true,
+    type: 'native-elf',
+    classification_purpose: context.purpose,
+    native_loader_path: nativeLoaderPath,
+  };
+}
+
+function observeArm64PointerAuth(filePath) {
+  let validationReader;
+  let reader;
+  try {
+    validationReader = new BoundedFileReader(filePath);
+    parseMacho(validationReader, {
+      arch: 'arm64',
+      purpose: 'effective-executable',
+      acceptedPointerAuthVersions: new Set(),
+      discovery: true,
+    });
+    validationReader.close();
+    validationReader = null;
+    reader = new BoundedFileReader(filePath);
+    const prefix = reader.prefix;
+    const rawSubtypes = [];
+    if (startsWith(prefix, MACHO_THIN_64_MAGIC) || startsWith(prefix, MACHO_THIN_32_MAGIC)) {
+      const headerSize = startsWith(prefix, MACHO_THIN_64_MAGIC) ? 32 : 28;
+      const header = reader.read(0, headerSize);
+      if (header.readInt32LE(4) !== CPU_TYPES.arm64) return { status: 'missing' };
+      rawSubtypes.push(header.readUInt32LE(8));
+    } else if (startsWith(prefix, MACHO_FAT_32_MAGIC) || startsWith(prefix, MACHO_FAT_64_MAGIC)) {
+      const records = parseFatArchTable(reader, startsWith(prefix, MACHO_FAT_64_MAGIC));
+      rawSubtypes.push(...records.filter((record) => record.cpuType === CPU_TYPES.arm64)
+        .map((record) => record.rawSubtype));
+      if (rawSubtypes.length === 0) return { status: 'missing' };
+    } else {
+      return { status: 'missing' };
+    }
+    const versions = new Set();
+    for (const rawSubtype of rawSubtypes) {
+      const hasPointerAuth = (rawSubtype & 0x80000000) !== 0
+        || (rawSubtype & 0x0f000000) !== 0;
+      if (hasPointerAuth) versions.add((rawSubtype & 0x0f000000) >>> 24);
+    }
+    if (versions.size > 1) return { status: 'conflict' };
+    if (versions.size === 0) return { status: 'none' };
+    return { status: 'version', version: [...versions][0] };
+  } catch {
+    return { status: 'missing' };
+  } finally {
+    validationReader?.close();
+    reader?.close();
+  }
+}
+
+function discoverArm64PointerAuthVersionFromPaths(
+  paths,
+  { platform = process.platform, arch = process.arch } = {},
+) {
+  if (platform !== 'darwin' || arch !== 'arm64') {
+    return { ok: true, status: 'not_applicable', accepted_versions: [] };
+  }
+  const observations = paths.map(observeArm64PointerAuth);
+  if (observations.some((observation) => observation.status === 'conflict')) {
+    return reject('pointer_auth_version_conflict');
+  }
+  const present = observations.filter((observation) => observation.status !== 'missing');
+  if (present.length === 0) return reject('pointer_auth_version_missing');
+  const versions = new Set(
+    present.filter((observation) => observation.status === 'version')
+      .map((observation) => observation.version),
+  );
+  if (versions.size > 1) return reject('pointer_auth_version_conflict');
+  return {
+    ok: true,
+    status: versions.size === 0 ? 'none' : 'present',
+    accepted_versions: [...versions].sort((left, right) => left - right),
+  };
+}
+
+export function discoverArm64PointerAuthVersion() {
+  return discoverArm64PointerAuthVersionFromPaths([process.execPath, '/usr/bin/env']);
+}
+
+function readerIdentity(reader, realPath) {
+  const stat = reader.stat;
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mode: stat.mode,
+    uid: stat.uid,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+    realPath,
+  };
+}
+
+// The classifier's own view of the file it read: the result, the inode it read
+// it from, and the pointer-auth authority it judged it against. `sealPreparedMember`
+// binds all three to the bytes it seals, so no replacement can slip into the
+// window between the classifier's open and the seal's open.
+function observeNativeFile(filePath, position) {
+  if (IS_WINDOWS) return reject('unsupported_posix_platform');
+  let reader;
+  try {
+    const purpose = purposeForMemberPosition(position);
+    validatePurpose(purpose);
+    if (typeof filePath !== 'string' || !isAbsolute(filePath)) {
+      throw new ClassificationError('executable_path_must_be_absolute');
+    }
+    const normalizedPath = normalize(filePath);
+    const stat = statSync(normalizedPath);
+    if (!stat.isFile()) throw new ClassificationError('not_regular_file');
+    accessSync(normalizedPath, constants.X_OK);
+    reader = new BoundedFileReader(normalizedPath);
+    const identity = readerIdentity(reader, normalize(realpathSync(normalizedPath)));
+    const observed = (result, acceptedPointerAuthVersions = []) => ({
+      ok: true,
+      classification: result,
+      identity,
+      acceptedPointerAuthVersions,
+    });
+    const prefix = reader.prefix;
+    if (prefix.length === 0) throw new ClassificationError('empty_file');
+    if (prefix[0] === 0x23 && prefix[1] === 0x21) {
+      if (purpose !== 'effective-executable') throw new ClassificationError('nested_shebang');
+      return observed({
+        ok: true, type: 'shebang', classification_purpose: purpose, native_loader_path: null,
+      });
+    }
+    if (process.platform === 'linux') {
+      if (startsWith(prefix, MACHO_THIN_32_MAGIC) || startsWith(prefix, MACHO_THIN_64_MAGIC)
+          || startsWith(prefix, MACHO_FAT_32_MAGIC) || startsWith(prefix, MACHO_FAT_64_MAGIC)) {
+        throw new ClassificationError('foreign_platform_macho');
+      }
+      const result = parseElf(reader, { arch: process.arch, purpose });
+      if (result.native_loader_path) {
+        const loader = classifyNativeFile(result.native_loader_path, 'native-loader');
+        if (!loader.ok || loader.type !== 'native-elf') {
+          throw new ClassificationError('invalid_elf_native_loader');
+        }
+      }
+      return observed(result);
+    }
+    if (process.platform === 'darwin') {
+      if (startsWith(prefix, ELF_MAGIC)) throw new ClassificationError('foreign_platform_elf');
+      const discovery = discoverArm64PointerAuthVersion();
+      if (!discovery.ok) throw new ClassificationError(discovery.reason);
+      const result = parseMacho(reader, {
+        arch: process.arch,
+        purpose,
+        acceptedPointerAuthVersions: new Set(discovery.accepted_versions),
+        discovery: false,
+      });
+      if (result.native_loader_path) {
+        const loader = classifyNativeFile(result.native_loader_path, 'native-loader');
+        if (!loader.ok || loader.type !== 'native-macho') {
+          throw new ClassificationError('invalid_macho_native_loader');
+        }
+      }
+      return observed(result, discovery.accepted_versions);
+    }
+    throw new ClassificationError('unsupported_posix_platform');
+  } catch (error) {
+    return reject(error instanceof ClassificationError ? error.reason : 'unreadable_file');
+  } finally {
+    reader?.close();
+  }
+}
+
+function classifyNativeFile(filePath, position) {
+  const observation = observeNativeFile(filePath, position);
+  return observation.ok ? observation.classification : observation;
+}
+
+// The same judgement, re-run over the exact bytes the seal read under its own
+// retained descriptor. Anything the classifier never saw fails here.
+function classifySealedBytes(bytes, purpose, acceptedPointerAuthVersions) {
+  try {
+    validatePurpose(purpose);
+    if (bytes.length === 0) throw new ClassificationError('empty_file');
+    if (bytes[0] === 0x23 && bytes[1] === 0x21) {
+      if (purpose !== 'effective-executable') throw new ClassificationError('nested_shebang');
+      return { ok: true, type: 'shebang', classification_purpose: purpose, native_loader_path: null };
+    }
+    const reader = new BufferReader(bytes);
+    if (process.platform === 'linux') {
+      return parseElf(reader, { arch: process.arch, purpose });
+    }
+    if (process.platform === 'darwin') {
+      return parseMacho(reader, {
+        arch: process.arch,
+        purpose,
+        acceptedPointerAuthVersions: new Set(acceptedPointerAuthVersions),
+        discovery: false,
+      });
+    }
+    throw new ClassificationError('unsupported_posix_platform');
+  } catch (error) {
+    return reject(error instanceof ClassificationError ? error.reason : 'unreadable_file');
+  }
+}
+
+export function classifyPosixExecutableType(filePath) {
+  if (arguments.length !== 1) return reject('caller_controlled_classification_purpose');
+  return classifyNativeFile(filePath, 'launcher');
+}
+
+function envPathResolution(name, env, cwd) {
+  if (IS_WINDOWS || typeof name !== 'string' || !POSIX_ENV_NAME.test(name)) {
+    return reject('invalid_env_path_name');
+  }
+  const pathValue = environmentValue(env, 'PATH');
+  if (typeof pathValue !== 'string' || pathValue.length === 0) return reject('invalid_env_path');
+  const effectiveCwd = cwd === undefined ? process.cwd() : cwd;
+  if (typeof effectiveCwd !== 'string' || !isAbsolute(resolve(effectiveCwd))) {
+    return reject('invalid_spawn_cwd');
+  }
+  const directories = pathValue.split(delimiter);
+  if (directories.length === 0 || directories.some(
+    (directory) => directory.length === 0 || !isAbsolute(directory),
+  )) return reject('invalid_env_path');
+  for (const directory of directories) {
+    const candidate = join(normalize(directory), name);
+    if (isExecutableFile(candidate)) return { ok: true, path: candidate };
+  }
+  return reject('env_path_target_not_found');
+}
+
+export function resolveEnvPathTarget(name, env = process.env, cwd = process.cwd()) {
+  const result = envPathResolution(name, env, cwd);
+  return result.ok ? result.path : null;
+}
+
+function readShebangLine(filePath) {
+  let reader;
+  try {
+    reader = new BoundedFileReader(filePath);
+    const prefix = reader.prefix;
+    if (prefix[0] !== 0x23 || prefix[1] !== 0x21) return reject('missing_shebang');
+    const newline = prefix.indexOf(0x0a);
+    if (newline < 0 && reader.size > prefix.length) return reject('truncated_shebang');
+    const lineBytes = prefix.subarray(0, newline < 0 ? prefix.length : newline);
+    if (lineBytes.includes(0) || lineBytes.some((byte) => byte > 0x7f || byte === 0x0d)) {
+      return reject('unsupported_shebang');
+    }
+    return { ok: true, line: lineBytes.toString('ascii') };
+  } catch {
+    return reject('unreadable_shebang');
+  } finally {
+    reader?.close();
+  }
+}
+
+export function parsePosixShebang(filePath, env = process.env, cwd = process.cwd()) {
+  if (IS_WINDOWS) return reject('unsupported_posix_platform');
+  const read = readShebangLine(filePath);
+  if (!read.ok) return read;
+  const envMatch = read.line.match(/^#! *\/usr\/bin\/env +([A-Za-z0-9._+][A-Za-z0-9._+-]*)$/u);
+  if (envMatch) {
+    const target = envPathResolution(envMatch[1], env, cwd);
+    if (!target.ok) return target;
+    if (!isExecutableFile('/usr/bin/env')) return reject('env_interpreter_unavailable');
+    return {
+      ok: true,
+      shebang_form: 'env-path',
+      interpreter_path: '/usr/bin/env',
+      path_target_path: target.path,
+    };
+  }
+  const absoluteMatch = read.line.match(/^#! *(\/[^\s"'\\]+)$/u);
+  if (absoluteMatch) {
+    const interpreterPath = normalize(absoluteMatch[1]);
+    if (interpreterPath === '/usr/bin/env' || interpreterPath === '/bin/env') {
+      return reject('unsupported_shebang');
+    }
+    if (!isExecutableFile(interpreterPath)) return reject('shebang_interpreter_unavailable');
+    return {
+      ok: true,
+      shebang_form: 'absolute',
+      interpreter_path: interpreterPath,
+      path_target_path: null,
+    };
+  }
+  return reject('unsupported_shebang');
+}
+
+function posixIdentity(stat) {
+  return {
+    kind: 'posix-dev-ino-v1',
+    fields: {
+      dev: stat.dev.toString(),
+      ino: stat.ino.toString(),
+      type: 'regular-file',
+      uid: stat.uid.toString(),
+    },
+  };
+}
+
+function windowsIdentity(stat, realPath) {
+  return {
+    kind: 'win32-file-id-v1',
+    fields: {
+      final_path: realPath,
+      volume: stat.dev.toString(),
+      file_id: stat.ino.toString(),
+    },
+  };
+}
+
+function sealPreparedMember(filePath, position, observation = null, posix = true) {
+  const selectedPath = normalize(resolve(filePath));
+  const realPath = normalize(realpathSync(selectedPath));
+  const fd = openSync(realPath, 'r');
+  try {
+    const before = fstatSync(fd, { bigint: true });
+    if (!before.isFile()) throw new ClassificationError('not_regular_file');
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd, { bigint: true });
+    const currentRealPath = normalize(realpathSync(selectedPath));
+    const current = statSync(currentRealPath, { bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+        || before.mode !== after.mode || before.uid !== after.uid
+        || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs
+        || before.dev !== current.dev || before.ino !== current.ino || before.size !== current.size
+        || before.mode !== current.mode || before.uid !== current.uid
+        || before.mtimeNs !== current.mtimeNs || before.ctimeNs !== current.ctimeNs
+        || currentRealPath !== realPath) {
+      throw new ClassificationError('prepared_member_changed_during_seal');
+    }
+    const purpose = posix ? purposeForMemberPosition(position) : null;
+    if (posix) {
+      const classification = observation?.classification;
+      if (classification?.classification_purpose !== purpose) {
+        throw new ClassificationError('member_inconsistent_classification_purpose');
+      }
+      // One inode, observed by the classifier and by this seal.
+      const seen = observation.identity;
+      if (!seen || seen.realPath !== realPath
+          || seen.dev !== before.dev || seen.ino !== before.ino || seen.size !== before.size
+          || seen.mode !== before.mode || seen.uid !== before.uid
+          || seen.mtimeNs !== before.mtimeNs || seen.ctimeNs !== before.ctimeNs) {
+        throw new ClassificationError('prepared_member_changed_between_classification_and_seal');
+      }
+      // And the bytes being sealed must still earn the classification they carry.
+      const resealed = classifySealedBytes(
+        bytes,
+        purpose,
+        observation.acceptedPointerAuthVersions,
+      );
+      if (!resealed.ok || resealed.type !== classification.type
+          || resealed.classification_purpose !== purpose
+          || (resealed.native_loader_path ?? null) !== (classification.native_loader_path ?? null)) {
+        throw new ClassificationError('prepared_member_bytes_contradict_classification');
+      }
+    }
+    return {
+      path: selectedPath,
+      real_path: realPath,
+      platform_identity: posix ? posixIdentity(before) : windowsIdentity(before, realPath),
+      sha256: sha256(bytes),
+      size: bigintToSafeNumber(before.size, 'prepared_member_too_large'),
+      classification_purpose: purpose,
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function sealNativeLoader(loaderPaths, posix) {
+  const paths = [...new Set(loaderPaths.filter(Boolean).map(
+    (loaderPath) => normalize(realpathSync(loaderPath)),
+  ))];
+  if (paths.length === 0) return null;
+  if (paths.length !== 1) throw new ClassificationError('conflicting_native_loader');
+  const observation = observeNativeFile(paths[0], 'native-loader');
+  if (!observation.ok) throw new ClassificationError(observation.reason);
+  return sealPreparedMember(paths[0], 'native-loader', observation, posix);
+}
+
+export function prepareSpawnChain(command, args = [], options = {}) {
+  try {
+    if (typeof command !== 'string' || command.length === 0) {
+      throw new ClassificationError('command_must_be_nonempty');
+    }
+    if (!Array.isArray(args)) throw new ClassificationError('args_must_be_array');
+    if (Object.hasOwn(options, 'classification_purpose')
+        || Object.hasOwn(options, 'classificationPurpose')
+        || Object.hasOwn(options, 'purpose')) {
+      throw new ClassificationError('caller_controlled_classification_purpose');
+    }
+    const env = options.env ?? process.env;
+    const cwd = options.cwd === undefined ? process.cwd() : resolve(options.cwd);
+    const resolvedLauncher = resolveExecutable(command, env);
+    if (!resolvedLauncher) throw new ClassificationError('launcher_not_found');
+    const launcherPath = normalize(resolve(resolvedLauncher));
+    const prepared = prepareSpawn(command, args.map(String), env);
+    if (prepared.rejectedReason) throw new ClassificationError('prepared_spawn_rejected');
+
+    if (IS_WINDOWS) {
+      const shimPath = prepared.shimPath;
+      const interpreterPath = prepared.interpreterPath;
+      if (interpreterPath && (!isAbsolute(interpreterPath) || !isExecutableFile(interpreterPath))) {
+        throw new ClassificationError('unsealed_windows_interpreter');
+      }
+      const chainWithoutHash = {
+        schema_version: '1.0',
+        prepared_kind: prepared.preparedKind,
+        launcher: sealPreparedMember(launcherPath, 'launcher', null, false),
+        shim: shimPath ? sealPreparedMember(shimPath, 'shim', null, false) : null,
+        interpreter: interpreterPath
+          ? sealPreparedMember(interpreterPath, 'interpreter', null, false) : null,
+        shebang: null,
+        posix_executable_type: null,
+        native_loader: null,
+      };
+      return {
+        ok: true,
+        prepared,
+        prepared_spawn_chain: {
+          ...chainWithoutHash,
+          chain_sha256: sha256(Buffer.from(canonicalStringify(chainWithoutHash), 'utf8')),
+        },
+      };
+    }
+
+    const launcherObservation = observeNativeFile(launcherPath, 'launcher');
+    if (!launcherObservation.ok) throw new ClassificationError(launcherObservation.reason);
+    const launcherClassification = launcherObservation.classification;
+    const launcher = sealPreparedMember(
+      launcherPath,
+      'launcher',
+      launcherObservation,
+      true,
+    );
+    let shebang = null;
+    const loaderPaths = [];
+    if (launcherClassification.type === 'shebang') {
+      const parsed = parsePosixShebang(launcherPath, env, cwd);
+      if (!parsed.ok) throw new ClassificationError(parsed.reason);
+      const interpreterObservation = observeNativeFile(
+        parsed.interpreter_path,
+        'shebang-interpreter',
+      );
+      if (!interpreterObservation.ok) throw new ClassificationError(interpreterObservation.reason);
+      const interpreterClassification = interpreterObservation.classification;
+      if (interpreterClassification.type === 'shebang') {
+        throw new ClassificationError('nested_shebang');
+      }
+      loaderPaths.push(interpreterClassification.native_loader_path);
+      const interpreter = sealPreparedMember(
+        parsed.interpreter_path,
+        'shebang-interpreter',
+        interpreterObservation,
+        true,
+      );
+      let pathTarget = null;
+      if (parsed.path_target_path) {
+        const targetObservation = observeNativeFile(parsed.path_target_path, 'path-target');
+        if (!targetObservation.ok) throw new ClassificationError(targetObservation.reason);
+        const targetClassification = targetObservation.classification;
+        if (targetClassification.type === 'shebang') {
+          throw new ClassificationError('nested_shebang');
+        }
+        loaderPaths.push(targetClassification.native_loader_path);
+        pathTarget = sealPreparedMember(
+          parsed.path_target_path,
+          'path-target',
+          targetObservation,
+          true,
+        );
+      }
+      shebang = {
+        shebang_form: parsed.shebang_form,
+        interpreter,
+        path_target: pathTarget,
+      };
+    } else {
+      loaderPaths.push(launcherClassification.native_loader_path);
+    }
+    const chainWithoutHash = {
+      schema_version: '1.0',
+      prepared_kind: 'direct',
+      launcher,
+      shim: null,
+      interpreter: null,
+      shebang,
+      posix_executable_type: launcherClassification.type,
+      native_loader: sealNativeLoader(loaderPaths, true),
+    };
+    return {
+      ok: true,
+      prepared,
+      prepared_spawn_chain: {
+        ...chainWithoutHash,
+        chain_sha256: sha256(Buffer.from(canonicalStringify(chainWithoutHash), 'utf8')),
+      },
+    };
+  } catch (error) {
+    return reject(error instanceof ClassificationError ? error.reason : 'prepared_chain_failed');
+  }
+}
+
+const PREPARED_CHAIN_MEMBER_FIELDS = Object.freeze([
+  'path',
+  'real_path',
+  'sha256',
+  'size',
+  'classification_purpose',
+]);
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function safeCanonicalStringify(value) {
+  try {
+    return canonicalStringify(value);
+  } catch {
+    return null;
+  }
+}
+
+function comparePreparedMember(expected, actual, slot) {
+  if (expected === null && actual === null) return null;
+  if (expected === null || actual === null) return `prepared_chain_${slot}_presence_mismatch`;
+  if (!isPlainObject(expected)) return `prepared_chain_${slot}_shape_mismatch`;
+  for (const field of PREPARED_CHAIN_MEMBER_FIELDS) {
+    if (expected[field] !== actual[field]) return `prepared_chain_${slot}_${field}_mismatch`;
+  }
+  const expectedIdentity = safeCanonicalStringify(expected.platform_identity);
+  if (expectedIdentity === null
+      || expectedIdentity !== safeCanonicalStringify(actual.platform_identity)) {
+    return `prepared_chain_${slot}_platform_identity_mismatch`;
+  }
+  return null;
+}
+
+function comparePreparedShebang(expected, actual) {
+  if (expected === null && actual === null) return null;
+  if (expected === null || actual === null) return 'prepared_chain_shebang_presence_mismatch';
+  if (!isPlainObject(expected)) return 'prepared_chain_shebang_shape_mismatch';
+  if (expected.shebang_form !== actual.shebang_form) return 'prepared_chain_shebang_form_mismatch';
+  return comparePreparedMember(expected.interpreter, actual.interpreter, 'shebang_interpreter')
+    || comparePreparedMember(expected.path_target, actual.path_target, 'shebang_path_target');
+}
+
+// Returns null when the freshly prepared chain is the sealed one, or the named
+// first difference. Every member slot is compared for presence, normalized
+// paths, platform identity, size and digest, and the whole body is compared
+// canonically so no unnamed field can differ unnoticed.
+function comparePreparedSpawnChains(expected, actual) {
+  if (!isPlainObject(expected)) return 'prepared_chain_is_not_an_object';
+  for (const field of ['schema_version', 'prepared_kind', 'posix_executable_type']) {
+    if (expected[field] !== actual[field]) return `prepared_chain_${field}_mismatch`;
+  }
+  const memberMismatch = comparePreparedMember(expected.launcher, actual.launcher, 'launcher')
+    || comparePreparedMember(expected.shim, actual.shim, 'shim')
+    || comparePreparedMember(expected.interpreter, actual.interpreter, 'interpreter')
+    || comparePreparedMember(expected.native_loader, actual.native_loader, 'native_loader')
+    || comparePreparedShebang(expected.shebang, actual.shebang);
+  if (memberMismatch) return memberMismatch;
+  if (expected.chain_sha256 !== actual.chain_sha256) return 'prepared_chain_sha256_mismatch';
+  const { chain_sha256: expectedSeal, ...expectedBody } = expected;
+  const { chain_sha256: actualSeal, ...actualBody } = actual;
+  const canonicalExpected = safeCanonicalStringify(expectedBody);
+  if (canonicalExpected === null || canonicalExpected !== safeCanonicalStringify(actualBody)) {
+    return 'prepared_chain_body_mismatch';
+  }
+  if (sha256(Buffer.from(canonicalExpected, 'utf8')) !== expectedSeal) {
+    return 'prepared_chain_seal_mismatch';
+  }
+  return null;
+}
+
+// The load-bearing pre-spawn control. Callers that supply no expected chain get
+// exactly today's behaviour; a caller that supplies one has the chain reprepared
+// in this same call, so a replacement already present here reaches no child.
+function preparedChainMismatchReason(command, args, options, env) {
+  if (options.expectedPreparedSpawnChain === undefined) return null;
+  const reprepared = prepareSpawnChain(command, args, { cwd: options.cwd, env });
+  if (!reprepared.ok) return reprepared.reason;
+  return comparePreparedSpawnChains(
+    options.expectedPreparedSpawnChain,
+    reprepared.prepared_spawn_chain,
+  );
+}
+
+function closedPreparedChainResult(reason, captureFields) {
+  return {
+    code: 2,
+    signal: undefined,
+    timedOut: false,
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.from(`${PREPARED_CHAIN_MISMATCH_DIAGNOSTIC}${reason}\n`),
+    preparedChainMismatch: true,
+    preparedChainMismatchReason: reason,
+    ...captureFields,
+  };
+}
+
+export const __testing = Object.freeze({
+  discoverArm64PointerAuthVersionFromPaths(paths) {
+    return discoverArm64PointerAuthVersionFromPaths(paths, {
+      platform: 'darwin',
+      arch: 'arm64',
+    });
+  },
+  classifyElfBytes(bytes, { arch = process.arch, purpose = 'effective-executable' } = {}) {
+    try {
+      validatePurpose(purpose);
+      return parseElf(new BufferReader(bytes), { arch, purpose });
+    } catch (error) {
+      return reject(error instanceof ClassificationError ? error.reason : 'unrecognized_posix_executable');
+    }
+  },
+  classifyMachoBytes(bytes, {
+    arch = process.arch,
+    purpose = 'effective-executable',
+    acceptedPointerAuthVersions = [0],
+  } = {}) {
+    try {
+      validatePurpose(purpose);
+      return parseMacho(new BufferReader(bytes), {
+        arch,
+        purpose,
+        acceptedPointerAuthVersions: new Set(acceptedPointerAuthVersions),
+        discovery: false,
+      });
+    } catch (error) {
+      return reject(error instanceof ClassificationError ? error.reason : 'unrecognized_posix_executable');
+    }
+  },
+  canonicalStringify,
+  observePreparedMember(filePath, position) {
+    return observeNativeFile(filePath, position);
+  },
+  sealObservedMember(filePath, position, observation) {
+    try {
+      return { ok: true, member: sealPreparedMember(filePath, position, observation, true) };
+    } catch (error) {
+      return reject(
+        error instanceof ClassificationError ? error.reason : 'prepared_member_seal_failed',
+      );
+    }
+  },
+  comparePreparedSpawnChains,
+});
 
 function environmentValue(env, name) {
   if (!IS_WINDOWS) return env[name];
@@ -139,6 +1382,10 @@ function prepareSpawn(command, args, env) {
       command: resolved,
       args,
       windowsVerbatimArguments: false,
+      preparedKind: 'direct',
+      launcherPath: resolved,
+      shimPath: null,
+      interpreterPath: null,
     };
   }
 
@@ -162,6 +1409,10 @@ function prepareSpawn(command, args, env) {
         ...args,
       ],
       windowsVerbatimArguments: false,
+      preparedKind: 'powershell-shim',
+      launcherPath: resolved,
+      shimPath: powerShellShim,
+      interpreterPath: powerShell,
     };
   }
   if (args.some((argument) => /["\r\n]/u.test(String(argument)))) {
@@ -172,6 +1423,10 @@ function prepareSpawn(command, args, env) {
     args: ['/d', '/v:off', '/s', '/c', buildWindowsBatchCommand(resolved, args)],
     env: cmdTransportEnvironment(env),
     windowsVerbatimArguments: true,
+    preparedKind: 'comspec-batch',
+    launcherPath: resolved,
+    shimPath: null,
+    interpreterPath: comSpec,
   };
 }
 
@@ -310,6 +1565,12 @@ export function runProcess(command, args = [], options = {}) {
       stderrBytes = appendCaptured(stderr, chunk, stderrBytes);
     };
 
+    const mismatch = preparedChainMismatchReason(command, args, options, env);
+    if (mismatch) {
+      resolveResult(closedPreparedChainResult(mismatch, { captureOverflow: false }));
+      return;
+    }
+
     const child = spawn(prepared.command, prepared.args, {
       cwd: options.cwd,
       env: prepared.env || env,
@@ -430,6 +1691,9 @@ export function runProcessSync(command, args = [], options = {}) {
       stderr: Buffer.from(prepared.rejectedReason),
     };
   }
+  const mismatch = preparedChainMismatchReason(command, args, options, env);
+  if (mismatch) return closedPreparedChainResult(mismatch);
+
   const result = spawnSync(prepared.command, prepared.args, {
     cwd: options.cwd,
     env: prepared.env || env,

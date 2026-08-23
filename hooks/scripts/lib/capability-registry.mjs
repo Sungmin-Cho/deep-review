@@ -7,9 +7,13 @@ import {
 } from './probe-limits.mjs';
 import { readContainedFile, writeContainedFile } from './runtime-context.mjs';
 import { ASSIGNMENT_ROLES } from './assignment-rubrics.mjs';
+import {
+  UNSUPPORTED_GROK_CONTAINMENT,
+  isGrokContainmentPlatformSupported,
+} from './grok-process-supervisor.mjs';
 
 export const CAPABILITY_PROTOCOL_VERSION = '2.0';
-export const CAPABILITY_CACHE_REVISION = '4';
+export const CAPABILITY_CACHE_REVISION = '5';
 export const MAX_PERSISTED_VERSION_CHARS = 256;
 export const MAX_PERSISTED_HELP_CHARS = 4096;
 export const MAX_CAPABILITY_CACHE_BYTES = 64 * 1024;
@@ -134,12 +138,39 @@ function failClosedOverflowProbe(probe) {
   return probe;
 }
 
-export function buildCapabilities({ detected = {}, hostAssertions = {}, probes = {} } = {}) {
+// D21 / I41 — the first owner of the shortfall-to-reason carrier. When the
+// containment platform/arch gate is false there is no enforceable containment
+// for a Grok provider tree on this host, and that reason is *sealed*: it is the
+// containment-specific cause and no other absence cause may overwrite it.
+// `model-router.mjs` carries it from here into the assignment planner.
+function sealedGrokUnavailableReason(detected, containment) {
+  if (!isGrokContainmentPlatformSupported(containment)) return UNSUPPORTED_GROK_CONTAINMENT;
+  return typeof detected.grok_unavailable_reason === 'string'
+    && detected.grok_unavailable_reason.length > 0
+    ? detected.grok_unavailable_reason
+    : null;
+}
+
+export function buildCapabilities({
+  detected = {}, hostAssertions = {}, probes = {}, containment = {},
+} = {}) {
   const claudeProbe = failClosedOverflowProbe(probes.claude);
   const rawCodexProbe = failClosedOverflowProbe(probes.codex);
   const codexProbe = rawCodexProbe.ok === true && !codexExecHelpSupported(rawCodexProbe.help)
     ? { ...rawCodexProbe, ok: false }
     : rawCodexProbe;
+  const grokCompatible = detected.grok_cli === true
+    && isAbsolute(String(detected.grok_cli_path || ''))
+    && detected.grok_compatibility_verified === true;
+  // D21 / I41 — the containment platform/arch gate is folded into the same D13
+  // candidacy gate: a host with no enforceable containment for a Grok provider
+  // tree advertises no available Grok capability, so no round can elect a Grok
+  // seat on it and a `--grok` review fails whole through the sealed reason
+  // rather than degrading to a runtime bridge refusal. The compatibility claims
+  // below stay keyed to the verified executable, which containment never
+  // changes; `available` refuses first, so no caller reaches them here.
+  const grokAvailable = grokCompatible && isGrokContainmentPlatformSupported(containment);
+  const grokUnavailableReason = sealedGrokUnavailableReason(detected, containment);
   return [
     baseCapability({
       adapterId: 'claude-native-agent', provider: 'claude',
@@ -202,6 +233,30 @@ export function buildCapabilities({ detected = {}, hostAssertions = {}, probes =
       effortSelection: { supported: false, levels: [], transport: 'none' },
       structuredOutput: false, readOnlyEnforcement: 'privacy-preflight',
     }),
+    {
+      ...baseCapability({
+        adapterId: 'grok-cli', provider: 'grok', available: grokAvailable,
+        version: parseVersion(detected.grok_version), invocationModes: ['generic-review'],
+        roles: ['standard', 'adversarial'],
+        modelSelection: {
+          supported: true,
+          aliases: ['grok-4.6', 'grok-4.6', 'grok-4.6', 'grok-4.6'],
+          catalog_complete: true,
+          transport: 'flag:--model',
+        },
+        effortSelection: {
+          supported: true,
+          levels: ['low', 'medium', 'high'],
+          transport: 'flag:--reasoning-effort',
+        },
+        structuredOutput: false,
+        readOnlyEnforcement: grokCompatible ? 'permission-mode-plan' : 'none',
+      }),
+      grok_compatibility_evidence: grokCompatible
+        ? detected.grok_compatibility_evidence ?? null
+        : null,
+      ...(grokUnavailableReason === null ? {} : { unavailable_reason: grokUnavailableReason }),
+    },
   ];
 }
 
@@ -281,15 +336,19 @@ export function capabilityCacheKeys(detected = {}, probes = {}) {
     ['claude', 'claude_cli_path', 'claude'],
     ['codex', 'codex_cli_path', 'codex'],
     ['agy', 'agy_cli_path', 'agy'],
+    ['grok', 'grok_cli_path', 'grok'],
   ]) {
     const executable = detected[pathKey];
     if (!executable) continue;
     let mtimeMs = null;
     try { mtimeMs = statSync(executable).mtimeMs; } catch { /* invalidates against a prior real file */ }
+    const version = name === 'grok'
+      ? probes.grok?.version || detected.grok_version
+      : probes[probeKey]?.version || (name === 'agy' ? detected.agy_version : '');
     entries[name] = {
       path: resolve(executable),
       mtime_ms: mtimeMs,
-      version: parseVersion(probes[probeKey]?.version || (name === 'agy' ? detected.agy_version : '')),
+      version: parseVersion(version),
     };
   }
   return entries;
@@ -308,7 +367,7 @@ function hasExactKeys(value, expected) {
 
 function validInvalidationKeys(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const allowed = new Set(['claude', 'codex', 'agy']);
+  const allowed = new Set(['claude', 'codex', 'agy', 'grok']);
   return Object.entries(value).every(([name, key]) => (
     allowed.has(name)
     && hasExactKeys(key, ['mtime_ms', 'path', 'version'])

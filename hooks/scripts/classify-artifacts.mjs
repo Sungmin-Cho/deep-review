@@ -25,6 +25,12 @@ import {
   selectSemanticAdapter,
 } from './lib/semantic-classify.mjs';
 import { detectEnvironment } from './detect-environment.mjs';
+// D22: a carrier consumer. It only ACQUIRES from a live coordinator — it never
+// creates one and never spawns a producer, so the dry-run boundary above holds.
+import {
+  acquireEnvironmentEndpoint,
+  bindRouteCarrierIdentity,
+} from './lib/grok-carrier-coordinator.mjs';
 import { CLASSIFICATION_VERSION } from './lib/target-taxonomy.mjs';
 import {
   buildCapabilities,
@@ -262,6 +268,7 @@ const VALUE_FLAGS = {
   '--format': 'format',
   '--files-from0': 'filesFrom',
   '--routing-plan-out': 'routingPlanOut',
+  '--grok-coordinator-control': 'grokCoordinatorControl',
   '--host-assertions-json': 'hostAssertionsJson',
   '--adaptive-context-json': 'adaptiveContextJson',
 };
@@ -344,29 +351,30 @@ function validateOverrides(value) {
   // of unique values drawn from the known provider set.
   if (value.disabled_providers !== undefined) {
     const providers = value.disabled_providers;
-    const known = new Set(['claude', 'codex', 'agy']);
+    const known = new Set(['claude', 'codex', 'agy', 'grok']);
     if (!Array.isArray(providers) || providers.some((provider) => !known.has(provider))
         || new Set(providers).size !== providers.length) {
-      throw new Error('--overrides-json disabled_providers must be a unique array of claude, codex, or agy');
+      throw new Error('--overrides-json disabled_providers must be a unique array of claude, codex, agy, or grok');
     }
   }
   // enabled_providers is the permissive counterpart: it restores candidacy for
-  // a provider that is not a default candidate (today only agy). It never
-  // forces selection — `--agy` transports that through required_providers.
+  // a provider that is not a default candidate (agy and grok). It never
+  // forces selection — `--agy`/`--grok` transport that through
+  // required_providers.
   if (value.enabled_providers !== undefined) {
     const providers = value.enabled_providers;
-    const known = new Set(['claude', 'codex', 'agy']);
+    const known = new Set(['claude', 'codex', 'agy', 'grok']);
     if (!Array.isArray(providers) || providers.some((provider) => !known.has(provider))
         || new Set(providers).size !== providers.length) {
-      throw new Error('--overrides-json enabled_providers must be a unique array of claude, codex, or agy');
+      throw new Error('--overrides-json enabled_providers must be a unique array of claude, codex, agy, or grok');
     }
   }
   if (value.required_providers !== undefined) {
     const providers = value.required_providers;
-    const known = new Set(['claude', 'codex', 'agy']);
+    const known = new Set(['claude', 'codex', 'agy', 'grok']);
     if (!Array.isArray(providers) || providers.some((provider) => !known.has(provider))
         || new Set(providers).size !== providers.length) {
-      throw new Error('--overrides-json required_providers must be a unique array of claude, codex, or agy');
+      throw new Error('--overrides-json required_providers must be a unique array of claude, codex, agy, or grok');
     }
   }
   if (value.required_reviewers !== undefined) {
@@ -463,6 +471,12 @@ function defaultReviewers(capabilities, overrides) {
   // (`--agy`, or a pre-existing agy-targeting model/effort override).
   if (has('agy-cli') && (overrides?.enabled_providers || []).includes('agy')) {
     reviewers.push({ id: 'agy', provider: 'agy', role: 'standard', adapter_id: 'agy-cli' });
+  }
+  // D13: grok is opt-in on the same terms. Capability detection alone never
+  // elects it, so a no-flag review's plan is unchanged even where a verified
+  // grok-cli capability is available.
+  if (has('grok-cli') && (overrides?.enabled_providers || []).includes('grok')) {
+    reviewers.push({ id: 'grok', provider: 'grok', role: 'standard', adapter_id: 'grok-cli' });
   }
   return reviewers;
 }
@@ -646,6 +660,20 @@ export async function runClassifyArtifactsCli(argv = process.argv.slice(2), env 
 
   let { changeState, reviewBase } = options;
   let environment;
+  // D22: with a live coordinator the complete detected environment arrives over
+  // a fresh private endpoint, and this process re-detects NOTHING — no
+  // detectEnvironment call, no `--version` or `--help` child of its own. The
+  // canonical buffer is reused byte-for-byte, never reserialized.
+  let carrier = null;
+  if (options.grokCoordinatorControl !== undefined) {
+    carrier = await acquireEnvironmentEndpoint({
+      controlPath: options.grokCoordinatorControl,
+      consumerId: 'classify-artifacts',
+    });
+    environment = carrier.environment;
+    changeState = changeState || environment.change_state;
+    reviewBase = reviewBase ?? environment.review_base;
+  }
   if (!changeState) {
     environment = await detectEnvironment({ cwd: repo, env });
     changeState = environment.change_state;
@@ -819,6 +847,9 @@ export async function runClassifyArtifactsCli(argv = process.argv.slice(2), env 
   routingPlan.explicit_overrides = explicit;
   routingPlan.apply_automatic = policy.features?.automatic_model_routing !== false
     && policy.features?.routing_shadow_mode !== true;
+  // Route persistence stores the carrier identity WITH the canonical bytes, so
+  // a persisted route stays bound to the coordinator that produced it.
+  if (carrier) bindRouteCarrierIdentity(routingPlan, carrier);
   result = {
     ...result,
     routing_plan: routingPlan,

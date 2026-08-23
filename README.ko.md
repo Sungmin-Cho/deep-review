@@ -8,14 +8,14 @@
 
 AI 코딩 에이전트를 위한 독립 Evaluator 플러그인 — Codex 연동 교차 모델 코드 리뷰와 Sprint Contract 지원.
 
-AI 코딩 에이전트에는 구조적 맹점이 있습니다: 자신이 작성한 코드를 스스로 리뷰합니다. 코드를 작성한 에이전트가 그것을 판단하므로 자기 승인 편향이 구조적으로 내재합니다. deep-review는 원본 세션의 추론·의도·가정이 아니라 공유 리뷰 페이로드만 보는 **별도의 reviewer context**로 구조적으로 독립된 평가를 수행합니다. Claude Code는 격리된 `codex exec` 세션으로 두 Codex reviewer 역할을 호출하고, Codex는 history-free 네이티브 서브에이전트로 두 역할을 호출합니다. 선택적 Claude와 `agy` 역할은 교차 모델 검증 범위를 넓힙니다.
+AI 코딩 에이전트에는 구조적 맹점이 있습니다: 자신이 작성한 코드를 스스로 리뷰합니다. 코드를 작성한 에이전트가 그것을 판단하므로 자기 승인 편향이 구조적으로 내재합니다. deep-review는 원본 세션의 추론·의도·가정이 아니라 공유 리뷰 페이로드만 보는 **별도의 reviewer context**로 구조적으로 독립된 평가를 수행합니다. Claude Code는 격리된 `codex exec` 세션으로 두 Codex reviewer 역할을 호출하고, Codex는 history-free 네이티브 서브에이전트로 두 역할을 호출합니다. 선택적 Claude·`agy`와 opt-in Grok/xAI 역할은 교차 모델 검증 범위를 넓힙니다.
 
 ## deep-suite에서의 역할
 
 deep-review는 [deep-suite](https://github.com/Sungmin-Cho/deep-suite)의 **독립 평가자**로, [Harness Engineering](https://martinfowler.com/articles/harness-engineering.html) 프레임워크의 Generator–Evaluator 분리를 구현합니다:
 
 - **Inferential 센서** — Generator 컨텍스트 없는 독립 Opus 서브에이전트 리뷰. computational 센서가 잡지 못하는 의미론적 문제의 주요 품질 게이트.
-- **교차 모델 검증** — Opus + Codex review + Codex adversarial (+ agy). 프레임워크의 "LLM-as-judge" 개념을 초과.
+- **교차 모델 검증** — Opus + Codex review + Codex adversarial (+ opt-in agy/Grok). 프레임워크의 "LLM-as-judge" 개념을 초과.
 - **Fitness 인지 리뷰** — [deep-work](https://github.com/Sungmin-Cho/deep-work)의 `fitness.json` 규칙과 `health_report`를 소비하여 아키텍처 의도 인지 평가.
 - **Sprint Contract 검증** — 구조화된 성공 기준 확인.
 
@@ -43,7 +43,7 @@ Claude Code 슬래시 커맨드와 Codex 스킬은 동일한 라우트 문법을
 
 | 커맨드 | 설명 |
 |---|---|
-| `/deep-review` | 독립 Opus 서브에이전트로 현재 변경사항 리뷰 (Codex/agy 존재 시 교차 모델) |
+| `/deep-review` | 독립 Opus 서브에이전트로 현재 변경사항 리뷰 (Codex 또는 명시적으로 활성화한 agy/Grok route가 있으면 교차 모델) |
 | `/deep-review --ultracode [--codex]` | 6개 집중 Claude reviewer context를 단일 "Claude(ultracode)" 보이스로 collapse하고, 단일 브리지 fallback을 명시적으로 표시하며 선택적 Codex 역할 추가 |
 | `/deep-review --codex-only` | Claude 리뷰어를 끄고 사용 가능한 Codex 역할만 실행 |
 | `/deep-review --contract [SLICE-NNN]` | Sprint Contract 기반 구조적 검증 |
@@ -70,8 +70,9 @@ Claude Code 슬래시 커맨드와 Codex 스킬은 동일한 라우트 문법을
 **합성 리뷰어 플래그**:
 
 - `--ultracode` — 6개 집중 Claude reviewer context를 단일 "Claude(ultracode)" 보이스로 collapse하며, fan-out 불가 시 하나의 네이티브 Claude 브리지로 명시적으로 degrade.
-- `--codex` / `--no-codex` / `--no-opus` / `--agy` / `--no-agy`, 슈가 `--codex-only`(= `--codex --no-opus --no-agy`).
+- `--codex` / `--no-codex` / `--no-opus` / `--agy` / `--no-agy` / `--grok` / `--no-grok`, 슈가 `--codex-only`(= `--codex --no-opus --no-agy --no-grok`).
 - **`agy` 는 기본 비활성(opt-in)입니다.** `agy` CLI 가 탐지되어도 더 이상 자동 선택되지 않으며, `--agy` 로 켭니다. 기본 리뷰어가 4→3 으로 줄어 high/critical 구현 리뷰에서 실패 1건을 보충하던 여유가 사라집니다. 기존 조합 두 가지가 바뀝니다 — `--no-opus` 는 Codex 단일 provider family 만 남고, `--no-opus --no-codex` 는 남는 리뷰어가 없습니다. 둘 다 `--agy` 로 복원합니다. opt-in 은 리뷰어 디스패치와 프로젝트 접근을 통제하며 capability 탐지는 통제하지 않습니다 — `agy --version` 프로브는 계속 실행됩니다.
+- **Grok/xAI는 기본 비활성(opt-in)입니다.** 탐지만으로 Grok을 선출하거나 dispatch하지 않으며 일반 무플래그 리뷰는 Grok/xAI에 저장소 내용을 보내지 않습니다. `--grok`(또는 명시적인 Grok 대상 routing override나 policy opt-in)을 사용해야 후보가 되고, dispatch 전에 외부 privacy preflight를 통과해야 합니다. `--codex-only`는 `--no-grok`을 추가해 문자 그대로 Codex-only 의미를 보존합니다.
 - `/deep-review-loop --ultracode --codex`: ultracode 1회(라운드 1) + codex 매 라운드.
 - 단발 리뷰와 loop 모두 adaptive reviewer routing과 automatic model
   routing이 기본 활성화됩니다. `--reviewer-strategy static`은 eligible set을
@@ -167,10 +168,10 @@ Claude Code는 capability가 있으면 독립 named `code-reviewer` 에이전트
 | 5 | 가독성 | 다음 에이전트가 처음 읽을 때 이해 가능한가 |
 | 6 | 보안 | 입력 검증, 인증/인가 우회, 인젝션(prompt injection 포함), 비밀 노출, 위험한 연산 |
 
-공유 리뷰어 페이로드(Opus 리뷰어, ultracode 샤드, agy가 사용)는 다음을 포함합니다:
+공유 리뷰어 페이로드(Opus 리뷰어, ultracode 샤드, agy, Grok이 사용)는 다음을 포함합니다:
 
 - **`change_files` 매니페스트** — NUL-safe, capped 교차 파일 매니페스트(이름 변경/복사 감지, dirty 상태 untracked 유니온)로 리뷰어가 diff 하나가 아닌 전체 변경 집합을 봅니다. diff 자체는 instruction-attention을 위해 마지막에 배치되며, 위 Stage 1 제외 목록을 동일하게 따릅니다.
-- **FP-억제 독트린** — false-positive 억제 독트린과 conservative-balance 반대 가중치를 `review-criteria.md` 단일 출처에서 Opus 프롬프트, ultracode 샤드, agy 페이로드에 주입합니다. 두 Codex reviewer 페이로드는 공격성 보존을 위해 의도적으로 제외됩니다.
+- **FP-억제 독트린** — false-positive 억제 독트린과 conservative-balance 반대 가중치를 `review-criteria.md` 단일 출처에서 Opus 프롬프트, ultracode 샤드, agy 및 Grok 페이로드에 주입합니다. 두 Codex reviewer 페이로드는 공격성 보존을 위해 의도적으로 제외됩니다.
 
 ### Stage 4: Verdict (판정)
 
@@ -204,7 +205,7 @@ Claude Code는 capability가 있으면 독립 named `code-reviewer` 에이전트
                     └────────────────────────┘
 ```
 
-`agy`(Google Antigravity) CLI가 감지되면 cross-vendor-family 4번째 리뷰어로 합류합니다. Codex 리뷰어 역할을 사용할 수 없으면 deep-review는 1회 알림 후, Codex가 명시적으로 요구되지 않은 경우에만 사용 가능한 역할로 계속 진행합니다. 명시적으로 required인 역할의 실패·부재는 fail-closed하며, 일반 reviewer 실패는 "미수행"으로 기록하고 `N_actual`에서 제외하되 legacy companion으로 조용히 대체하지 않습니다.
+opt-in `agy`(Google Antigravity) CLI는 cross-vendor-family reviewer로 합류할 수 있습니다. opt-in Grok CLI는 외부 privacy preflight를 통과한 뒤에만 별도의 xAI-family vote를 제공하며, 탐지나 무플래그 리뷰만으로 저장소 내용을 보내지 않습니다. Codex 리뷰어 역할을 사용할 수 없으면 deep-review는 1회 알림 후, Codex가 명시적으로 요구되지 않은 경우에만 사용 가능한 역할로 계속 진행합니다. 명시적으로 required인 역할의 실패·부재는 fail-closed하며, 일반 reviewer 실패는 "미수행"으로 기록하고 `N_actual`에서 제외하되 legacy companion으로 조용히 대체하지 않습니다.
 
 `staged`, `unstaged`, `mixed` 상태에서는 교차 모델 검증이 실제 커밋 베이스에 대해 실행되도록 WIP 커밋 생성을 제안합니다. 제안은 파일 목록을 미리 보여주고 민감 패턴을 경고하며 `git add -A`를 사용하지 않습니다; `git reset --soft HEAD~1`로 원복합니다. shallow clone은 감지되어 `git fetch --unshallow` 권장이 표시됩니다.
 
@@ -259,7 +260,7 @@ deep-review는 `.deep-review/` 아래 여러 파일을 읽습니다:
 
 - **`rules.yaml`** (inferential) — `/deep-review init`이 생성하는 프로젝트별 리뷰 규칙; LLM이 읽고 적용합니다. 없으면 범용 모범 사례 기준을 사용합니다.
 - **`fitness.json`** (computational) — deep-work Health Engine이 생성·검증하는 아키텍처 fitness 규칙; 존재 시 리뷰어 프롬프트에 주입하여 아키텍처 의도 인지 리뷰를 수행합니다.
-- **`config.yaml`** — 런타임 상태(리뷰 모델, Codex/agy 알림 플래그, fingerprint 모드). 첫 실행 시 자동 생성되며 한 번에 한 필드씩 갱신해 수동 설정이 보존됩니다.
+- **`config.yaml`** — 런타임 상태(리뷰 모델, Codex/agy 알림 플래그, agy/Grok privacy acknowledgement와 fingerprint 모드). 첫 실행 시 자동 생성되며 한 번에 한 필드씩 갱신해 수동 설정이 보존됩니다.
 - **`recurring-findings.json`** — 매 리뷰 후 반복 패턴을 7개 taxonomy(`error-handling`, `naming-convention`, `type-safety`, `test-coverage`, `security`, `performance`, `architecture`)로 분류하고 M3 cross-plugin envelope으로 emit하며, deep-evolve가 소비하여 실험 방향을 조향합니다.
 
 **팀 공유**: `rules.yaml`, `contracts/`, `journeys/`는 프로젝트 지식이므로 커밋해야 하며, `config.yaml`, `reports/`, `responses/`, `entropy-log.jsonl`, `recurring-findings.json`은 머신별 런타임 상태입니다. `/deep-review init`이 이 구분을 `.gitignore`에 반영합니다.

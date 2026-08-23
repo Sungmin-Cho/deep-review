@@ -79,7 +79,17 @@ only materially identical issues. Preserve each role's agreement and dissent:
 
 - with two trusted voices: unanimous or split;
 - with three: unanimous, majority, or solo;
-- with four: unanimous, majority three of four, split two of four, or solo.
+- with four: unanimous, majority three of four, split two of four, or solo;
+- with five: unanimous, majority four of five, majority three of five,
+  split two of five, or solo.
+
+Dissent is carried by the `dissenters` array defined in
+`{plugin_root}/skills/deep-review-workflow/references/report-format.md` — one entry per
+dissenting reviewer, each with its own `family`. Past four voices the array is
+routinely longer than one: `majority_3_of_5` has two entries, so a dissent
+spanning two vendor families stays distinguishable from two dissenters inside
+one. The singular dissent keys are retired and are never used as a
+first-dissenter shorthand.
 
 `N_actual` is the number of trusted successful roles, not the number requested.
 Apply the N=0/N=1 rules in `{plugin_root}/skills/deep-review-workflow/references/review-execution.md` before ordinary consensus.

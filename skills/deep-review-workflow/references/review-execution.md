@@ -7,12 +7,34 @@ labels are diagnostic; capabilities decide the reviewer set. Read
 ## 0. Runtime root and state
 
 Resolve `plugin_root` once using the runtime root contract: `PLUGIN_ROOT`, then
-`CLAUDE_PLUGIN_ROOT`, then the current module location. Run every plugin helper
-by joining its path to the absolute `plugin_root` returned by:
+`CLAUDE_PLUGIN_ROOT`, then the current module location.
+
+Then resolve reviewer flags before collecting the environment — §3.0 owns those
+rules — because environment detection is candidacy-gated. On the Grok-candidate
+branch `grok-carrier-coordinator.mjs` owns the complete environment handoff: it
+is the sole producer invocation and the only thing that passes
+`--grok-candidate`.
+
+```text
+node {plugin_root}/hooks/scripts/grok-carrier-coordinator.mjs --cwd PROJECT_ROOT --mode review
+```
+
+Its first stdout line is the environment JSON and its second is the coordinator
+descriptor carrying `control_path`. Keep that coordinator alive for the whole
+round: classification, route persistence, route parsing, and the Grok bridge
+each acquire a fresh readable endpoint from it and re-detect nothing. An
+unconfirmed or terminated coordinator is terminal — fail closed rather than
+detecting again.
+
+When Grok is not a candidate, collect the environment with the standalone
+detector instead. It never receives `--grok-candidate` and creates no Grok state:
 
 ```text
 node {plugin_root}/hooks/scripts/detect-environment.mjs --cwd PROJECT_ROOT --format json
 ```
+
+Run every plugin helper by joining its path to the absolute `plugin_root`
+returned by whichever of those two produced the environment.
 
 Use the host's direct directory/file tools to ensure `.deep-review/reports`,
 `.deep-review/responses`, and `.deep-review/tmp` exist. No hook or MCP server is
@@ -22,8 +44,11 @@ If `.deep-review/config.yaml` is absent, create it with the defaults in
 `{plugin_root}/skills/deep-review-workflow/references/init-setup.md` through a direct host file tool. If it predates the agy fields,
 use `{plugin_root}/hooks/scripts/lib/config.mjs` `patchTopLevelConfig` to add each missing scalar
 independently: `agy_notified=false`, `agy_enabled=true`, empty acknowledgment
-fingerprint/timestamp, and `agy_fingerprint_mode=hybrid`. Never reset an
-existing value and never replace the whole file during migration.
+fingerprint/timestamp, and `agy_fingerprint_mode=hybrid`. If it predates the
+Grok fields, add `grok_notified=false`, empty acknowledgment
+fingerprint/timestamp, and `grok_fingerprint_mode=hybrid` the same way. There is
+no `grok_enabled` key to migrate. Never reset an existing value and never
+replace the whole file during migration.
 
 Before every review, send an `auto-recover` framed JSON request directly to
 `node {plugin_root}/hooks/scripts/mutation-protocol.mjs --request-stdin`.
@@ -135,11 +160,13 @@ its supported assignment roles. Do not infer support from a host label,
 duplicate the routing matrix in prose, or move model IDs through a shell
 string.
 
-1. Expand `--codex-only` to `--codex --no-opus --no-agy`.
+1. Expand `--codex-only` to `--codex --no-opus --no-agy --no-grok`.
 2. Reject `--ultracode` with `--no-opus`; reject `--codex` with `--no-codex`;
-   reject `--agy` with `--no-agy` (and therefore with `--codex-only`).
+   reject `--agy` with `--no-agy` (and therefore with `--codex-only`); reject
+   `--grok` with `--no-grok` (and therefore with `--codex-only`).
 3. `--no-opus` disables `claude-opus`; `--no-codex` disables both
-   `codex-review` and `codex-adversarial`; `--no-agy` disables `agy`.
+   `codex-review` and `codex-adversarial`; `--no-agy` disables `agy`;
+   `--no-grok` disables `grok`.
 4. Native Codex generic subagents supply both `codex-review` and
    `codex-adversarial` whenever the host capability exists. Claude Code uses
    the generic Codex exec bridge for both roles.
@@ -154,22 +181,33 @@ string.
    small reviewer floor. This gate is code-owned — do not re-derive it here.
    The legacy config key `agy_enabled` has **no code consumer** and never had
    one; it is inert. The enforceable disable is `--no-agy`.
+7. `grok` mirrors that gate exactly and is **opt-in and never a default
+   candidate**. Candidacy comes from `--grok`, from a Grok-targeting
+   `--model`/`--effort`/`--reviewer-model`/`--reviewer-effort` override, or from
+   emitted overrides carrying `grok` in `enabled_providers`/`required_providers`.
+   `--grok` also sets `required_providers`. This gate is code-owned — do not
+   re-derive it here. There is deliberately **no `grok_enabled` config key**; the
+   enforceable disable is `--no-grok`. Candidacy is what the §0 environment step
+   branches on, so it must be resolved before that step runs.
 
 `--no-agy`: skip the scan and preflight, create no state or config changes;
-this disabled privacy branch is a no-op. `--codex-only`: after expansion, skip
+this disabled privacy branch is a no-op. `--no-grok`: skip the scan and
+preflight, create no state or config changes; it creates no coordinator process
+and no Grok state at all. `--codex-only`: after expansion, skip
 the agy scan and preflight, create no state or config changes; it is also a
-no-op privacy branch.
+no-op privacy branch, and the same holds for its expanded `--no-grok`.
 
-### 3.1 agy privacy preflight
+### 3.1 external-provider privacy preflight
 
-Run this only after the emitted routing plan (§3.2) carries an `agy` route; an
-eligible but unselected agy performs no privacy work and creates no state.
-`agy-privacy-preflight.mjs` has no opt-in check of its own, so this ordering is
-a prose gate, not a code guarantee. Invoke before any selected bridge can
-receive an `--add-dir` argument:
+Run these only after the emitted routing plan (§3.2) carries the matching
+route; an eligible but unselected external provider performs no privacy work
+and creates no state. Neither preflight has an opt-in check of its own, so this
+ordering is a prose gate, not a code guarantee. Invoke before any selected
+bridge can receive an `--add-dir` or project-access argument:
 
 ```text
 node {plugin_root}/hooks/scripts/agy-privacy-preflight.mjs --repo PROJECT_ROOT --plugin-root PLUGIN_ROOT_ABS --config CONFIG_FILE --approval auto
+node {plugin_root}/hooks/scripts/grok-privacy-preflight.mjs --repo PROJECT_ROOT --plugin-root PLUGIN_ROOT_ABS --config CONFIG_FILE --approval auto
 ```
 
 - `auto_ack`: patch only the two acknowledgment config fields and continue.
@@ -177,7 +215,12 @@ node {plugin_root}/hooks/scripts/agy-privacy-preflight.mjs --repo PROJECT_ROOT -
 - `needs_approval`: show the sensitive hits and fingerprint, request explicit
   approval, and rerun with `--approval approve` or `--approval decline`.
 - A positive approval may patch only those acknowledgment fields. Decline or
-  any error excludes `agy`; no reviewer process receives project access.
+  any error excludes that provider; no reviewer process receives project access.
+
+Each provider patches only its own acknowledgment fields: `agy_*` for agy and
+`grok_*` for Grok. For Grok this gate runs only after §3.3 has established
+`containment_ready`. Full rules live in
+`{plugin_root}/skills/deep-review-workflow/references/grok-integration.md`.
 
 ### 3.2 artifact classification and routing preflight
 
@@ -185,9 +228,15 @@ Immediately before §3.1 and Stage 4, invoke the reviewer-free preflight
 with argv-array transport:
 
 ```text
-node {plugin_root}/hooks/scripts/classify-artifacts.mjs --repo PROJECT_ROOT --emit-routing-plan --format json --routing-plan-out .deep-review/tmp/routing-plan.json --host-assertions-json '{"claudeNativeAgent":true,"codexExecReviewer":true,"codexNativeGeneric":false}'
-node {plugin_root}/hooks/scripts/classify-artifacts.mjs --repo PROJECT_ROOT --emit-routing-plan --format json --routing-plan-out .deep-review/tmp/routing-plan.json --host-assertions-json '{"claudeNativeAgent":false,"codexExecReviewer":false,"codexNativeGeneric":true}'
+node {plugin_root}/hooks/scripts/classify-artifacts.mjs --repo PROJECT_ROOT --grok-coordinator-control COORDINATOR_CONTROL_PATH --emit-routing-plan --format json --routing-plan-out .deep-review/tmp/routing-plan.json --host-assertions-json '{"claudeNativeAgent":true,"codexExecReviewer":true,"codexNativeGeneric":false}'
+node {plugin_root}/hooks/scripts/classify-artifacts.mjs --repo PROJECT_ROOT --grok-coordinator-control COORDINATOR_CONTROL_PATH --emit-routing-plan --format json --routing-plan-out .deep-review/tmp/routing-plan.json --host-assertions-json '{"claudeNativeAgent":false,"codexExecReviewer":false,"codexNativeGeneric":true}'
 ```
+
+`COORDINATOR_CONTROL_PATH` is the `control_path` from the §0 coordinator
+descriptor. Classification consumes a fresh readable endpoint from that live
+coordinator and performs **no** compatibility re-probe of its own. Omit the flag
+only on the non-candidate branch, where no coordinator exists; an unconfirmed or
+terminated coordinator is terminal and fails closed rather than re-detecting.
 
 Because this subprocess cannot observe the orchestrating host directly, always
 append `--host-assertions-json` with compact JSON reflecting the current host
@@ -244,6 +293,20 @@ Append the same explicit prior-context and readiness inputs described in Stage
 injects only that route's trusted rubric. Never pass raw selection reasons or
 another reviewer's route to the leaf.
 
+### 3.3 Grok containment preflight
+
+When the emitted plan carries a `grok` route, call `preflightGrokContainment`
+from `{plugin_root}/hooks/scripts/grok-containment-preflight.mjs` here — after
+§3.2 and before the §3.1 privacy gate, and before any Stage 4 dispatch. It
+establishes `containment_ready` and issues one owner-bound
+`containment_ready_token`; a refusal issues none and produces zero privacy,
+config, fingerprint, session-id, prompt and provider-child work. Release the
+owner on privacy decline, on error, and when no launch happened.
+`containment_ready` is the pre-launch admission and `termination_confirmed` is
+the post-exit proof; never substitute one for the other. An unsupported
+containment platform fails the **entire review** through `operational_failure`
+with reason `unsupported_grok_containment`, not a four-voice degradation.
+
 ## 4. Dispatch independent reviewers
 
 Use a fresh isolated context for every selected route. Native Codex reviewer
@@ -253,12 +316,21 @@ and only then launch the next leaf. A mutation invalidates the result and makes
 it untrusted. Stop the round before launching a sibling reviewer and before any
 response or commit action.
 
+A `grok` seat tightens that same gate: capture its post-review fingerprint only
+after confirmed whole-tree termination. A missing or false `termination_confirmed`
+is `invalid_grok_process_lifecycle` and is round-terminal with no retry, and the
+next reviewer is not dispatched until that seat's complete termination has been
+proven.
+
 Use the exported `captureFingerprint` API from
 `{plugin_root}/hooks/scripts/lib/fingerprint.mjs` for both snapshots, with the
 same `{ repo: PROJECT_ROOT, pluginRoot: PLUGIN_ROOT_ABS, mode }` options. Read
-`mode` from `agy_fingerprint_mode` and default to `hybrid`. A capture error is
-conservative drift. Persist only the digest/mode evidence needed by the report;
-never expose file contents.
+`mode` from `agy_fingerprint_mode`, or from `grok_fingerprint_mode` for the
+`grok` seat, and default to `hybrid`. Hybrid is a bounded detector, not a total
+backstop; its observation surface is enumerated in
+`{plugin_root}/skills/deep-review-workflow/references/grok-integration.md`. A
+capture error is conservative drift. Persist only the digest/mode evidence
+needed by the report; never expose file contents.
 
 ### 4.1 `claude-opus`
 
@@ -349,6 +421,29 @@ Ultracode may launch its eligible lens contexts in fresh background contexts.
 Six lenses collapse to one Anthropic voice; they never increase `N_actual`
 above one for the Claude family. The loop may request ultracode only on its
 first round.
+
+### 4.6 `grok`
+
+Follow `{plugin_root}/skills/deep-review-workflow/references/grok-integration.md`. Dispatch only after §3.3
+issued a `containment_ready_token` and §3.1 returned a successful current Grok
+privacy outcome, then invoke:
+
+```text
+node {plugin_root}/hooks/scripts/run-grok-reviewer.mjs --project-root PROJECT_ROOT --plugin-root PLUGIN_ROOT_ABS --prompt-file PAYLOAD_FILE --output OUTPUT_FILE --execution-route-json EXECUTION_ROUTE_JSON --reviewer-id grok --containment-ready-token-json CONTAINMENT_READY_TOKEN_JSON --timeout-seconds 900
+```
+
+`CONTAINMENT_READY_TOKEN_JSON` is the compact `JSON.stringify` of the token §3.3
+issued, passed as one argv value — the same inline shape
+`--execution-route-json` uses, so the admission is bound to this single
+invocation and leaves no on-disk artifact a later round could replay. The bridge
+consumes that token and never establishes readiness itself. It also consumes the
+sealed compatibility evidence carried on the route, acquiring a fresh endpoint
+from the §0 coordinator rather than re-probing. Never pass `--routing-plan`
+here: the route travels inline.
+
+A `mutated` result is untrusted even if the process produced report text, and an
+unconfirmed whole-tree termination is `invalid_grok_process_lifecycle` rather
+than a vote.
 
 ## 5. Synthesize and report
 
