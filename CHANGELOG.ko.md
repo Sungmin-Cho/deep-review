@@ -4,6 +4,20 @@
 
 deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)와 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)을 따릅니다.
 
+## [2.7.0] — 2026-08-24
+
+### 추가
+
+- **선택적 suite-route 연결 필드** — route observation이 router 결정 및 request fingerprint를 담을 수 있습니다.
+
+### 변경
+
+- **Suite route 결정 fingerprint 보존** — suite-route overlay가 선택적으로 `decision_fingerprint`와 `request_sha256`을 보존하며, 구형 router 산출물에는 계속 `null`을 사용합니다.
+
+### 보안
+
+- 새 연결 필드는 선택 사항으로 유지되어 구형 router 결정과의 하위 호환성을 보장합니다.
+
 ## [2.6.0] — 2026-08-20
 
 ### 추가

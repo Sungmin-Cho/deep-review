@@ -169,8 +169,8 @@ test('both workflows cover every release-relevant path class', () => {
   }
 });
 
-const PUBLISHED_RELEASE_BASELINE = '2.5.0';
-const PLANNED_RELEASE = '2.6.0';
+const PUBLISHED_RELEASE_BASELINE = '2.6.0';
+const PLANNED_RELEASE = '2.7.0';
 
 function semverParts(version) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(version);
@@ -192,7 +192,7 @@ function recordedReleaseVersions(source) {
     .map((match) => match[1]);
 }
 
-test('planned release is strictly greater than the post-2.5.0 published baseline, absent from the baseline release set, and unique across both changelogs and all three package surfaces; a planned target already exists in the released baseline fails before any manifest, changelog, or version-oracle edit', () => {
+test('planned release is strictly greater than the published 2.6.0 baseline, absent from the baseline release set, and unique across both changelogs and all three package surfaces', () => {
   const changelogSources = [read('CHANGELOG.md'), read('CHANGELOG.ko.md')];
   const releasedSets = changelogSources.map((source) => new Set(
     recordedReleaseVersions(source)
@@ -229,17 +229,20 @@ test('planned release is strictly greater than the post-2.5.0 published baseline
     [1, 1],
     'the bilingual planned-release heading structure must be parallel and unique',
   );
-  const releaseBlocks = changelogSources.map(
+  const plannedReleaseBlocks = changelogSources.map(
     (source) => releaseBlockAnyDate(source, PLANNED_RELEASE),
   );
   assert.deepEqual(
     ['### Added', '### Changed', '### Security']
-      .map((heading) => bulletCount(releaseBlocks[0], heading)),
+      .map((heading) => bulletCount(plannedReleaseBlocks[0], heading)),
     ['### 추가', '### 변경', '### 보안']
-      .map((heading) => bulletCount(releaseBlocks[1], heading)),
+      .map((heading) => bulletCount(plannedReleaseBlocks[1], heading)),
     'the bilingual planned-release sections must have parallel structure',
   );
-  for (const block of releaseBlocks) {
+  const baselineBlocks = changelogSources.map(
+    (source) => releaseBlockAnyDate(source, PUBLISHED_RELEASE_BASELINE),
+  );
+  for (const block of baselineBlocks) {
     for (const anchor of [
       /Grok/iu,
       /xAI/iu,
@@ -269,13 +272,13 @@ test('planned release is strictly greater than the post-2.5.0 published baseline
   }
 });
 
-test('release version is exactly 2.6.0 on all three package surfaces', () => {
+test('release version is exactly 2.7.0 on all three package surfaces', () => {
   const versions = [
     JSON.parse(read('.claude-plugin/plugin.json')).version,
     JSON.parse(read('.codex-plugin/plugin.json')).version,
     JSON.parse(read('package.json')).version,
   ];
-  assert.deepEqual(versions, ['2.6.0', '2.6.0', '2.6.0']);
+  assert.deepEqual(versions, ['2.7.0', '2.7.0', '2.7.0']);
 });
 
 test('evergreen bilingual READMEs advertise both native hosts and portable runtime', () => {

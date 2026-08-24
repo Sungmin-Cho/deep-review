@@ -70,6 +70,39 @@ test('suite overlay remaps model/effort only when family matches', async () => {
   assert.equal(rejected.provider, 'claude');
 });
 
+test('suite overlay preserves router decision fingerprints when supplied', async () => {
+  const { routeReviewer } = await import(routerUrl);
+  const { applySuiteResolution, translateRouteOutcome } = await import(adapterUrl);
+  const local = routeReviewer({
+    unit: { target_kind: 'code-change' },
+    reviewer: reviewer('claude-opus', 'claude'),
+    risk: 'low',
+    size: 'tiny',
+    capabilities: [capability()],
+  });
+  const applied = applySuiteResolution(local, translateRouteOutcome(authorized({
+    decision_fingerprint: 'decision-fingerprint-1',
+    request_sha256: 'request-sha-1',
+  })), { provider: 'claude' });
+  assert.equal(applied.suite_route.identity.decision_fingerprint, 'decision-fingerprint-1');
+  assert.equal(applied.suite_route.identity.request_sha256, 'request-sha-1');
+});
+
+test('suite overlay keeps fingerprint fields optional for legacy router decisions', async () => {
+  const { routeReviewer } = await import(routerUrl);
+  const { applySuiteResolution, translateRouteOutcome } = await import(adapterUrl);
+  const local = routeReviewer({
+    unit: { target_kind: 'code-change' },
+    reviewer: reviewer('claude-opus', 'claude'),
+    risk: 'low',
+    size: 'tiny',
+    capabilities: [capability()],
+  });
+  const applied = applySuiteResolution(local, translateRouteOutcome(authorized()), { provider: 'claude' });
+  assert.equal(applied.suite_route.identity.decision_fingerprint, null);
+  assert.equal(applied.suite_route.identity.request_sha256, null);
+});
+
 test('suite overlay does not change seats, rubrics, admission, or family count', async () => {
   const { buildRoutingPlan } = await import(routerUrl);
   const reviewers = [

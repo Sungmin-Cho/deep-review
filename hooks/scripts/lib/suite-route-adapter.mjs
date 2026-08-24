@@ -180,6 +180,8 @@ export function applySuiteResolution(route, outcome, { provider } = {}) {
         route_schema_version: outcome.decision.route_schema_version ?? 1,
         router_plugin_version: outcome.decision.router_plugin_version ?? null,
         policy_sha256: outcome.decision.policy_sha256 ?? null,
+        decision_fingerprint: outcome.decision.decision_fingerprint ?? null,
+        request_sha256: outcome.decision.request_sha256 ?? null,
       },
     },
   };

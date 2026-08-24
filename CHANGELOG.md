@@ -4,6 +4,20 @@
 
 All notable changes to deep-review are documented here. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] — 2026-08-24
+
+### Added
+
+- **Optional suite-route linkage fields** — route observations can now carry the router decision and request fingerprints.
+
+### Changed
+
+- **Suite route decision fingerprints** — suite-route overlays now preserve optional `decision_fingerprint` and `request_sha256` values while retaining `null` for legacy router decisions.
+
+### Security
+
+- Legacy router decisions remain backward compatible because the new linkage fields are optional.
+
 ## [2.6.0] — 2026-08-20
 
 ### Added
