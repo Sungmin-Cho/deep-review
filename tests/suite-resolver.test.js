@@ -70,6 +70,76 @@ test('suite overlay remaps model/effort only when family matches', async () => {
   assert.equal(rejected.provider, 'claude');
 });
 
+test('suite overlay preserves router decision fingerprints when supplied', async () => {
+  const { routeReviewer } = await import(routerUrl);
+  const { applySuiteResolution, translateRouteOutcome } = await import(adapterUrl);
+  const local = routeReviewer({
+    unit: { target_kind: 'code-change' },
+    reviewer: reviewer('claude-opus', 'claude'),
+    risk: 'low',
+    size: 'tiny',
+    capabilities: [capability()],
+  });
+  const applied = applySuiteResolution(local, translateRouteOutcome(authorized({
+    decision_fingerprint: 'decision-fingerprint-1',
+    request_sha256: 'request-sha-1',
+  })), { provider: 'claude' });
+  assert.equal(applied.suite_route.identity.decision_fingerprint, 'decision-fingerprint-1');
+  assert.equal(applied.suite_route.identity.request_sha256, 'request-sha-1');
+});
+
+test('suite overlay keeps fingerprint fields optional for legacy router decisions', async () => {
+  const { routeReviewer } = await import(routerUrl);
+  const { applySuiteResolution, translateRouteOutcome } = await import(adapterUrl);
+  const local = routeReviewer({
+    unit: { target_kind: 'code-change' },
+    reviewer: reviewer('claude-opus', 'claude'),
+    risk: 'low',
+    size: 'tiny',
+    capabilities: [capability()],
+  });
+  const applied = applySuiteResolution(local, translateRouteOutcome(authorized()), { provider: 'claude' });
+  assert.equal(applied.suite_route.identity.decision_fingerprint, null);
+  assert.equal(applied.suite_route.identity.request_sha256, null);
+});
+
+test('production routing plans preserve suite identity through JSON serialization', async () => {
+  const { buildRoutingPlan } = await import(routerUrl);
+  const reviewers = [reviewer('claude-opus', 'claude')];
+  const capabilities = [capability()];
+  const artifacts = [{ target_kind: 'code-change', path: 'src/a.ts', changed_lines: 20 }];
+  const build = (decision = {}) => buildRoutingPlan({
+    artifacts,
+    reviewers,
+    capabilities,
+    suiteResolve: () => ({
+      dispatch_authorized: true,
+      status: 'ok',
+      decision: {
+        selected_model: 'claude-sonnet-5',
+        selected_effort_native: 'medium',
+        route_schema_version: 1,
+        router_plugin_version: '1.0.0',
+        policy_sha256: 'a'.repeat(64),
+        ...decision,
+      },
+    }),
+  });
+
+  const supplied = JSON.parse(JSON.stringify(build({
+    decision_fingerprint: 'decision-fingerprint-2',
+    request_sha256: 'request-sha-2',
+  })));
+  const suppliedIdentity = supplied.routes[0].suite_route.identity;
+  assert.equal(suppliedIdentity.decision_fingerprint, 'decision-fingerprint-2');
+  assert.equal(suppliedIdentity.request_sha256, 'request-sha-2');
+
+  const legacy = JSON.parse(JSON.stringify(build()));
+  const legacyIdentity = legacy.routes[0].suite_route.identity;
+  assert.equal(legacyIdentity.decision_fingerprint, null);
+  assert.equal(legacyIdentity.request_sha256, null);
+});
+
 test('suite overlay does not change seats, rubrics, admission, or family count', async () => {
   const { buildRoutingPlan } = await import(routerUrl);
   const reviewers = [
