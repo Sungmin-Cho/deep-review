@@ -8,7 +8,7 @@ All notable changes to deep-review are documented here. Follows [Keep a Changelo
 
 ### Added
 
-- **Optional suite-route linkage fields** — route observations can now carry the router decision and request fingerprints.
+- **Optional serialized suite-route identity** — routing-plan output can preserve router decision and request fingerprints for future linkage.
 
 ### Changed
 

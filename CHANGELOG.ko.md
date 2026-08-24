@@ -8,7 +8,7 @@ deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Ke
 
 ### 추가
 
-- **선택적 suite-route 연결 필드** — route observation이 router 결정 및 request fingerprint를 담을 수 있습니다.
+- **선택적 직렬화 suite-route identity** — routing-plan 산출물이 향후 연결을 위해 router 결정 및 request fingerprint를 보존할 수 있습니다.
 
 ### 변경
 
