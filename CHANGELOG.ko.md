@@ -4,6 +4,19 @@
 
 deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)와 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)을 따릅니다.
 
+## [2.8.0] — 2026-08-26
+
+### 추가
+- 의심 바이너리 매니페스트 행: text-family 확장자(또는 basename)를 가진 바이너리 분류 경로는 `is_binary`, `binary_suspect_reason: "text-extension"`, `binary_classified_by`(`git-numstat` | `untracked-nul-sniff`)를 단 일급 `change_files` 행으로 남는다.
+- 권위 있는 `binary_omitted` 트레일러: `maxEntries`/`maxBytes`에 밀려난 suspect 행을 포함해 그 밖의 모든 바이너리 누락을 정확한 카운트, provenance 맵, Bounded 레코드 목록(25개 / 4096바이트 줄)으로 집계한다. sha256 identity digest는 트레일러 줄이 아니라 구조화된 `binaryOmitted` 결과 필드에 실린다.
+- `serializeChangeFilesDetailed`(문자열을 반환하는 `serializeChangeFiles`는 그대로), 페이로드 결과 `changeFilesStatus` + `binaryOmitted`, 공유 `hooks/scripts/lib/text-extensions.mjs` taxonomy.
+
+### 변경
+- 리뷰어 지침, 리포트 형식, 이중 언어 README는 suspect 행과 누락 diagnostic을 in-scope 메타데이터로 다루고, 바이너리 *내용*은 계속 제외한다.
+
+### 보안
+- raw NUL 바이트가 리뷰 페이로드에서 파일을 조용히 지우지 않는다(Sungmin-Cho/deep-review#57 Item A). 셸 트윈과 Unix parity oracle이 같은 계약을 따른다.
+
 ## [2.7.0] — 2026-08-24
 
 ### 추가

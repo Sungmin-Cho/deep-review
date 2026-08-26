@@ -170,7 +170,7 @@ Claude Code는 capability가 있으면 독립 named `code-reviewer` 에이전트
 
 공유 리뷰어 페이로드(Opus 리뷰어, ultracode 샤드, agy, Grok이 사용)는 다음을 포함합니다:
 
-- **`change_files` 매니페스트** — NUL-safe, capped 교차 파일 매니페스트(이름 변경/복사 감지, dirty 상태 untracked 유니온)로 리뷰어가 diff 하나가 아닌 전체 변경 집합을 봅니다. diff 자체는 instruction-attention을 위해 마지막에 배치되며, 위 Stage 1 제외 목록을 동일하게 따릅니다.
+- **`change_files` 매니페스트** — NUL-safe, capped 교차 파일 매니페스트(이름 변경/복사 감지, dirty 상태 untracked 유니온)로 리뷰어가 diff 하나가 아닌 전체 변경 집합을 봅니다. diff 자체는 instruction-attention을 위해 마지막에 배치되며, 위 Stage 1 제외 목록을 동일하게 따릅니다. 바이너리로 분류된 text-extension 경로는 `is_binary` + `binary_suspect_reason` 행으로 남고, 그 밖의 바이너리 누락은 cap-exempt `binary_omitted` 트레일러와 빌더 경고로 집계됩니다. 바이너리 *내용*은 포함되지 않습니다.
 - **FP-억제 독트린** — false-positive 억제 독트린과 conservative-balance 반대 가중치를 `review-criteria.md` 단일 출처에서 Opus 프롬프트, ultracode 샤드, agy 및 Grok 페이로드에 주입합니다. 두 Codex reviewer 페이로드는 공격성 보존을 위해 의도적으로 제외됩니다.
 
 ### Stage 4: Verdict (판정)

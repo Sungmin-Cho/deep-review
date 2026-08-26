@@ -21,6 +21,7 @@ import {
   UNKNOWN_KIND,
   UNSUPPORTED_BINARY_KIND,
 } from './target-taxonomy.mjs';
+import { codeExtensions, markdownExtensions } from './text-extensions.mjs';
 
 // Weights are expressed in integer hundredths to keep scoring free of floating
 // point drift (§8.5.4). Confidence = clamp(sum, 0, 100) / 100.
@@ -38,18 +39,11 @@ const DEFAULT_THRESHOLDS = Object.freeze({ confirm: 0.8, margin: 0.15, semantic:
 // Bound how much text we scan so a pathological file cannot dominate CPU.
 const MAX_SCAN_BYTES = 256 * 1024;
 
-const CODE_EXTENSIONS = new Set([
-  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.rb', '.go', '.rs',
-  '.java', '.kt', '.kts', '.scala', '.c', '.h', '.cc', '.cpp', '.hpp', '.cxx',
-  '.cs', '.php', '.swift', '.m', '.mm', '.sh', '.bash', '.zsh', '.sql', '.pl',
-  '.pm', '.lua', '.r', '.dart', '.ex', '.exs', '.erl', '.clj', '.vue', '.svelte',
-]);
+const CODE_EXTENSIONS = new Set(codeExtensions);
 
 // Markdown-family extensions map their generic fallback to `generic-document`;
 // any other text file falls back to `generic-text-artifact`.
-const MARKDOWN_EXTENSIONS = new Set([
-  '.md', '.markdown', '.mdx', '.rst', '.adoc', '.asciidoc', '.org',
-]);
+const MARKDOWN_EXTENSIONS = new Set(markdownExtensions);
 
 // Strong filename/path signals (§8.5.2). `type` selects the surface each rule is
 // tested against — 'filename' against the basename, 'path' against the whole

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -12,6 +13,7 @@ import {
   gitSync,
   splitNul,
 } from './git.mjs';
+import { isSuspectTextPath } from './text-extensions.mjs';
 
 const DEFAULT_MAX_ENTRIES = 500;
 const DEFAULT_MAX_BYTES = 65536;
@@ -195,19 +197,40 @@ export function buildChangeFiles(options = {}) {
   const limits = normalizeLimits(options);
   const rawRecords = new Map();
   const seenPathIds = new Set();
+  const omittedBinary = new Map();
   let binaryPaths = new Set();
 
-  // When `includeBinary` is false (the review/payload default) binaries are
-  // dropped exactly as before. When true (artifact discovery) they are kept and
-  // tagged `is_binary` so downstream can classify them as unsupported-binary.
+  // Default path (`includeBinary: false`): suspect text-extension binaries stay
+  // as tagged rows; every other binary becomes a builder diagnostic (first
+  // delivery wins). `includeBinary: true` keeps original tagging semantics.
   const addRecord = (rawPath, record) => {
     const pathId = rawPathId(rawPath);
     if (seenPathIds.has(pathId)) return;
     if (isExcludedPath(record.path)) return;
     const untrackedFamily = ['untracked', 'initial', 'session', 'non-git'].includes(record.status);
-    const isBinary = binaryPaths.has(pathId)
-      || (untrackedFamily && looksLikeUntrackedBinary(repo, rawPath));
-    if (isBinary && !includeBinary) return;
+    const fromNumstat = binaryPaths.has(pathId);
+    const fromSniff = !fromNumstat && untrackedFamily && looksLikeUntrackedBinary(repo, rawPath);
+    const isBinary = fromNumstat || fromSniff;
+    if (isBinary && !includeBinary) {
+      const classifiedBy = fromNumstat ? 'git-numstat' : 'untracked-nul-sniff';
+      const suspect = isSuspectTextPath(record.path)
+        || (record.old_path !== undefined && isSuspectTextPath(record.old_path));
+      if (suspect) {
+        record.is_binary = true;
+        record.binary_suspect_reason = 'text-extension';
+        record.binary_classified_by = classifiedBy;
+      } else {
+        const diagnostic = { path: record.path };
+        if (record.old_path !== undefined) diagnostic.old_path = record.old_path;
+        if (record.score !== undefined) diagnostic.score = record.score;
+        diagnostic.status = record.status;
+        diagnostic.classified_by = classifiedBy;
+        diagnostic.omitted_at = 'builder';
+        omittedBinary.set(pathId, Object.freeze(diagnostic));
+        seenPathIds.add(pathId); // terminal disposition: first delivery wins
+        return;
+      }
+    }
     if (isBinary) record.is_binary = true;
     const key = Buffer.from(rawPath);
     rawRecords.set(key, record);
@@ -271,29 +294,133 @@ export function buildChangeFiles(options = {}) {
     enumerable: false,
     writable: false,
   });
+  if (omittedBinary.size > 0) {
+    const lane = Object.freeze([...omittedBinary.values()]
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)));
+    Object.defineProperty(records, 'omittedBinaryRecords', {
+      value: lane,
+      configurable: false,
+      enumerable: false,
+      writable: false,
+    });
+  }
   return records;
 }
 
-export function serializeChangeFiles(records, limits = records?.serializationLimits ?? {}) {
+const BINARY_TRAILER_MAX_RECORDS = 25;
+const BINARY_TRAILER_MAX_BYTES = 4096;
+// U+007F (DEL), C1 controls (U+0080-U+009F incl. NEL/CSI), U+2028/U+2029,
+// and every Bidi_Control code point. All BMP, so \uXXXX escapes suffice.
+const DISPLAY_CONTROLS = /[\u007f\u0080-\u009f\u2028\u2029\p{Bidi_Control}]/gu;
+const VALID_CLASSIFIERS = new Set(['git-numstat', 'untracked-nul-sniff']);
+
+export function escapeDisplayControls(jsonText) {
+  if (typeof jsonText !== 'string') throw new TypeError('jsonText must be a string');
+  return jsonText.replace(DISPLAY_CONTROLS,
+    (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, '0')}`);
+}
+
+function laneDigest(entries) {
+  if (entries.length === 0) return null;
+  const canonical = entries
+    .map((entry) => JSON.stringify([
+      entry.path, entry.old_path ?? null, entry.status, entry.classified_by, entry.omitted_at,
+    ]))
+    .sort()
+    .join('\n');
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}
+
+function truncatedSuspectDiagnostic(record) {
+  const diagnostic = { path: record.path };
+  if (record.old_path !== undefined) diagnostic.old_path = record.old_path;
+  if (record.score !== undefined) diagnostic.score = record.score;
+  diagnostic.status = record.status;
+  diagnostic.classified_by = record.binary_classified_by;
+  diagnostic.omitted_at = 'serializer';
+  return Object.freeze(diagnostic);
+}
+
+export function serializeChangeFilesDetailed(records, limits = records?.serializationLimits ?? {}, options = {}) {
   if (!Array.isArray(records)) throw new TypeError('records must be an array');
+  const builderLane = options.omittedBinaryRecords ?? records?.omittedBinaryRecords ?? [];
   const normalized = normalizeLimits(limits);
   const lines = [];
+  const truncatedSuspects = [];
   let emitted = 0;
   let bytes = 0;
+  let pastLimit = false;
   for (const record of records) {
-    const line = JSON.stringify(record);
-    if (line === undefined) throw new TypeError('every change record must be JSON serializable');
-    const rowBytes = Buffer.byteLength(line, 'utf8') + 1;
-    if (
-      emitted > 0
-      && (emitted >= normalized.maxEntries || bytes + rowBytes > normalized.maxBytes)
-    ) break;
-    lines.push(line);
-    emitted += 1;
-    bytes += rowBytes;
+    if (!pastLimit) {
+      const line = JSON.stringify(record);
+      if (line === undefined) throw new TypeError('every change record must be JSON serializable');
+      const rowBytes = Buffer.byteLength(line, 'utf8') + 1;
+      if (emitted > 0 && (emitted >= normalized.maxEntries || bytes + rowBytes > normalized.maxBytes)) {
+        pastLimit = true; // fall through: this record is the first capped one
+      } else {
+        lines.push(line);
+        emitted += 1;
+        bytes += rowBytes;
+        continue;
+      }
+    }
+    // Capped-out records are never stringified again (legacy behavior kept for
+    // non-serializable tails); only default-path suspect rows are harvested.
+    if (record?.binary_suspect_reason === 'text-extension'
+        && VALID_CLASSIFIERS.has(record.binary_classified_by)) {
+      truncatedSuspects.push(truncatedSuspectDiagnostic(record));
+    }
   }
   if (emitted < records.length) {
     lines.push(JSON.stringify({ omitted: records.length - emitted, truncated: true }));
   }
-  return lines.length === 0 ? '' : `${lines.join('\n')}\n`;
+
+  const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const laneEntries = [
+    ...truncatedSuspects.sort(byPath),   // serializer-omitted first (design Q3)
+    ...[...builderLane].sort(byPath),
+  ];
+  const total = laneEntries.length;
+  const classifiedBy = { 'git-numstat': 0, 'untracked-nul-sniff': 0 };
+  const omittedAt = { builder: 0, serializer: 0 };
+  for (const entry of laneEntries) {
+    classifiedBy[entry.classified_by] += 1;
+    omittedAt[entry.omitted_at] += 1;
+  }
+
+  let listedRecords = [];
+  if (total > 0) {
+    const trailerLine = (candidate) => escapeDisplayControls(JSON.stringify({
+      binary_omitted: total,
+      binary_classified_by: classifiedBy,
+      binary_omitted_at: omittedAt,
+      binary_records: candidate,
+      binary_records_listed: candidate.length,
+      binary_records_unlisted: total - candidate.length,
+    }));
+    for (const entry of laneEntries) {
+      if (listedRecords.length >= BINARY_TRAILER_MAX_RECORDS) break;
+      const candidate = [...listedRecords, entry];
+      if (Buffer.byteLength(trailerLine(candidate), 'utf8') + 1 > BINARY_TRAILER_MAX_BYTES) break;
+      listedRecords = candidate;
+    }
+    lines.push(trailerLine(listedRecords));
+  }
+
+  return {
+    text: lines.length === 0 ? '' : `${lines.join('\n')}\n`,
+    binaryDiagnostics: {
+      total,
+      classifiedBy,
+      omittedAt,
+      records: listedRecords,
+      listed: listedRecords.length,
+      unlisted: total - listedRecords.length,
+      digest: laneDigest(laneEntries),
+    },
+  };
+}
+
+export function serializeChangeFiles(records, limits = records?.serializationLimits ?? {}) {
+  return serializeChangeFilesDetailed(records, limits).text;
 }

@@ -170,7 +170,7 @@ test('both workflows cover every release-relevant path class', () => {
 });
 
 const PUBLISHED_RELEASE_BASELINE = '2.6.0';
-const PLANNED_RELEASE = '2.7.0';
+const PLANNED_RELEASE = '2.8.0';
 
 function semverParts(version) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(version);
@@ -272,13 +272,13 @@ test('planned release is strictly greater than the published 2.6.0 baseline, abs
   }
 });
 
-test('release version is exactly 2.7.0 on all three package surfaces', () => {
+test('release version is exactly 2.8.0 on all three package surfaces', () => {
   const versions = [
     JSON.parse(read('.claude-plugin/plugin.json')).version,
     JSON.parse(read('.codex-plugin/plugin.json')).version,
     JSON.parse(read('package.json')).version,
   ];
-  assert.deepEqual(versions, ['2.7.0', '2.7.0', '2.7.0']);
+  assert.deepEqual(versions, ['2.8.0', '2.8.0', '2.8.0']);
 });
 
 test('evergreen bilingual READMEs advertise both native hosts and portable runtime', () => {

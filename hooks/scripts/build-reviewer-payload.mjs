@@ -4,7 +4,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildChangeFiles,
-  serializeChangeFiles,
+  escapeDisplayControls,
+  serializeChangeFilesDetailed,
 } from './lib/review-target.mjs';
 import {
   atomicWriteFile,
@@ -241,6 +242,8 @@ export function buildReviewerPayload(options = {}) {
 
   let changeFiles = '';
   let changeFilesCount = 0;
+  let changeFilesStatus = 'not-requested';
+  let binaryOmitted = null;
   if (options.changeState) {
     try {
       const records = buildChangeFiles({
@@ -251,9 +254,34 @@ export function buildReviewerPayload(options = {}) {
         maxEntries: options.maxEntries,
         maxBytes: options.maxBytes,
       });
-      changeFiles = serializeChangeFiles(records);
+      const detailed = serializeChangeFilesDetailed(records);
+      changeFiles = detailed.text;
       changeFilesCount = records.length;
+      changeFilesStatus = 'ok';
+      const diagnostics = detailed.binaryDiagnostics;
+      binaryOmitted = {
+        count: diagnostics.total,
+        classifiedBy: diagnostics.classifiedBy,
+        omittedAt: diagnostics.omittedAt,
+        records: diagnostics.records,
+        listed: diagnostics.listed,
+        unlisted: diagnostics.unlisted,
+        digest: diagnostics.digest,
+      };
+      if (diagnostics.total > 0) {
+        const shown = diagnostics.records
+          .map((entry) => escapeDisplayControls(JSON.stringify(entry.path)))
+          .join(', ');
+        warnings.push(
+          `change-files: ${diagnostics.total} binary-classified path(s) withheld from the manifest rows `
+          + `(git-numstat\u00d7${diagnostics.classifiedBy['git-numstat']}, `
+          + `untracked-nul-sniff\u00d7${diagnostics.classifiedBy['untracked-nul-sniff']}; `
+          + `builder\u00d7${diagnostics.omittedAt.builder}, serializer\u00d7${diagnostics.omittedAt.serializer}): ${shown}`,
+        );
+      }
     } catch (error) {
+      changeFilesStatus = 'failed';
+      binaryOmitted = null;
       warnings.push(`change-files construction failed (section skipped): ${error.message}`);
     }
   }
@@ -276,6 +304,8 @@ export function buildReviewerPayload(options = {}) {
     promptFile: resolve(promptFile),
     warnings,
     changeFilesCount,
+    changeFilesStatus,
+    binaryOmitted,
     ...(assignment.executionPlan ? {
       assignmentRole: assignment.executionPlan.assignmentRole,
       rubricId: assignment.executionPlan.rubricId,

@@ -94,7 +94,8 @@ Use direct Git host commands with argv arrays to collect the matching diff:
 <!-- SSOT:diff-exclusion-set START -->
 Exclude directory segments `node_modules`, `dist`, `build`, `.next`, `target`,
 `.venv`, `__pycache__`, `.pytest_cache`, `vendor`, and `.git`; exclude
-`*.min.js`, `*.generated.*`, `*.lock`, `.DS_Store`, and binary blobs.
+`*.min.js`, `*.generated.*`, `*.lock`, `.DS_Store`, and binary content
+(suspicious-text metadata rows and omission diagnostics are retained).
 <!-- SSOT:diff-exclusion-set END -->
 
 For an oversized target, keep the existing thresholds: below 200 KB include
@@ -146,6 +147,17 @@ doctrine only for `codex-review` and `codex-adversarial`, while preserving the
 trusted assignment, verified readiness receipt, changed files, project
 context, prior rounds, and diff. All other reviewers retain the doctrine.
 Preserve every builder warning in the final report.
+Each result also carries `changeFilesStatus` and `binaryOmitted`
+(`{count, classifiedBy, omittedAt, records, listed, unlisted, digest}`;
+`null` unless status is `ok`). Aggregate one structured binary diagnostic per
+round from those objects - never by parsing warning prose: all participating
+routes must be `ok` and their `count`/maps/`digest` must agree, in which case
+the report carries one canonical diagnostic naming the contributing routes;
+any divergence, or a `failed`/`not-requested` route alongside `ok` routes, is
+itself surfaced as a structured anomaly embedding each route's object. A
+`failed` status is called out prominently in the round report (visibility
+only - verdict mechanics are unchanged). Per-route warnings are preserved
+as-is; the aggregate is additional.
 
 ## 3. Reviewer flags, privacy, and capability enumeration
 
