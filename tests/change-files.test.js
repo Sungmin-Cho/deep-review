@@ -658,6 +658,27 @@ test('digest is order-insensitive and field-sensitive; property boundary honored
   }).binaryDiagnostics.total, 1);
 });
 
+test('trailer lists mixed BMP and astral paths in JS code-unit order', async () => {
+  const { serializeChangeFilesDetailed } = await loadTarget();
+  const emojiPath = `x${String.fromCodePoint(0x1f600)}.bin`;
+  const bmpPath = `x${String.fromCharCode(0xe000)}.bin`;
+  assert.equal(emojiPath < bmpPath, true, 'JS code-unit order: surrogate pair precedes U+E000');
+  const { text } = serializeChangeFilesDetailed([], {}, {
+    omittedBinaryRecords: [
+      Object.freeze({
+        path: bmpPath, status: 'untracked',
+        classified_by: 'untracked-nul-sniff', omitted_at: 'builder',
+      }),
+      Object.freeze({
+        path: emojiPath, status: 'untracked',
+        classified_by: 'untracked-nul-sniff', omitted_at: 'builder',
+      }),
+    ],
+  });
+  const listed = parseJsonLines(text).at(-1).binary_records.map((entry) => entry.path);
+  assert.deepEqual(listed, [emojiPath, bmpPath]);
+});
+
 test('CLI stdout carries suspect row and trailer', async () => {
   const repo = createGitFixture('cli-smoke');
   writeFileSync(join(repo, 'control.mjs'), nulSource);

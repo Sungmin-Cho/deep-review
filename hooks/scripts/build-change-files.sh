@@ -255,7 +255,9 @@ for d in rows:
         truncated_suspects.append(diag)
 if emitted<len(rows): print(json.dumps({"omitted":len(rows)-emitted,"truncated":True}))
 def by_path(entry):
-    return entry["path"]
+    # JS string compare is UTF-16 code-unit order. utf-16-be bytes match that
+    # lexicographic order; utf-16-le does not (endianness swaps unit bytes).
+    return entry["path"].encode("utf-16-be")
 lane=sorted(truncated_suspects, key=by_path)+sorted(omitted_binary.values(), key=by_path)
 total=len(lane)
 classified_by={"git-numstat":0,"untracked-nul-sniff":0}
