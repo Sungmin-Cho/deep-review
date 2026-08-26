@@ -6,6 +6,7 @@ const {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } = require('node:fs');
@@ -662,7 +663,9 @@ test('trailer lists mixed BMP and astral paths in JS code-unit order', async () 
   const { serializeChangeFilesDetailed } = await loadTarget();
   const emojiPath = `x${String.fromCodePoint(0x1f600)}.bin`;
   const bmpPath = `x${String.fromCharCode(0xe000)}.bin`;
+  const lonePath = 'bad-\udcff.bin';
   assert.equal(emojiPath < bmpPath, true, 'JS code-unit order: surrogate pair precedes U+E000');
+  assert.equal(lonePath < emojiPath, true, 'JS code-unit order: U+DCFF path precedes x…');
   const { text } = serializeChangeFilesDetailed([], {}, {
     omittedBinaryRecords: [
       Object.freeze({
@@ -673,10 +676,30 @@ test('trailer lists mixed BMP and astral paths in JS code-unit order', async () 
         path: emojiPath, status: 'untracked',
         classified_by: 'untracked-nul-sniff', omitted_at: 'builder',
       }),
+      Object.freeze({
+        path: lonePath, status: 'untracked',
+        classified_by: 'untracked-nul-sniff', omitted_at: 'builder',
+      }),
     ],
   });
   const listed = parseJsonLines(text).at(-1).binary_records.map((entry) => entry.path);
-  assert.deepEqual(listed, [emojiPath, bmpPath]);
+  assert.deepEqual(listed, [lonePath, emojiPath, bmpPath]);
+});
+
+test('twin by_path encodes lone surrogates without crashing and matches JS order', () => {
+  const twinPath = join(__dirname, '..', 'hooks', 'scripts', 'build-change-files.sh');
+  const source = readFileSync(twinPath, 'utf8');
+  const match = source.match(/def by_path\(entry\):\n(?:.*\n)*?    return entry\["path"\]\.encode\(([^)]+)\)/);
+  assert.ok(match, 'twin defines by_path with an encode(...) sort key');
+  const result = spawnSync('python3', ['-c', `
+paths = ["x\\ue000.bin", "bad-\\udcff.bin", "x\\U0001f600.bin"]
+want = ["bad-\\udcff.bin", "x\\U0001f600.bin", "x\\ue000.bin"]
+ordered = sorted(paths, key=lambda p: p.encode(${match[1]}))
+assert ordered == want, [p.encode("utf-8", "backslashreplace") for p in ordered]
+print("ok")
+`], { encoding: 'utf8', shell: false });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(result.stdout.trim(), 'ok');
 });
 
 test('CLI stdout carries suspect row and trailer', async () => {

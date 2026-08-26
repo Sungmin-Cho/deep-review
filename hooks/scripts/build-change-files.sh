@@ -257,7 +257,9 @@ if emitted<len(rows): print(json.dumps({"omitted":len(rows)-emitted,"truncated":
 def by_path(entry):
     # JS string compare is UTF-16 code-unit order. utf-16-be bytes match that
     # lexicographic order; utf-16-le does not (endianness swaps unit bytes).
-    return entry["path"].encode("utf-16-be")
+    # surrogatepass keeps lone surrogates from surrogateescape-decoded
+    # invalid UTF-8 paths (strict utf-16-be raises UnicodeEncodeError).
+    return entry["path"].encode("utf-16-be", "surrogatepass")
 lane=sorted(truncated_suspects, key=by_path)+sorted(omitted_binary.values(), key=by_path)
 total=len(lane)
 classified_by={"git-numstat":0,"untracked-nul-sniff":0}

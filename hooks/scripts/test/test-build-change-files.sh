@@ -242,6 +242,23 @@ PY
 )"
 assert_success "[ \"\$tax_node\" = \"\$tax_twin\" ]" "taxonomy parity Node vs twin"
 
+# Twin diagnostic sort key must accept surrogateescape paths (invalid UTF-8
+# filenames) and match JS UTF-16 code-unit order, including mixed BMP/astral.
+assert_success "python3 - '$SCRIPT' <<'PY'
+import re, sys
+src = open(sys.argv[1], encoding='utf-8').read()
+match = re.search(
+    r'def by_path\\(entry\\):\\n(?:.*\\n)*?    return entry\\[\"path\"\\]\\.encode\\(([^)]+)\\)',
+    src,
+)
+assert match, 'twin by_path encode key missing'
+ns = {}
+exec('def by_path(entry):\\n    return entry[\"path\"].encode(%s)' % match.group(1), ns)
+paths = ['x\\ue000.bin', 'bad-\\udcff.bin', 'x\\U0001f600.bin']
+ordered = sorted(paths, key=lambda p: ns['by_path']({'path': p}))
+assert ordered == ['bad-\\udcff.bin', 'x\\U0001f600.bin', 'x\\ue000.bin'], ordered
+PY" "twin by_path sorts lone-surrogate and astral paths in JS order"
+
 # Tracked (staged) suspect coverage:
 ( cd "$ubin" && git add control.mjs )
 outstaged="$("$SCRIPT" --repo "$ubin" --change-state staged)"
