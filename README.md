@@ -170,7 +170,7 @@ Claude Code uses an independent named `code-reviewer` agent when that capability
 
 The shared reviewer payload — used by the Opus reviewer, ultracode shards, agy, and Grok — includes:
 
-- **`change_files` manifest** — a NUL-safe, capped cross-file manifest (rename/copy detection, dirty-state untracked union) so reviewers see the whole changeset, not just one diff; the diff itself is ordered last for instruction-attention. It honors the same Stage 1 exclusions as the diff.
+- **`change_files` manifest** — a NUL-safe, capped cross-file manifest (rename/copy detection, dirty-state untracked union) so reviewers see the whole changeset, not just one diff; the diff itself is ordered last for instruction-attention. It honors the same Stage 1 exclusions as the diff. Binary-classified text-extension paths stay as `is_binary` + `binary_suspect_reason` rows; every other binary omission is accounted for by a cap-exempt `binary_omitted` trailer and a builder warning. Binary *content* is never included.
 - **FP-suppression doctrine** — a false-positive-suppression doctrine plus a conservative-balance counterweight, single-sourced from `review-criteria.md` and injected into the Opus prompt, ultracode shards, and the agy and Grok payloads. Both Codex reviewer payloads are intentionally excluded, preserving their aggression.
 
 ### Stage 4: Verdict

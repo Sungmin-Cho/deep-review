@@ -4,6 +4,32 @@
 
 All notable changes to deep-review are documented here. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] — 2026-08-26
+
+### Added
+- Suspicious-binary manifest rows: a binary-classified path with a
+  text-family extension (or basename) keeps a first-class `change_files` row
+  with `is_binary`, `binary_suspect_reason: "text-extension"` and
+  `binary_classified_by` (`git-numstat` | `untracked-nul-sniff`).
+- Authoritative `binary_omitted` trailer: every other binary omission -
+  including suspect rows lost to `maxEntries`/`maxBytes` - is accounted for
+  with exact counts, provenance maps and a bounded record list
+  (25 records / 4096-byte line); the sha256 identity digest rides in the
+  structured `binaryOmitted` result field, not in the trailer line.
+- `serializeChangeFilesDetailed` (string-returning `serializeChangeFiles`
+  unchanged), payload result `changeFilesStatus` + `binaryOmitted`, shared
+  `hooks/scripts/lib/text-extensions.mjs` taxonomy.
+
+### Changed
+- Reviewer instructions, report format, and bilingual READMEs treat suspect
+  rows and omission diagnostics as in-scope metadata while binary *content*
+  stays excluded.
+
+### Security
+- A raw NUL byte no longer silently drops a file from the review payload
+  (Sungmin-Cho/deep-review#57 Item A). The shell twin and its Unix parity
+  oracle mirror the same contract.
+
 ## [2.7.0] — 2026-08-24
 
 ### Added
