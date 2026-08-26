@@ -688,9 +688,11 @@ test('trailer lists mixed BMP and astral paths in JS code-unit order', async () 
 
 test('twin by_path encodes lone surrogates without crashing and matches JS order', () => {
   const twinPath = join(__dirname, '..', 'hooks', 'scripts', 'build-change-files.sh');
-  const source = readFileSync(twinPath, 'utf8');
+  const source = readFileSync(twinPath, 'utf8').replace(/\r\n/g, '\n');
   const match = source.match(/def by_path\(entry\):\n(?:.*\n)*?    return entry\["path"\]\.encode\(([^)]+)\)/);
   assert.ok(match, 'twin defines by_path with an encode(...) sort key');
+  assert.match(match[1], /surrogatepass/, 'encode error-mode must keep lone surrogates');
+  if (process.platform === 'win32') return;
   const result = spawnSync('python3', ['-c', `
 paths = ["x\\ue000.bin", "bad-\\udcff.bin", "x\\U0001f600.bin"]
 want = ["bad-\\udcff.bin", "x\\U0001f600.bin", "x\\ue000.bin"]
