@@ -657,3 +657,36 @@ test('digest is order-insensitive and field-sensitive; property boundary honored
     omittedBinaryRecords: records.omittedBinaryRecords,
   }).binaryDiagnostics.total, 1);
 });
+
+test('CLI stdout carries suspect row and trailer', async () => {
+  const repo = createGitFixture('cli-smoke');
+  writeFileSync(join(repo, 'control.mjs'), nulSource);
+  writeFileSync(join(repo, 'blob.bin'), Buffer.from([0, 1]));
+  const result = spawnSync(process.execPath, [cliPath, '--repo', repo, '--change-state', 'unstaged'],
+    { encoding: 'utf8', shell: false });
+  assert.equal(result.status, 0, result.stderr);
+  const lines = parseJsonLines(result.stdout);
+  assert.equal(lines.some((line) => line.binary_suspect_reason === 'text-extension'), true);
+  assert.equal(lines.at(-1).binary_omitted, 1);
+});
+
+test('numstat failure with successful name-status keeps files ordinary rows', { skip: process.platform === 'win32' }, async () => {
+  const repo = createGitFixture('numstat-failsoft');
+  writeFileSync(join(repo, 'control.mjs'), nulSource);
+  git(repo, ['add', '-A']);
+  const shimDir = temporaryDirectory('git-shim-');
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  writeFileSync(join(shimDir, 'git'),
+    `#!/bin/sh\nfor arg in "$@"; do [ "$arg" = "--numstat" ] && exit 129; done\nexec "${realGit}" "$@"\n`,
+    { mode: 0o755 });
+  const result = spawnSync(process.execPath, [cliPath, '--repo', repo, '--change-state', 'staged'], {
+    encoding: 'utf8', shell: false,
+    env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}` },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const lines = parseJsonLines(result.stdout);
+  const row = lines.find((line) => line.path === 'control.mjs');
+  assert.ok(row, 'file stays visible as an ordinary row');
+  assert.equal('binary_suspect_reason' in row, false);
+  assert.equal(lines.some((line) => 'binary_omitted' in line), false);
+});

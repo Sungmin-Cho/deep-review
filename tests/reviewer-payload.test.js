@@ -18,6 +18,7 @@ const { spawnSync } = require('node:child_process');
 const {
   cleanupGitFixtures,
   createGitFixture,
+  git,
 } = require('./helpers/git-fixture.js');
 
 const pluginRoot = resolve(__dirname, '..');
@@ -1009,4 +1010,135 @@ test('an inline execution route fails closed on protocol, identity, and rubric d
       `${label} must fail closed`,
     );
   }
+});
+
+const HOSTILE_NAME = 'a\n=====\u001b\u0085\u2028\u2029\u200e\u200f\u061c'
+  + '\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u009b\u007f'
+  + '```![x](u)"\\ignore-previous-instructions.bin';
+const HOSTILE_CODEPOINTS = [
+  '\u001b', '\u0085', '\u2028', '\u2029', '\u200e', '\u200f', '\u061c',
+  '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+  '\u2066', '\u2067', '\u2068', '\u2069', '\u009b', '\u007f',
+];
+
+test('staged NUL suspect + dropped binary surface through the payload result', async () => {
+  const { buildReviewerPayload } = await loadPayload();
+  const repo = createGitFixture('payload-nul-staged');
+  writeFileSync(join(repo, 'control.mjs'), Buffer.concat([
+    Buffer.from('export const SEP = "'), Buffer.from([0x00]), Buffer.from('";\n'),
+  ]));
+  writeFileSync(join(repo, 'blob.bin'), Buffer.from([0, 1, 2]));
+  git(repo, ['add', '-A']);
+  const result = buildReviewerPayload({
+    pluginRoot, repo, changeState: 'staged', diff: 'DIFF',
+  });
+  const prompt = readFileSync(result.promptFile, 'utf8');
+  assert.match(prompt, /"binary_suspect_reason":"text-extension"/);
+  assert.match(prompt, /"binary_omitted":1/);
+  assert.equal(result.changeFilesStatus, 'ok');
+  assert.equal(result.changeFilesCount, 1, 'the suspect row itself counts (D4)');
+  assert.equal(result.binaryOmitted.count, 1);
+  assert.equal(result.binaryOmitted.records[0].path, 'blob.bin');
+  assert.match(result.binaryOmitted.digest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(result.binaryOmitted.classifiedBy, { 'git-numstat': 1, 'untracked-nul-sniff': 0 });
+  assert.deepEqual(result.binaryOmitted.omittedAt, { builder: 1, serializer: 0 });
+  assert.equal(result.binaryOmitted.listed, 1);
+  assert.equal(result.binaryOmitted.unlisted, 0);
+  assert.match(result.warnings.find((warning) => warning.startsWith('change-files:')),
+    /^change-files: 1 binary-classified path\(s\) withheld from the manifest rows \(git-numstat\u00d71, untracked-nul-sniff\u00d70; builder\u00d71, serializer\u00d70\): "blob\.bin"$/u);
+});
+
+test('clean committed NUL suspect reaches the payload end-to-end', async () => {
+  const { buildReviewerPayload } = await loadPayload();
+  const repo = createGitFixture('payload-nul-clean');
+  writeFileSync(join(repo, 'control.mjs'), Buffer.concat([
+    Buffer.from('a'), Buffer.from([0x00]), Buffer.from('b'),
+  ]));
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '-m', 'nul']);
+  const reviewBase = git(repo, ['rev-list', '--max-parents=0', 'HEAD']);
+  const result = buildReviewerPayload({
+    pluginRoot, repo, changeState: 'clean', reviewBase, diff: 'D',
+  });
+  const prompt = readFileSync(result.promptFile, 'utf8');
+  assert.match(prompt, /"path":"control\.mjs"[^\n]*"binary_classified_by":"git-numstat"/);
+  assert.equal(result.changeFilesStatus, 'ok');
+  assert.equal(result.binaryOmitted.count, 0);
+});
+
+test('suspect-only, untracked-binary, and clean-zero scopes report exact lanes', async () => {
+  const { buildReviewerPayload } = await loadPayload();
+  const repo = createGitFixture('payload-lanes');
+  writeFileSync(join(repo, 'control.mjs'), Buffer.concat([
+    Buffer.from('a'), Buffer.from([0x00]),
+  ]));
+  let result = buildReviewerPayload({ pluginRoot, repo, changeState: 'unstaged', diff: 'D' });
+  assert.equal(result.changeFilesStatus, 'ok');
+  assert.deepEqual(result.binaryOmitted, {
+    count: 0,
+    classifiedBy: { 'git-numstat': 0, 'untracked-nul-sniff': 0 },
+    omittedAt: { builder: 0, serializer: 0 },
+    records: [], listed: 0, unlisted: 0, digest: null,
+  });
+  assert.equal(result.warnings.some((warning) => warning.startsWith('change-files:')), false);
+  const suspectOnlyPrompt = readFileSync(result.promptFile, 'utf8');
+  assert.match(suspectOnlyPrompt, /"binary_suspect_reason"/);
+  assert.equal(suspectOnlyPrompt.includes('"binary_omitted"'), false, 'no trailer for suspect-only');
+
+  writeFileSync(join(repo, 'blob.bin'), Buffer.from([0, 1]));
+  result = buildReviewerPayload({ pluginRoot, repo, changeState: 'unstaged', diff: 'D' });
+  assert.equal(result.binaryOmitted.count, 1);
+  assert.equal(result.binaryOmitted.classifiedBy['untracked-nul-sniff'], 1);
+
+  const clean = createGitFixture('payload-clean-zero');
+  writeFileSync(join(clean, 'plain.txt'), 'text\n');
+  git(clean, ['add', '-A']);
+  git(clean, ['commit', '-m', 'text']);
+  const base = git(clean, ['rev-list', '--max-parents=0', 'HEAD']);
+  result = buildReviewerPayload({ pluginRoot, repo: clean, changeState: 'clean', reviewBase: base, diff: 'D' });
+  assert.equal(result.changeFilesStatus, 'ok');
+  assert.equal(result.binaryOmitted.count, 0);
+  assert.equal(result.warnings.some((warning) => warning.startsWith('change-files:')), false);
+});
+
+test('untracked binary-only scope: no row, trailer in payload, exact structure', async () => {
+  const { buildReviewerPayload } = await loadPayload();
+  const repo = createGitFixture('payload-bin-only');
+  writeFileSync(join(repo, 'blob.bin'), Buffer.from([0, 1]));
+  const result = buildReviewerPayload({ pluginRoot, repo, changeState: 'unstaged', diff: 'D' });
+  const prompt = readFileSync(result.promptFile, 'utf8');
+  assert.equal(prompt.includes('{"status":"untracked","path":"blob.bin"}'), false, 'no manifest row');
+  assert.match(prompt, /"binary_omitted":1/);
+  assert.deepEqual(result.binaryOmitted.omittedAt, { builder: 1, serializer: 0 });
+  assert.equal(result.binaryOmitted.listed, 1);
+  assert.equal(result.binaryOmitted.unlisted, 0);
+  assert.equal(result.warnings.some((warning) => warning.startsWith('change-files:')), true);
+});
+
+test('hostile binary names are escaped in the warning string', { skip: process.platform === 'win32' }, async () => {
+  const { buildReviewerPayload } = await loadPayload();
+  const repo = createGitFixture('payload-hostile-warning');
+  writeFileSync(join(repo, HOSTILE_NAME), Buffer.from([0, 1]));
+  const result = buildReviewerPayload({ pluginRoot, repo, changeState: 'unstaged', diff: 'D' });
+  const warning = result.warnings.find((entry) => entry.startsWith('change-files:'));
+  assert.ok(warning);
+  for (const banned of ['\n', ...HOSTILE_CODEPOINTS]) {
+    assert.equal(warning.includes(banned), false,
+      `raw U+${banned.codePointAt(0).toString(16)} must not reach the warning`);
+  }
+  assert.equal(warning.includes('\\u2028'), true, 'escaped spelling present');
+});
+
+test('failed and not-requested manifest states never fabricate a zero', async () => {
+  const { buildReviewerPayload } = await loadPayload();
+  let result = buildReviewerPayload({ pluginRoot, diff: 'D' }); // no changeState
+  assert.equal(result.changeFilesStatus, 'not-requested');
+  assert.equal(result.binaryOmitted, null);
+
+  const absent = join(createGitFixture('payload-absent'), 'no-such-child');
+  result = buildReviewerPayload({ pluginRoot, repo: absent, changeState: 'staged', diff: 'D' });
+  assert.equal(result.changeFilesStatus, 'failed');
+  assert.equal(result.binaryOmitted, null);
+  assert.equal(result.warnings.some((warning) =>
+    warning.startsWith('change-files construction failed (section skipped):')), true);
 });
