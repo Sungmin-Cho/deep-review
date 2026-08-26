@@ -50,6 +50,12 @@ function parseJsonLines(text) {
     .map((line) => JSON.parse(line));
 }
 
+const nulSource = Buffer.concat([
+  Buffer.from('export const SEP = "'),
+  Buffer.from([0x00]),
+  Buffer.from('";\n'),
+]);
+
 test('staged rename and copy records retain old_path and similarity score', async () => {
   const { buildChangeFiles } = await loadTarget();
   const repo = createGitFixture('rename copy 공간 Ω');
@@ -206,6 +212,7 @@ test('untracked NUL binary is dropped while high-byte text and a missing manual 
   writeFileSync(join(repo, 'high.dat'), Buffer.from([0xff, 0xfe, 0xfd]));
   let records = buildChangeFiles({ repo, changeState: 'unstaged' });
   assert.equal(paths(records).includes('binary.dat'), false);
+  assert.equal(records.omittedBinaryRecords[0].path, 'binary.dat');
   assert.equal(paths(records).includes('high.dat'), true);
 
   records = buildChangeFiles({
@@ -258,4 +265,169 @@ test('entry and byte limits emit one exact trailer and retain an oversized first
   assert.deepEqual(lines[0], longRecords[0]);
   assert.deepEqual(lines[1], { omitted: 2, truncated: true });
   assert.equal(lines.length, 2);
+});
+
+test('untracked raw-NUL text-extension file stays as a suspect row', async () => {
+  const { buildChangeFiles } = await loadTarget();
+  const repo = createGitFixture('nul-suspect-untracked');
+  writeFileSync(join(repo, 'control.mjs'), nulSource);
+  const records = buildChangeFiles({ repo, changeState: 'unstaged' });
+  const row = records.find((record) => record.path === 'control.mjs');
+  assert.ok(row, 'suspect row must be present');
+  assert.equal(row.is_binary, true);
+  assert.equal(row.binary_suspect_reason, 'text-extension');
+  assert.equal(row.binary_classified_by, 'untracked-nul-sniff');
+  assert.equal(records.omittedBinaryRecords, undefined, 'no diagnostics for suspect-only scope');
+});
+
+test('staged and clean raw-NUL text files carry git-numstat provenance', async () => {
+  const { buildChangeFiles } = await loadTarget();
+  const repo = createGitFixture('nul-suspect-tracked');
+  writeFileSync(join(repo, 'control.mjs'), nulSource);
+  git(repo, ['add', '-A']);
+  let row = buildChangeFiles({ repo, changeState: 'staged' })
+    .find((record) => record.path === 'control.mjs');
+  assert.equal(row?.binary_classified_by, 'git-numstat');
+
+  git(repo, ['commit', '-m', 'nul']);
+  const reviewBase = git(repo, ['rev-list', '--max-parents=0', 'HEAD']);
+  row = buildChangeFiles({ repo, changeState: 'clean', reviewBase })
+    .find((record) => record.path === 'control.mjs');
+  assert.equal(row?.is_binary, true);
+  assert.equal(row?.binary_classified_by, 'git-numstat');
+});
+
+test('gitattributes-forced binary text file gets git-numstat provenance without any NUL', async () => {
+  const { buildChangeFiles } = await loadTarget();
+  const repo = createGitFixture('gitattributes-binary');
+  writeFileSync(join(repo, '.gitattributes'), '*.mjs binary\n');
+  writeFileSync(join(repo, 'control.mjs'), 'export const ok = true;\n');
+  git(repo, ['add', '-A']);
+  const row = buildChangeFiles({ repo, changeState: 'staged' })
+    .find((record) => record.path === 'control.mjs');
+  assert.equal(row?.binary_suspect_reason, 'text-extension');
+  assert.equal(row?.binary_classified_by, 'git-numstat');
+});
+
+test('CRLF-configured checkout still surfaces the raw-NUL suspect row', async () => {
+  const { buildChangeFiles } = await loadTarget();
+  const repo = createGitFixture('crlf-nul');
+  git(repo, ['config', 'core.autocrlf', 'true']);
+  writeFileSync(join(repo, 'control.mjs'), Buffer.concat([
+    Buffer.from('line1\r\nconst SEP = "'), Buffer.from([0x00]), Buffer.from('";\r\n'),
+  ]));
+  git(repo, ['add', '-A']);
+  const row = buildChangeFiles({ repo, changeState: 'staged' })
+    .find((record) => record.path === 'control.mjs');
+  assert.equal(row?.binary_suspect_reason, 'text-extension');
+});
+
+test('non-text binaries become frozen builder diagnostics with terminal disposition', async () => {
+  const { buildChangeFiles } = await loadTarget();
+  const repo = createGitFixture('nul-binary-lane');
+  writeFileSync(join(repo, 'binary.dat'), Buffer.from([1, 2, 0, 3]));
+  writeFileSync(join(repo, 'high.dat'), Buffer.from([0xff, 0xfe, 0xfd]));
+  const records = buildChangeFiles({
+    repo,
+    changeState: 'unstaged',
+    filesFromZ: Buffer.from('binary.dat\0'), // second delivery, same raw path
+  });
+  assert.equal(paths(records).includes('binary.dat'), false);
+  assert.equal(paths(records).includes('high.dat'), true);
+  const lane = records.omittedBinaryRecords;
+  assert.equal(lane.length, 1, 'dedupe: one diagnostic despite double delivery');
+  assert.deepEqual({ ...lane[0] }, {
+    path: 'binary.dat',
+    status: 'untracked',            // first delivery's status wins
+    classified_by: 'untracked-nul-sniff',
+    omitted_at: 'builder',
+  });
+  assert.equal(Object.isFrozen(lane), true);
+  assert.equal(Object.isFrozen(lane[0]), true);
+  const laneDescriptor = Object.getOwnPropertyDescriptor(records, 'omittedBinaryRecords');
+  assert.equal(laneDescriptor.enumerable, false);
+  assert.equal(laneDescriptor.writable, false);
+  assert.equal(laneDescriptor.configurable, false);
+});
+
+test('suspect duplicate delivery keeps one row; absolute spelling is a second entry', async () => {
+  const { buildChangeFiles } = await loadTarget();
+  const repo = createGitFixture('suspect-dup');
+  writeFileSync(join(repo, 'control.mjs'), nulSource);
+  const absolute = join(repo, 'control.mjs');
+  const records = buildChangeFiles({
+    repo,
+    changeState: 'unstaged',
+    filesFromZ: Buffer.from(`control.mjs\0${absolute}\0`),
+  });
+  const relativeRows = records.filter((record) => record.path === 'control.mjs');
+  assert.equal(relativeRows.length, 1, 'same raw path delivered twice -> one row');
+  assert.equal(records.omittedBinaryRecords, undefined);
+  const absoluteRow = records.find((record) => record.path === absolute);
+  assert.ok(absoluteRow, 'absolute spelling is a distinct raw path (documented semantics)');
+  assert.equal(absoluteRow.binary_suspect_reason, 'text-extension');
+});
+
+test('rename, reverse-rename, copy and delete keep the text-extension signal', async () => {
+  const { buildChangeFiles } = await loadTarget();
+  const repo = createGitFixture('nul-rc-d');
+  writeFileSync(join(repo, 'control.mjs'), nulSource);
+  writeFileSync(join(repo, 'blob.bin'), Buffer.from([0, 7, 7]));
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '-m', 'seed']);
+
+  git(repo, ['mv', 'control.mjs', 'control.bin']);      // .mjs -> .bin rename
+  git(repo, ['mv', 'blob.bin', 'NEW.MJS']);             // .bin -> .MJS rename
+  const staged = buildChangeFiles({ repo, changeState: 'staged' });
+  const renamed = staged.find((record) => record.path === 'control.bin');
+  assert.equal(renamed?.binary_suspect_reason, 'text-extension', 'old_path .mjs keeps it suspect');
+  assert.equal(renamed?.old_path, 'control.mjs');
+  const reverse = staged.find((record) => record.path === 'NEW.MJS');
+  assert.equal(reverse?.binary_suspect_reason, 'text-extension', 'uppercase .MJS path is suspect');
+
+  assert.equal(renamed?.score, '100', 'rename similarity score retained');
+
+  git(repo, ['commit', '-m', 'renames']);
+  // Copy target carries the text extension itself, so the suspect signal is
+  // deterministic whether git reports A or C (a D record has no old_path, and
+  // -C on an unchanged source is not reliable - never depend on either):
+  copyFileSync(join(repo, 'control.bin'), join(repo, 'copy.mjs'));
+  git(repo, ['add', 'copy.mjs']);
+  const withCopy = buildChangeFiles({ repo, changeState: 'staged' });
+  const copied = withCopy.find((record) => record.path === 'copy.mjs');
+  assert.equal(copied?.binary_suspect_reason, 'text-extension', 'suspect via its own path, A or C alike');
+  if (copied.old_path !== undefined) assert.match(copied.old_path, /control\.bin$/);
+
+  git(repo, ['commit', '-m', 'copy']);
+  git(repo, ['rm', 'NEW.MJS']);   // D record: no old_path exists, so the
+                                  // deleted file itself must carry the text
+                                  // extension for the suspect signal
+  const withDelete = buildChangeFiles({ repo, changeState: 'staged' });
+  const deleted = withDelete.find((record) => record.path === 'NEW.MJS');
+  assert.equal(deleted?.status, 'D');
+  assert.equal(deleted?.binary_suspect_reason, 'text-extension', 'deleted suspect row kept via path');
+});
+
+test('excluded binaries reach neither rows nor diagnostics', async () => {
+  const { buildChangeFiles } = await loadTarget();
+  const repo = createGitFixture('excluded-binaries');
+  mkdirSync(join(repo, 'node_modules'), { recursive: true });
+  writeFileSync(join(repo, 'node_modules', 'x.bin'), Buffer.from([0, 1]));
+  writeFileSync(join(repo, 'a.min.js'), Buffer.from([0, 1]));
+  const records = buildChangeFiles({ repo, changeState: 'unstaged' });
+  assert.equal(paths(records).includes('a.min.js'), false);
+  assert.equal(records.omittedBinaryRecords, undefined);
+});
+
+test('includeBinary:true path gains no suspect fields and no lane property', async () => {
+  const { buildChangeFiles } = await loadTarget();
+  const repo = createGitFixture('w1-shape');
+  writeFileSync(join(repo, 'blob.bin'), Buffer.from([0, 1, 2]));
+  writeFileSync(join(repo, 'control.mjs'), nulSource);
+  const records = buildChangeFiles({ repo, changeState: 'unstaged', includeBinary: true });
+  for (const record of records) {
+    assert.equal('binary_suspect_reason' in record, false, record.path);
+    assert.equal('binary_classified_by' in record, false, record.path);
+  }
+  assert.equal(records.omittedBinaryRecords, undefined);
 });

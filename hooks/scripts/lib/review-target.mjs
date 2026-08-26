@@ -12,6 +12,7 @@ import {
   gitSync,
   splitNul,
 } from './git.mjs';
+import { isSuspectTextPath } from './text-extensions.mjs';
 
 const DEFAULT_MAX_ENTRIES = 500;
 const DEFAULT_MAX_BYTES = 65536;
@@ -195,19 +196,40 @@ export function buildChangeFiles(options = {}) {
   const limits = normalizeLimits(options);
   const rawRecords = new Map();
   const seenPathIds = new Set();
+  const omittedBinary = new Map();
   let binaryPaths = new Set();
 
-  // When `includeBinary` is false (the review/payload default) binaries are
-  // dropped exactly as before. When true (artifact discovery) they are kept and
-  // tagged `is_binary` so downstream can classify them as unsupported-binary.
+  // Default path (`includeBinary: false`): suspect text-extension binaries stay
+  // as tagged rows; every other binary becomes a builder diagnostic (first
+  // delivery wins). `includeBinary: true` keeps original tagging semantics.
   const addRecord = (rawPath, record) => {
     const pathId = rawPathId(rawPath);
     if (seenPathIds.has(pathId)) return;
     if (isExcludedPath(record.path)) return;
     const untrackedFamily = ['untracked', 'initial', 'session', 'non-git'].includes(record.status);
-    const isBinary = binaryPaths.has(pathId)
-      || (untrackedFamily && looksLikeUntrackedBinary(repo, rawPath));
-    if (isBinary && !includeBinary) return;
+    const fromNumstat = binaryPaths.has(pathId);
+    const fromSniff = !fromNumstat && untrackedFamily && looksLikeUntrackedBinary(repo, rawPath);
+    const isBinary = fromNumstat || fromSniff;
+    if (isBinary && !includeBinary) {
+      const classifiedBy = fromNumstat ? 'git-numstat' : 'untracked-nul-sniff';
+      const suspect = isSuspectTextPath(record.path)
+        || (record.old_path !== undefined && isSuspectTextPath(record.old_path));
+      if (suspect) {
+        record.is_binary = true;
+        record.binary_suspect_reason = 'text-extension';
+        record.binary_classified_by = classifiedBy;
+      } else {
+        const diagnostic = { path: record.path };
+        if (record.old_path !== undefined) diagnostic.old_path = record.old_path;
+        if (record.score !== undefined) diagnostic.score = record.score;
+        diagnostic.status = record.status;
+        diagnostic.classified_by = classifiedBy;
+        diagnostic.omitted_at = 'builder';
+        omittedBinary.set(pathId, Object.freeze(diagnostic));
+        seenPathIds.add(pathId); // terminal disposition: first delivery wins
+        return;
+      }
+    }
     if (isBinary) record.is_binary = true;
     const key = Buffer.from(rawPath);
     rawRecords.set(key, record);
@@ -271,6 +293,16 @@ export function buildChangeFiles(options = {}) {
     enumerable: false,
     writable: false,
   });
+  if (omittedBinary.size > 0) {
+    const lane = Object.freeze([...omittedBinary.values()]
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)));
+    Object.defineProperty(records, 'omittedBinaryRecords', {
+      value: lane,
+      configurable: false,
+      enumerable: false,
+      writable: false,
+    });
+  }
   return records;
 }
 
