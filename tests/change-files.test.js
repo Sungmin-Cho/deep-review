@@ -55,6 +55,14 @@ const nulSource = Buffer.concat([
   Buffer.from([0x00]),
   Buffer.from('";\n'),
 ]);
+const HOSTILE_NAME = 'a\n=====\u001b\u0085\u2028\u2029\u200e\u200f\u061c'
+  + '\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u009b\u007f'
+  + '```![x](u)"\\ignore-previous-instructions.bin';
+const HOSTILE_CODEPOINTS = [
+  '\u001b', '\u0085', '\u2028', '\u2029', '\u200e', '\u200f', '\u061c',
+  '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+  '\u2066', '\u2067', '\u2068', '\u2069', '\u009b', '\u007f',
+];
 
 test('staged rename and copy records retain old_path and similarity score', async () => {
   const { buildChangeFiles } = await loadTarget();
@@ -430,4 +438,222 @@ test('includeBinary:true path gains no suspect fields and no lane property', asy
     assert.equal('binary_classified_by' in record, false, record.path);
   }
   assert.equal(records.omittedBinaryRecords, undefined);
+});
+
+test('cap-truncated suspect rows enter the trailer under both cap kinds', async () => {
+  const { buildChangeFiles, serializeChangeFilesDetailed } = await loadTarget();
+  const repo = createGitFixture('cap-suspect');
+  writeFileSync(join(repo, 'aaa.txt'), 'a\n');
+  writeFileSync(join(repo, 'zzz.mjs'), nulSource);
+  const records = buildChangeFiles({ repo, changeState: 'unstaged' });
+
+  for (const limits of [{ maxEntries: 1, maxBytes: 65536 }, { maxEntries: 500, maxBytes: 40 }]) {
+    const { text, binaryDiagnostics } = serializeChangeFilesDetailed(records, limits);
+    const lines = parseJsonLines(text);
+    assert.equal(lines.some((line) => line.path === 'zzz.mjs'), false, 'row truncated');
+    const trailer = lines.at(-1);
+    assert.equal(trailer.binary_omitted, 1);
+    assert.deepEqual(trailer.binary_records, [{
+      path: 'zzz.mjs', status: 'untracked',
+      classified_by: 'untracked-nul-sniff', omitted_at: 'serializer',
+    }]);
+    assert.equal(lines.at(-2).truncated, true, 'generic trailer still counts it (overlap)');
+    assert.equal(binaryDiagnostics.total, 1);
+    assert.equal(binaryDiagnostics.omittedAt.serializer, 1);
+    assert.match(binaryDiagnostics.digest, /^[0-9a-f]{64}$/);
+  }
+});
+
+test('binary-only scope yields only the binary trailer', async () => {
+  const { buildChangeFiles, serializeChangeFiles } = await loadTarget();
+  const repo = createGitFixture('binary-only');
+  writeFileSync(join(repo, 'blob.bin'), Buffer.from([0, 9]));
+  const records = buildChangeFiles({ repo, changeState: 'unstaged' });
+  assert.equal(records.length, 0);
+  const lines = parseJsonLines(serializeChangeFiles(records));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].binary_omitted, 1);
+  assert.equal('truncated' in lines[0], false, 'no generic trailer without caps firing');
+});
+
+test('W1 arrays under low caps gain no binary trailer and identical bytes', async () => {
+  const { buildChangeFiles, serializeChangeFiles } = await loadTarget();
+  const repo = createGitFixture('w1-caps');
+  writeFileSync(join(repo, 'a.bin'), Buffer.from([0, 1]));
+  writeFileSync(join(repo, 'b.bin'), Buffer.from([0, 2]));
+  const records = buildChangeFiles({ repo, changeState: 'unstaged', includeBinary: true });
+  const serialized = serializeChangeFiles(records, { maxEntries: 1, maxBytes: 65536 });
+  const expected = `${JSON.stringify(records[0])}\n${JSON.stringify({ omitted: 1, truncated: true })}\n`;
+  assert.equal(serialized, expected, 'low-cap W1 bytes identical to legacy');
+});
+
+test('non-record tails past the cap keep legacy output', async () => {
+  const { serializeChangeFiles } = await loadTarget();
+  const rows = [{ status: 'M', path: 'first.txt' }, null];
+  const expected = `${JSON.stringify(rows[0])}\n${JSON.stringify({ omitted: 1, truncated: true })}\n`;
+  assert.equal(serializeChangeFiles(rows, { maxEntries: 1, maxBytes: 65536 }), expected,
+    'a null tail past the cap must not throw (legacy break semantics)');
+});
+
+test('W1 serialization is byte-identical to plain per-row JSON.stringify', async () => {
+  const { buildChangeFiles, serializeChangeFiles } = await loadTarget();
+  const repo = createGitFixture('w1-bytes');
+  writeFileSync(join(repo, 'plain.bin'), Buffer.from([0, 2]));
+  const records = buildChangeFiles({ repo, changeState: 'unstaged', includeBinary: true });
+  const expected = `${records.map((record) => JSON.stringify(record)).join('\n')}\n`;
+  assert.equal(serializeChangeFiles(records), expected);
+});
+
+test('hostile-named W1 binaries keep legacy bytes', { skip: process.platform === 'win32' }, async () => {
+  const { buildChangeFiles, serializeChangeFiles } = await loadTarget();
+  const repo = createGitFixture('w1-hostile');
+  writeFileSync(join(repo, 'bad\u2028name.bin'), Buffer.from([0, 1]));
+  const records = buildChangeFiles({ repo, changeState: 'unstaged', includeBinary: true });
+  const expected = `${records.map((record) => JSON.stringify(record)).join('\n')}\n`;
+  const serialized = serializeChangeFiles(records);
+  assert.equal(serialized, expected);
+  assert.equal(serialized.includes('\u2028'), true, 'legacy row leaves U+2028 literal');
+});
+
+test('artifact discovery descriptors are unchanged by the default-path fields', async () => {
+  const { discoverArtifacts } = await import('../hooks/scripts/lib/artifact-discover.mjs');
+  const repo = createGitFixture('w1-descriptors');
+  writeFileSync(join(repo, 'blob.bin'), Buffer.from([0, 1]));
+  writeFileSync(join(repo, 'control.mjs'), nulSource);
+  const descriptors = discoverArtifacts({ repo, changeState: 'unstaged' });
+  const binary = descriptors.find((descriptor) => descriptor.path === 'blob.bin');
+  assert.equal(binary.is_binary, true);
+  assert.equal(binary.payload_strategy, 'metadata-only');
+  for (const descriptor of descriptors) {
+    assert.equal('binary_suspect_reason' in descriptor, false, descriptor.path);
+  }
+});
+
+test('row lane keeps legacy encoding for hostile names; trailer hardens them', async () => {
+  const { serializeChangeFilesDetailed } = await loadTarget();
+  // Row lane (legacy): U+2028 stays literal in row output.
+  const rows = serializeChangeFilesDetailed([{ status: 'M', path: HOSTILE_NAME }], {});
+  assert.equal(rows.text.includes('\u2028'), true, 'rows keep plain JSON.stringify');
+  // Trailer lane (hardened):
+  const lane = [Object.freeze({
+    path: HOSTILE_NAME, status: 'untracked',
+    classified_by: 'untracked-nul-sniff', omitted_at: 'builder',
+  })];
+  const { text } = serializeChangeFilesDetailed([], {}, { omittedBinaryRecords: lane });
+  const trailerLine = text.trimEnd().split('\n').at(-1);
+  for (const banned of HOSTILE_CODEPOINTS) {
+    assert.equal(trailerLine.includes(banned), false,
+      `unescaped U+${banned.codePointAt(0).toString(16)}`);
+  }
+  assert.equal(trailerLine.includes('\n'), false, 'trailer is one line');
+  assert.equal(JSON.parse(trailerLine).binary_records[0].path, HOSTILE_NAME, 'round-trip exact');
+});
+
+test('lone-surrogate paths from invalid bytes survive the trailer round-trip', { skip: process.platform === 'win32' }, async () => {
+  const { buildChangeFiles, serializeChangeFiles, serializeChangeFilesDetailed } = await loadTarget();
+  const { decodeGitPath } = await import('../hooks/scripts/lib/git.mjs');
+  const rawName = Buffer.concat([Buffer.from('bad-'), Buffer.from([0xff]), Buffer.from('.bin')]);
+  assert.equal(decodeGitPath(rawName), 'bad-\udcff.bin', 'exact lone-surrogate decode');
+  const repo = createGitFixture('invalid-bytes');
+  try {
+    writeFileSync(Buffer.concat([Buffer.from(`${repo}/`), rawName]), Buffer.from([0, 1]));
+  } catch (error) {
+    // APFS/HFS+ reject invalid UTF-8 filenames (EILSEQ). Linux still exercises
+    // the builder; here the trailer must still round-trip the decoded path.
+    if (error.code !== 'EILSEQ') throw error;
+    const { text } = serializeChangeFilesDetailed([], {}, {
+      omittedBinaryRecords: [Object.freeze({
+        path: 'bad-\udcff.bin', status: 'untracked',
+        classified_by: 'untracked-nul-sniff', omitted_at: 'builder',
+      })],
+    });
+    const trailer = parseJsonLines(text).at(-1);
+    assert.equal(trailer.binary_omitted, 1);
+    assert.equal(trailer.binary_records[0].path, 'bad-\udcff.bin', 'exact lone-surrogate decode');
+    return;
+  }
+  const records = buildChangeFiles({ repo, changeState: 'unstaged' });
+  const trailer = parseJsonLines(serializeChangeFiles(records)).at(-1);
+  assert.equal(trailer.binary_omitted, 1);
+  assert.equal(trailer.binary_records[0].path, 'bad-\udcff.bin', 'exact lone-surrogate decode');
+});
+
+test('trailer bounds: 26 omitted lists 25; byte bound is exact; oversized entry skipped', async () => {
+  const { serializeChangeFilesDetailed } = await loadTarget();
+  const entry = (path) => Object.freeze({
+    path, status: 'untracked', classified_by: 'untracked-nul-sniff', omitted_at: 'builder',
+  });
+  const lane26 = Array.from({ length: 26 }, (_, index) =>
+    entry(`bin/${String(index).padStart(2, '0')}.bin`));
+  const capped = serializeChangeFilesDetailed([], {}, { omittedBinaryRecords: lane26 });
+  const trailer26 = parseJsonLines(capped.text).at(-1);
+  assert.equal(trailer26.binary_omitted, 26);
+  assert.equal(trailer26.binary_records.length, 25);
+  assert.equal(trailer26.binary_records_unlisted, 1);
+
+  // Exact byte boundary: construct the trailer the implementation would emit
+  // for one entry (same key order) and pad the path so line+newline lands
+  // exactly on 4096, then 4097.
+  const trailerFor = (path) => JSON.stringify({
+    binary_omitted: 1,
+    binary_classified_by: { 'git-numstat': 0, 'untracked-nul-sniff': 1 },
+    binary_omitted_at: { builder: 1, serializer: 0 },
+    binary_records: [{ path, status: 'untracked', classified_by: 'untracked-nul-sniff', omitted_at: 'builder' }],
+    binary_records_listed: 1,
+    binary_records_unlisted: 0,
+  });
+  const overhead = Buffer.byteLength(trailerFor(''), 'utf8') + 1; // + newline
+  const fitPath = 'x'.repeat(4096 - overhead);
+  const fits = serializeChangeFilesDetailed([], {}, { omittedBinaryRecords: [entry(fitPath)] });
+  assert.equal(parseJsonLines(fits.text).at(-1).binary_records.length, 1, 'exactly 4096 fits');
+  const underPath = 'x'.repeat(4096 - overhead - 1);
+  const under = serializeChangeFilesDetailed([], {}, { omittedBinaryRecords: [entry(underPath)] });
+  assert.equal(parseJsonLines(under.text).at(-1).binary_records.length, 1, '4095 fits');
+  const overPath = 'x'.repeat(4096 - overhead + 1);
+  const over = serializeChangeFilesDetailed([], {}, { omittedBinaryRecords: [entry(overPath)] });
+  const overTrailer = parseJsonLines(over.text).at(-1);
+  assert.equal(overTrailer.binary_records.length, 0, '4097 does not fit');
+  assert.equal(overTrailer.binary_omitted, 1, 'count survives');
+  assert.equal(overTrailer.binary_records_unlisted, 1);
+});
+
+test('digest is order-insensitive and field-sensitive; property boundary honored', async () => {
+  const { buildChangeFiles, serializeChangeFilesDetailed } = await loadTarget();
+  const entryA = Object.freeze({ path: 'a.bin', status: 'untracked', classified_by: 'untracked-nul-sniff', omitted_at: 'builder' });
+  const entryB = Object.freeze({ path: 'b.bin', status: 'untracked', classified_by: 'git-numstat', omitted_at: 'builder' });
+  const forward = serializeChangeFilesDetailed([], {}, { omittedBinaryRecords: [entryA, entryB] });
+  const reversed = serializeChangeFilesDetailed([], {}, { omittedBinaryRecords: [entryB, entryA] });
+  assert.equal(forward.binaryDiagnostics.digest, reversed.binaryDiagnostics.digest);
+  const mutated = serializeChangeFilesDetailed([], {}, {
+    omittedBinaryRecords: [entryA, Object.freeze({ ...entryB, status: 'session' })],
+  });
+  assert.notEqual(mutated.binaryDiagnostics.digest, forward.binaryDiagnostics.digest);
+  for (const patch of [
+    { classified_by: 'untracked-nul-sniff' }, { path: 'c.bin' },
+    { old_path: 'z.mjs' }, { omitted_at: 'serializer' },
+  ]) {
+    const variant = serializeChangeFilesDetailed([], {}, {
+      omittedBinaryRecords: [entryA, Object.freeze({ ...entryB, ...patch })],
+    });
+    assert.notEqual(variant.binaryDiagnostics.digest, forward.binaryDiagnostics.digest,
+      JSON.stringify(patch));
+  }
+  const { createHash } = await import('node:crypto');
+  const canonical = [entryA, entryB]
+    .map((entry) => JSON.stringify([
+      entry.path, entry.old_path ?? null, entry.status, entry.classified_by, entry.omitted_at,
+    ]))
+    .sort()
+    .join('\n');
+  assert.equal(forward.binaryDiagnostics.digest,
+    createHash('sha256').update(canonical, 'utf8').digest('hex'), 'canonical algorithm');
+
+  const repo = createGitFixture('property-boundary');
+  writeFileSync(join(repo, 'x.bin'), Buffer.from([0, 1]));
+  const records = buildChangeFiles({ repo, changeState: 'unstaged' });
+  const spread = [...records];
+  assert.equal(serializeChangeFilesDetailed(spread, {}).binaryDiagnostics.total, 0);
+  assert.equal(serializeChangeFilesDetailed(spread, {}, {
+    omittedBinaryRecords: records.omittedBinaryRecords,
+  }).binaryDiagnostics.total, 1);
 });
