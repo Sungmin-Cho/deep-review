@@ -1,3 +1,4 @@
+import { GROK_AUTHORIZED_MODEL } from './grok-authorization.mjs';
 import { EFFORT_ALIASES, EFFORT_LEVELS, MODEL_TIERS } from './target-taxonomy.mjs';
 import {
   maximumRisk,
@@ -236,8 +237,8 @@ function previousSupportedEffort(requested, supported) {
 // makes the catalog fire while `explicitModel` gates the throw and no
 // replacement differs from the request, landing on the omitted `--model` this
 // rule exists to eliminate. The rule below therefore keys off no source and no
-// fallback flag, and runs before either exists.
-const GROK_AUTHORIZED_MODEL = 'grok-4.6';
+// fallback flag, and runs before either exists. The authorized model string
+// is the shared binding from grok-authorization.mjs, not a second literal.
 const GROK_DECLARED_EFFORTS = Object.freeze(['low', 'medium', 'high']);
 const GROK_EFFORT_FLOOR = 'low';
 const GROK_EFFORT_CEILING = 'high';
@@ -595,7 +596,10 @@ export function renderRoutingExplanation(plan) {
 // rows today's matrix cannot produce. Those rows are the ones a future profile
 // change would reach first, so they are testable at the unit that owns them
 // rather than only where they happen to be reachable.
-export const __testing = Object.freeze({ normalizeAutomaticGrokEffort });
+export const __testing = Object.freeze({
+  GROK_AUTHORIZED_MODEL,
+  normalizeAutomaticGrokEffort,
+});
 
 // Keep imports live and enforce canonical vocabulary ownership at module load.
 if (!MODEL_TIERS.length || !EFFORT_LEVELS.length) throw new Error('routing vocabulary unavailable');

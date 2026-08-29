@@ -42,6 +42,7 @@ import { prepareExternalPrivacy } from './lib/agy-privacy.mjs';
 import { ARTIFACT_GATE_ERROR_CODES, parseArtifactGate } from './document-readiness.mjs';
 import { loadExecutionPlan, parseExecutionRouteJson } from './lib/execution-plan.mjs';
 import { captureFingerprint } from './lib/fingerprint.mjs';
+import { GROK_AUTHORIZED_MODEL } from './lib/grok-authorization.mjs';
 import { validateGrokCompatibilityCarrier } from './lib/grok-compatibility-carrier.mjs';
 import {
   GROK_INVALID_LIFECYCLE,
@@ -62,7 +63,7 @@ import { buildReportContract } from './lib/report-contract.mjs';
 import { atomicWriteFile, resolvePluginRoot } from './lib/runtime-context.mjs';
 import { parseReviewerReport } from './review-synthesis.mjs';
 
-export const GROK_AUTHORIZED_MODEL = 'grok-4.6';
+export { GROK_AUTHORIZED_MODEL };
 export const GROK_SUPPORTED_EFFORTS = Object.freeze(['low', 'medium', 'high']);
 
 const DEFAULT_MAX_TURNS = 6;
