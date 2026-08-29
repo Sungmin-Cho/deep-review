@@ -4,6 +4,24 @@
 
 All notable changes to deep-review are documented here. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1] — 2026-08-29
+
+### Added
+- A bidirectional authorization oracle: the Grok router gate and the
+  Grok bridge argv assertion must name the same model, in both
+  directions.
+
+### Changed
+- `GROK_AUTHORIZED_MODEL` is defined once in
+  `hooks/scripts/lib/grok-authorization.mjs` and imported by both D11
+  gates, so a one-sided model bump cannot leave the two authorities
+  disagreeing (Sungmin-Cho/deep-review#58).
+
+### Security
+- Drift between the two exclusive Grok model gates is now a test
+  failure rather than an all-Grok `ERROR_UNSUPPORTED_MODEL` refusal
+  found only at runtime.
+
 ## [2.8.0] — 2026-08-26
 
 ### Added

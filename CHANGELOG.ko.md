@@ -4,6 +4,22 @@
 
 deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)와 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)을 따릅니다.
 
+## [2.8.1] — 2026-08-29
+
+### 추가
+- 양방향 인가 오라클: Grok 라우터 게이트와 Grok 브리지 argv 단언이
+  같은 모델을, 양쪽 방향으로, 가리켜야 한다.
+
+### 변경
+- `GROK_AUTHORIZED_MODEL`은 `hooks/scripts/lib/grok-authorization.mjs`에
+  한 번만 정의되고 두 D11 게이트가 그 바인딩을 import한다. 한쪽만
+  모델 문자열을 바꾸면 두 인가 주체가 어긋날 수 없다
+  (Sungmin-Cho/deep-review#58).
+
+### 보안
+- 두 전용 Grok 모델 게이트의 드리프트는 이제 런타임에서야 드러나는
+  전면 `ERROR_UNSUPPORTED_MODEL` 거절이 아니라 테스트 실패다.
+
 ## [2.8.0] — 2026-08-26
 
 ### 추가

@@ -34,6 +34,7 @@ const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
 const routerRelative = 'hooks/scripts/lib/model-router.mjs';
 const routerUrl = pathToFileURL(path.join(root, routerRelative)).href;
+const bridgeUrl = pathToFileURL(path.join(root, 'hooks/scripts/run-grok-reviewer.mjs')).href;
 const registryUrl = pathToFileURL(path.join(root, 'hooks/scripts/lib/capability-registry.mjs')).href;
 const taxonomyUrl = pathToFileURL(path.join(root, 'hooks/scripts/lib/target-taxonomy.mjs')).href;
 
@@ -208,6 +209,27 @@ test('the authorized model is accepted from every source, so the rule is not a b
     assert.equal(route.resolved.model, AUTHORIZED_MODEL, source);
     assert.notEqual(route.resolved.effort, null, source);
   }
+});
+
+// The two D11 gates must name the same model. A private router copy that
+// drifted from the bridge would refuse every request: the router would
+// accept only its own value and the argv assertion would accept only the
+// bridge's. Equality in both directions is the lock that makes adding a
+// second spelling fail, the same shape as the document-readiness oracle.
+test('the router and the bridge authorize the same Grok model in both directions', async () => {
+  const { GROK_AUTHORIZED_MODEL: fromBridge, assertAuthorizedGrokModel } = await import(bridgeUrl);
+  const { routeReviewer, __testing } = await import(routerUrl);
+  const fromRouter = __testing.GROK_AUTHORIZED_MODEL;
+
+  assert.equal(fromRouter, fromBridge);
+  assert.equal(fromBridge, fromRouter);
+
+  const routed = routeReviewer(applySource(await grokRequest(), 'cli-reviewer', { model: fromBridge }));
+  assert.equal(routed.resolved.model, fromBridge);
+  assert.equal(assertAuthorizedGrokModel(routed.resolved.model), fromRouter);
+
+  const automatic = routeReviewer(await grokRequest());
+  assert.equal(assertAuthorizedGrokModel(automatic.resolved.model), fromBridge);
 });
 
 test('E1: every non-auto source rejects an out-of-band effort with and without --allow-fallback', async () => {
