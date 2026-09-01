@@ -1414,6 +1414,86 @@ test('Claude bridge --help documents the optional execution source pair (T2)', (
   );
 });
 
+function documentedCodexRoute(reviewerId) {
+  return {
+    protocol_version: '3.0',
+    reviewer_id: reviewerId,
+    provider: 'codex',
+    adapter_id: 'codex-cli',
+    assignment_role: reviewerId === 'codex-adversarial' ? 'adversarial' : 'standard',
+    rubric_id: reviewerId === 'codex-adversarial' ? 'adversarial-v1' : 'standard-v1',
+    wave: 1,
+    required: true,
+    selection_reason: 'T3 documented command-line fixture',
+    resolved: { model: 'explicit/model Ω', effort: 'high' },
+    artifact_phase: 'implementation',
+    risk: 'low',
+    document_review_mode: 'full-readiness',
+  };
+}
+
+test('Codex bridge CLI runs the documented §4.2 execution-route-json command line (T3)', () => {
+  const root = workspace('codex-cli-documented');
+  const projectRoot = codexProject(root);
+  const binary = fakeCodexCli(root);
+  mkdirSync(join(projectRoot, '.deep-review', 'tmp'), { recursive: true });
+  const outputFile = join(projectRoot, '.deep-review', 'tmp', 'codex-review.md');
+  const promptFile = join(root, 'payload.txt');
+  const log = join(root, 'argv.jsonl');
+  writeFileSync(promptFile, 'DOCUMENTED ROUTE PAYLOAD');
+
+  const run = spawnSync(process.execPath, [
+    codexBridgePath,
+    '--project-root', projectRoot,
+    '--plugin-root', pluginRoot,
+    '--prompt-file', promptFile,
+    '--execution-route-json', JSON.stringify(documentedCodexRoute('codex-review')),
+    '--reviewer-id', 'codex-review',
+    '--output', outputFile,
+    '--timeout-seconds', '900',
+    '--binary', binary,
+  ], {
+    cwd: root,
+    env: { ...process.env, FAKE_LOG: log },
+    encoding: 'utf8',
+    shell: false,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(readFileSync(`${outputFile}.status`, 'utf8'), 'success\n');
+  assert.equal(rows(log).length, 1);
+});
+
+test('Codex bridge CLI refuses --output outside PROJECT_ROOT (T3)', () => {
+  const root = workspace('codex-cli-outside-output');
+  const projectRoot = codexProject(root);
+  const binary = fakeCodexCli(root);
+  const outputFile = join(root, 'outside-result.md');
+  const promptFile = join(root, 'payload.txt');
+  const log = join(root, 'argv.jsonl');
+  writeFileSync(promptFile, 'OUTSIDE OUTPUT');
+
+  const run = spawnSync(process.execPath, [
+    codexBridgePath,
+    '--project-root', projectRoot,
+    '--plugin-root', pluginRoot,
+    '--prompt-file', promptFile,
+    '--execution-route-json', JSON.stringify(documentedCodexRoute('codex-adversarial')),
+    '--reviewer-id', 'codex-adversarial',
+    '--output', outputFile,
+    '--timeout-seconds', '900',
+    '--binary', binary,
+  ], {
+    cwd: root,
+    env: { ...process.env, FAKE_LOG: log },
+    encoding: 'utf8',
+    shell: false,
+  });
+  assert.notEqual(run.status, 0, run.stdout);
+  assert.match(run.stderr, /refusing to write outside the repository root/u);
+  assert.equal(existsSync(log), false);
+  assert.equal(existsSync(outputFile), false);
+});
+
 // ---------------------------------------------------------------------------
 // SLICE-010a / T-PROBE-8 — the PUBLIC half of D22.
 //

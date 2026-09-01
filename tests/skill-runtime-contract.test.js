@@ -308,6 +308,10 @@ test('Codex bridge and host assertions route both roles without companion fallba
     );
   }
   assert.doesNotMatch(combined, /--kind|--companion|--focus-file|index exposure/iu);
+  assert.match(
+    execution,
+    /--reviewer-id codex-adversarial --output OUTPUT_FILE --timeout-seconds 900\n```\n\nOUTPUT_FILE must resolve inside PROJECT_ROOT[\s\S]{0,240}\.deep-review\/tmp\//u,
+  );
 });
 
 test('public review skill documents every Phase 2 routing override', () => {

@@ -408,6 +408,10 @@ node {plugin_root}/hooks/scripts/run-codex-reviewer.mjs --project-root PROJECT_R
 node {plugin_root}/hooks/scripts/run-codex-reviewer.mjs --project-root PROJECT_ROOT --plugin-root PLUGIN_ROOT_ABS --prompt-file PROMPT_FILE --execution-route-json EXECUTION_ROUTE_JSON --reviewer-id codex-adversarial --output OUTPUT_FILE --timeout-seconds 900
 ```
 
+OUTPUT_FILE must resolve inside PROJECT_ROOT — the isolated write session
+refuses writes outside the repository. The conventional path is
+`.deep-review/tmp/`.
+
 The bridge reads each route's resolved model/effort and applies the same
 explicit runtime-rejection-only single-retry rule.
 
