@@ -88,11 +88,70 @@ test('a generated document-phase gate section round-trips through the canonical 
   assert.equal(parsed.findings[0].severity, 'warning');
 });
 
-test('exactly one layer injects the gate: build-reviewer-payload.mjs stays clean of D16 tokens', async () => {
-  const { readFileSync } = await import('node:fs');
-  const source = readFileSync(join(pluginRoot, 'hooks', 'scripts', 'build-reviewer-payload.mjs'), 'utf8');
-  for (const token of ['Artifact Gate', 'parseArtifactGate', 'buildReportContract', 'artifact_gate']) {
-    assert.equal(source.includes(token), false, `build-reviewer-payload.mjs must not inject ${token}`);
+test('payload builder injects D16 only for claude/codex routes (T8)', async () => {
+  const { pathToFileURL } = await import('node:url');
+  const { buildReviewerPayload } = await import(
+    pathToFileURL(join(pluginRoot, 'hooks', 'scripts', 'build-reviewer-payload.mjs')).href
+  );
+  const { mkdtempSync, writeFileSync, readFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join: pathJoin } = await import('node:path');
+  const temp = mkdtempSync(pathJoin(tmpdir(), 'deep-review-d16-matrix-'));
+  const planFor = (reviewerId, provider, adapterId, role) => {
+    const path = pathJoin(temp, `${reviewerId}.json`);
+    writeFileSync(path, JSON.stringify({
+      protocol_version: '3.0',
+      reviewer_strategy: 'adaptive',
+      shadow_mode: false,
+      artifact_phase: 'implementation',
+      risk: 'low',
+      document_review_mode: 'full-readiness',
+      progress: 'initial',
+      minimum_reviewers: 1,
+      planned_reviewers: 1,
+      maximum_reviewers: 4,
+      provider_family_minimum: 1,
+      max_expansion_waves: 1,
+      candidate_reviewers: [{
+        reviewer_id: reviewerId,
+        provider,
+        adapter_id: adapterId,
+        assignment_roles: [role],
+        last_status: 'success',
+      }],
+      routes: [{
+        reviewer_id: reviewerId,
+        provider,
+        adapter_id: adapterId,
+        assignment_role: role,
+        rubric_id: `${role}-v1`,
+        wave: 1,
+        required: false,
+        selection_reason: 'T8 matrix',
+        resolved: { model: null, effort: 'high' },
+        artifact_phase: 'implementation',
+        risk: 'low',
+        document_review_mode: 'full-readiness',
+      }],
+      initial_reviewer_ids: [reviewerId],
+      required_reviewer_ids: [],
+    }));
+    return path;
+  };
+  const injected = ['claude-opus', 'codex-review', 'codex-adversarial'];
+  for (const reviewerId of injected) {
+    const provider = reviewerId === 'claude-opus' ? 'claude' : 'codex';
+    const adapterId = reviewerId === 'claude-opus' ? 'claude-cli' : 'codex-native-generic';
+    const role = reviewerId === 'codex-adversarial' ? 'adversarial' : 'standard';
+    const result = buildReviewerPayload({
+      pluginRoot,
+      routingPlan: planFor(reviewerId, provider, adapterId, role),
+      reviewerId,
+      diff: 'DIFF',
+    });
+    const prompt = readFileSync(result.promptFile, 'utf8');
+    assert.match(prompt, /===== OUTPUT CONTRACT =====/);
+    assert.ok(prompt.trimEnd().endsWith('============================================================'));
   }
 });
 

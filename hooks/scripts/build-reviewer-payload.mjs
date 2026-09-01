@@ -18,6 +18,7 @@ import {
   rubricTextForRole,
 } from './lib/assignment-rubrics.mjs';
 import { verifyReadinessReceipt } from './document-readiness.mjs';
+import { buildReportContract } from './lib/report-contract.mjs';
 
 const DOCTRINE_WARNING = 'fp-doctrine extraction failed (injection skipped)';
 const PRIOR_ROUNDS_TITLE = 'PRIOR ROUND CONTEXT (advisory — re-verify, never suppress)';
@@ -31,7 +32,13 @@ const SECTION_ORDER = [
   ['PROJECT RULES / CONTRACT / HEALTH', 'context'],
   [PRIOR_ROUNDS_TITLE, 'priorRounds'],
   ['DIFF UNDER REVIEW', 'diff'],
+  ['OUTPUT CONTRACT', 'reportContract'],
 ];
+const CONTRACT_PAYLOAD_REVIEWERS = new Set([
+  'claude-opus',
+  'codex-review',
+  'codex-adversarial',
+]);
 
 function trustedAssignmentSection(options) {
   const source = options.executionRouteJson ?? options.routingPlan;
@@ -289,6 +296,12 @@ export function buildReviewerPayload(options = {}) {
   const context = contentFromOption(options, 'context', 'contextFile');
   const diff = contentFromOption(options, 'diff', 'diffFile');
   const priorRounds = ingestPriorRounds(options, warnings);
+  const reportContract = CONTRACT_PAYLOAD_REVIEWERS.has(options.reviewerId)
+    ? buildReportContract({
+      artifactPhase: assignment.executionPlan?.artifactPhase ?? null,
+      documentReviewMode: assignment.executionPlan?.documentReviewMode ?? null,
+    })
+    : '';
   const payload = assembleReviewerPayload({
     assignment: assignment.content,
     readinessReceipt: readinessReceipt.content,
@@ -297,6 +310,7 @@ export function buildReviewerPayload(options = {}) {
     context,
     priorRounds,
     diff,
+    reportContract,
   });
   const promptFile = makeSecureTempPath('deep-review-prompt', '.md');
   atomicWriteFile(promptFile, payload, { encoding: 'utf8', mode: 0o600 });
