@@ -25,10 +25,11 @@ import {
   fixtureRootFor,
 } from './helpers/git-fixture.js';
 import { writeContainedFile } from '../hooks/scripts/lib/runtime-context.mjs';
-import { runClaudeReviewer } from '../hooks/scripts/run-claude-reviewer.mjs';
+import { parseCli as parseClaudeCli, runClaudeReviewer } from '../hooks/scripts/run-claude-reviewer.mjs';
 import { parseCli as parseCodexCli, runCodexReviewer } from '../hooks/scripts/run-codex-reviewer.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const claudeBridgePath = join(pluginRoot, 'hooks', 'scripts', 'run-claude-reviewer.mjs');
 const codexBridgePath = join(pluginRoot, 'hooks', 'scripts', 'run-codex-reviewer.mjs');
 
 function workspace(label) {
@@ -1343,6 +1344,74 @@ test('Codex bridge --help documents both execution sources (T1)', () => {
     /--routing-plan FILE \| --execution-route-json JSON/u,
   );
   assert.match(run.stdout, /--reviewer-id codex-review\|codex-adversarial/u);
+});
+
+test('Claude bridge parseCli pairs an optional execution source with --reviewer-id (T2)', () => {
+  const routeJson = '{"reviewer_id":"claude-opus"}';
+  const sourceError = /exactly one execution source \(--routing-plan or --execution-route-json\) and --reviewer-id must be provided together/u;
+
+  // Source 0 is the shadow-plan path and stays legal.
+  assert.deepEqual(parseClaudeCli([]), {});
+  assert.deepEqual(
+    parseClaudeCli(['--execution-route-json', routeJson, '--reviewer-id', 'claude-opus']),
+    { executionRouteJson: routeJson, reviewerId: 'claude-opus' },
+  );
+  assert.deepEqual(
+    parseClaudeCli(['--routing-plan', 'plan.json', '--reviewer-id', 'claude-opus']),
+    { routingPlan: 'plan.json', reviewerId: 'claude-opus' },
+  );
+
+  assert.deepEqual(
+    parseClaudeCli([
+      '--routing-plan', 'first.json',
+      '--routing-plan', 'second.json',
+      '--reviewer-id', 'claude-opus',
+    ]),
+    { routingPlan: 'second.json', reviewerId: 'claude-opus' },
+  );
+
+  assert.throws(() => parseClaudeCli(['--reviewer-id', 'claude-opus']), sourceError);
+  assert.throws(
+    () => parseClaudeCli(['--execution-route-json', routeJson]),
+    sourceError,
+  );
+  assert.throws(
+    () => parseClaudeCli(['--routing-plan', 'plan.json']),
+    sourceError,
+  );
+  assert.throws(
+    () => parseClaudeCli([
+      '--routing-plan', 'plan.json',
+      '--execution-route-json', routeJson,
+      '--reviewer-id', 'claude-opus',
+    ]),
+    sourceError,
+  );
+
+  assert.throws(
+    () => parseClaudeCli(['--routing-plan', '', '--reviewer-id', 'claude-opus']),
+    /--routing-plan must be non-empty/u,
+  );
+  assert.throws(
+    () => parseClaudeCli(['--execution-route-json', '', '--reviewer-id', 'claude-opus']),
+    /--execution-route-json must be non-empty/u,
+  );
+  assert.throws(
+    () => parseClaudeCli(['--routing-plan', 'plan.json', '--reviewer-id', '']),
+    /--reviewer-id must be non-empty/u,
+  );
+});
+
+test('Claude bridge --help documents the optional execution source pair (T2)', () => {
+  const run = spawnSync(process.execPath, [claudeBridgePath, '--help'], {
+    encoding: 'utf8',
+    shell: false,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(
+    run.stdout,
+    /\[\(--routing-plan FILE \| --execution-route-json JSON\) --reviewer-id ID\]/u,
+  );
 });
 
 // ---------------------------------------------------------------------------
