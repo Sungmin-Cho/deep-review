@@ -246,14 +246,15 @@ export function evaluateReviewerAttempt({
       issues: null,
     };
   }
-  const parsed = parseReviewerReport(output, { strict: true });
-  if (!parsed) {
+  const diagnosed = diagnoseReviewerReport(output, { strict: true });
+  if (!diagnosed.ok) {
     return {
       ...(reviewerId ? { reviewer_id: reviewerId } : {}),
       role,
       output_digest: outputDigest,
       included: false,
       exclusion: 'malformed_or_empty_result',
+      exclusion_detail: diagnosed.failure,
       verdict: null,
       issues: null,
     };
@@ -264,7 +265,11 @@ export function evaluateReviewerAttempt({
     output_digest: outputDigest,
     included: true,
     exclusion: null,
-    ...parsed,
+    verdict: diagnosed.verdict,
+    issues: diagnosed.issues,
+    ...(Array.isArray(diagnosed.tolerances) && diagnosed.tolerances.length > 0
+      ? { tolerances: diagnosed.tolerances }
+      : {}),
   };
 }
 
@@ -311,7 +316,13 @@ export function synthesizeReviewAttempts(attempts, consensus) {
   const included = attempts.filter((attempt) => attempt?.included === true);
   const exclusions = attempts
     .filter((attempt) => attempt?.included !== true)
-    .map((attempt) => ({ role: attempt?.role || 'unknown', reason: attempt?.exclusion || 'not_successful' }));
+    .map((attempt) => {
+      const row = { role: attempt?.role || 'unknown', reason: attempt?.exclusion || 'not_successful' };
+      if (typeof attempt?.exclusion_detail === 'string' && attempt.exclusion_detail.length > 0) {
+        row.detail = attempt.exclusion_detail;
+      }
+      return row;
+    });
   if (included.length === 0) {
     return {
       status: 'operational_failure',
@@ -639,6 +650,23 @@ function providerFamilyCount(attempts, routingPlan) {
  * original evidence and its canonical rubric, then calls this function again
  * with every attempt and `expansionWavesUsed: 1`.
  */
+function admittedWithTolerancesProvenance(attempts) {
+  const rows = (Array.isArray(attempts) ? attempts : [])
+    .filter((attempt) => (
+      attempt?.included === true
+      && Array.isArray(attempt.tolerances)
+      && attempt.tolerances.length > 0
+    ))
+    .map((attempt) => ({
+      reviewer_id: attemptReviewerId(attempt),
+      tolerances: attempt.tolerances,
+    }))
+    .sort((left, right) => (
+      canonicalReviewerIndex(left.reviewer_id) - canonicalReviewerIndex(right.reviewer_id)
+    ));
+  return rows.length > 0 ? { admitted_with_tolerances: rows } : {};
+}
+
 export function synthesizeReviewRound({
   attempts,
   consensus,
@@ -649,6 +677,7 @@ export function synthesizeReviewRound({
   dispatch = null,
 } = {}) {
   if (!Array.isArray(attempts)) throw new TypeError('attempts must be an array');
+  const toleranceProvenance = admittedWithTolerancesProvenance(attempts);
   if (!routingPlan || routingPlan.protocol_version !== '3.0') {
     throw new Error('adaptive synthesis requires routing plan protocol 3.0');
   }
@@ -675,6 +704,7 @@ export function synthesizeReviewRound({
       operational_failure_reason: routingShortfalls.includes(UNSUPPORTED_GROK_CONTAINMENT)
         ? UNSUPPORTED_GROK_CONTAINMENT
         : null,
+      ...toleranceProvenance,
     };
   }
   if (routingIdentityError(routingPlan)) {
@@ -686,6 +716,7 @@ export function synthesizeReviewRound({
       phase6_allowed: false,
       exclusions: [],
       error: 'invalid_routing_plan_identity',
+      ...toleranceProvenance,
     };
   }
   const hasMaterializedWave2 = (routingPlan.routes || []).some((route) => route.wave === 2);
@@ -698,6 +729,7 @@ export function synthesizeReviewRound({
       phase6_allowed: false,
       exclusions: [],
       error: 'invalid_routing_plan_identity',
+      ...toleranceProvenance,
     };
   }
   const effectiveExpansionWavesUsed = hasMaterializedWave2
@@ -745,6 +777,7 @@ export function synthesizeReviewRound({
       phase6_allowed: false,
       exclusions: [],
       error: 'invalid_reviewer_identity',
+      ...toleranceProvenance,
     };
   }
   const shadowMode = routingPlan.shadow_mode === true;
@@ -767,6 +800,7 @@ export function synthesizeReviewRound({
         exclusions: [],
         error: 'invalid_readiness_admission',
         readiness_admission_error: error.reason || 'dispatch_malformed',
+        ...toleranceProvenance,
       };
     }
   }
@@ -790,6 +824,7 @@ export function synthesizeReviewRound({
       exclusions: synthesis.exclusions || [],
       error: 'required_reviewer_unavailable',
       missing_required_reviewers: missingHardRoutes.map((route) => route.reviewer_id),
+      ...toleranceProvenance,
     };
   }
   const reasons = shadowMode ? [] : expansionReasons({
@@ -848,6 +883,7 @@ export function synthesizeReviewRound({
         next_assignment: replacement,
         expanded_routing_plan: expandedRoutingPlan,
         exclusions: synthesis.exclusions || [],
+        ...toleranceProvenance,
       };
     }
     expansionRejected = 'no_unused_candidate';
@@ -868,6 +904,7 @@ export function synthesizeReviewRound({
       exclusions: synthesis.exclusions || [],
       error: 'critical_reviewer_floor',
       ...(expansionRejected ? { expansion_rejected: expansionRejected } : {}),
+      ...toleranceProvenance,
     };
   }
   if (synthesis.status !== 'reviewed') {
@@ -875,6 +912,7 @@ export function synthesizeReviewRound({
       ...synthesis,
       needs_expansion: false,
       ...(expansionRejected ? { expansion_rejected: expansionRejected } : {}),
+      ...toleranceProvenance,
     };
   }
 
@@ -917,6 +955,7 @@ export function synthesizeReviewRound({
       : {}),
     ...(documentBlocked ? { document_blocked: true } : {}),
     ...(expansionRejected ? { expansion_rejected: expansionRejected } : {}),
+    ...toleranceProvenance,
   };
 }
 

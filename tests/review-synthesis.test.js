@@ -572,8 +572,15 @@ test('raw canonical reviewer admission excludes missing or count-mismatched Code
         });
         assert.equal(evaluated.included, false);
         assert.equal(evaluated.exclusion, 'malformed_or_empty_result');
+        assert.equal(
+          evaluated.exclusion_detail,
+          failure === 'missing Code Review'
+            ? 'section_headings_invalid'
+            : 'count_mismatch:warning',
+        );
         assert.equal(evaluated.verdict, null);
         assert.equal(evaluated.issues, null);
+        assert.equal(Object.hasOwn(evaluated, 'tolerances'), false);
       });
     }
   }
@@ -618,6 +625,9 @@ test('synthesis CLI excludes malformed raw reports from N_actual and Phase 6', a
         assert.deepEqual(result.exclusions, [{
           role,
           reason: 'malformed_or_empty_result',
+          detail: failure === 'missing Code Review'
+            ? 'section_headings_invalid'
+            : 'count_mismatch:info',
         }]);
       });
     }
@@ -1923,4 +1933,182 @@ test('T-READY-8 final synthesis seals trusted attempt and route evidence for rea
   });
   assert.equal(undispatched.status, 'reviewed');
   assert.equal(Object.hasOwn(undispatched, 'readiness_admission'), false);
+});
+
+function toleratedAttempt(role) {
+  return {
+    reviewer_id: role,
+    role,
+    output_digest: createHash('sha256').update(`review:${role}`).digest('hex'),
+    included: true,
+    exclusion: null,
+    verdict: 'APPROVE',
+    issues: { critical: 0, warning: 0, info: 0 },
+    tolerances: ['missing_code_review_heading'],
+  };
+}
+
+test('evaluateReviewerAttempt carries exclusion_detail and tolerances (T6)', async () => {
+  const { evaluateReviewerAttempt, diagnoseReviewerReport } = await import(synthesisUrl);
+  const fingerprint = { mode: 'hybrid', digest: 'unchanged', error: null };
+  const missingContainer = canonicalReviewerReport().replace('\n## Code Review\n', '\n');
+  const admitted = evaluateReviewerAttempt({
+    reviewer_id: 'claude-opus',
+    role: 'claude-opus',
+    output: missingContainer,
+    beforeFingerprint: fingerprint,
+    afterFingerprint: fingerprint,
+  });
+  assert.equal(admitted.included, true);
+  assert.deepEqual(admitted.tolerances, ['missing_code_review_heading']);
+  assert.equal(Object.hasOwn(admitted, 'exclusion_detail'), false);
+
+  const mismatched = evaluateReviewerAttempt({
+    reviewer_id: 'claude-opus',
+    role: 'claude-opus',
+    output: missingContainer,
+    beforeFingerprint: fingerprint,
+    afterFingerprint: { mode: 'hybrid', digest: 'changed', error: null },
+  });
+  assert.equal(mismatched.exclusion, 'fingerprint_mismatch');
+  assert.equal(Object.hasOwn(mismatched, 'exclusion_detail'), false);
+
+  assert.notEqual(diagnoseReviewerReport('not a report').failure, 'invalid_encoding');
+  assert.notEqual(diagnoseReviewerReport('\uFFFD').failure, 'invalid_encoding');
+});
+
+test('synthesizeReviewRound attaches admitted_with_tolerances on every return (T6)', async () => {
+  const { synthesizeReviewRound } = await import(synthesisUrl);
+  const provenance = {
+    admitted_with_tolerances: [
+      { reviewer_id: 'claude-opus', tolerances: ['missing_code_review_heading'] },
+      { reviewer_id: 'codex-review', tolerances: ['missing_code_review_heading'] },
+    ],
+  };
+  const reversed = [toleratedAttempt('codex-review'), toleratedAttempt('claude-opus')];
+
+  const operational = synthesizeReviewRound({
+    attempts: reversed,
+    routingPlan: routingPlan({ operational_failure: true, shortfalls: ['denied'] }),
+  });
+  assert.equal(operational.error, 'routing_plan_operational_failure');
+  assert.deepEqual(operational.admitted_with_tolerances, provenance.admitted_with_tolerances);
+
+  const planIdentity = synthesizeReviewRound({
+    attempts: reversed,
+    routingPlan: routingPlan({ routes: [] }),
+  });
+  assert.equal(planIdentity.error, 'invalid_routing_plan_identity');
+  assert.deepEqual(planIdentity.admitted_with_tolerances, provenance.admitted_with_tolerances);
+
+  const waveIdentity = synthesizeReviewRound({
+    attempts: reversed,
+    routingPlan: routingPlan(),
+    expansionWavesUsed: 1,
+  });
+  assert.equal(waveIdentity.error, 'invalid_routing_plan_identity');
+  assert.deepEqual(waveIdentity.admitted_with_tolerances, provenance.admitted_with_tolerances);
+
+  const reviewerIdentity = synthesizeReviewRound({
+    attempts: reversed.map((row, index) => (
+      index === 0 ? { ...row, role: 'codex-adversarial' } : row
+    )),
+    routingPlan: routingPlan(),
+  });
+  assert.equal(reviewerIdentity.error, 'invalid_reviewer_identity');
+  assert.deepEqual(reviewerIdentity.admitted_with_tolerances, provenance.admitted_with_tolerances);
+
+  const readiness = synthesizeReviewRound({
+    attempts: reversed,
+    consensus: { findings: [] },
+    routingPlan: routingPlan(),
+    dispatch: { round_id: 'round-1', records: [] },
+  });
+  assert.equal(readiness.error, 'invalid_readiness_admission');
+  assert.deepEqual(readiness.admitted_with_tolerances, provenance.admitted_with_tolerances);
+
+  const required = synthesizeReviewRound({
+    attempts: [
+      toleratedAttempt('claude-opus'),
+      attempt('codex-review', { included: false, exclusion: 'privacy_declined' }),
+    ],
+    routingPlan: routingPlan({
+      required_reviewer_ids: ['codex-review'],
+      routes: baseRoutes().map((route) => (
+        route.reviewer_id === 'codex-review'
+          ? {
+            ...route,
+            required: true,
+            selection_reason: 'explicit reviewer override requires this canonical reviewer',
+          }
+          : route
+      )),
+    }),
+  });
+  assert.equal(required.error, 'required_reviewer_unavailable');
+  assert.deepEqual(required.admitted_with_tolerances, [
+    { reviewer_id: 'claude-opus', tolerances: ['missing_code_review_heading'] },
+  ]);
+
+  const expanding = synthesizeReviewRound({
+    attempts: reversed,
+    consensus: { findings: [] },
+    routingPlan: routingPlan(),
+    readinessMismatch: true,
+  });
+  assert.equal(expanding.status, 'needs_expansion');
+  assert.deepEqual(expanding.admitted_with_tolerances, provenance.admitted_with_tolerances);
+
+  const floor = synthesizeReviewRound({
+    attempts: reversed,
+    consensus: { findings: [] },
+    routingPlan: routingPlan({
+      artifact_phase: 'implementation',
+      risk: 'critical',
+      planned_reviewers: 3,
+      minimum_reviewers: 3,
+      max_expansion_waves: 0,
+    }),
+  });
+  assert.equal(floor.error, 'critical_reviewer_floor');
+  assert.deepEqual(floor.admitted_with_tolerances, provenance.admitted_with_tolerances);
+
+  const consensus = synthesizeReviewRound({
+    attempts: reversed,
+    routingPlan: routingPlan({
+      planned_reviewers: 2,
+      minimum_reviewers: 2,
+      max_expansion_waves: 0,
+    }),
+  });
+  assert.equal(consensus.error, 'consensus_required');
+  assert.deepEqual(consensus.admitted_with_tolerances, provenance.admitted_with_tolerances);
+
+  const reviewed = synthesizeReviewRound({
+    attempts: reversed,
+    consensus: { findings: [] },
+    routingPlan: routingPlan(),
+  });
+  assert.equal(reviewed.status, 'reviewed');
+  assert.deepEqual(reviewed.admitted_with_tolerances, provenance.admitted_with_tolerances);
+  assert.equal(Object.hasOwn(reviewed, 'readiness_admission'), false);
+
+  const strictOnly = synthesizeReviewRound({
+    attempts: [attempt('claude-opus'), attempt('codex-review')],
+    consensus: { findings: [] },
+    routingPlan: routingPlan(),
+  });
+  assert.equal(strictOnly.status, 'reviewed');
+  assert.equal(Object.hasOwn(strictOnly, 'admitted_with_tolerances'), false);
+});
+
+test('report-format Provenance documents exclusion_detail and leaf D16 skeleton (T6)', () => {
+  const format = require('node:fs').readFileSync(
+    path.join(root, 'skills/deep-review-workflow/references/report-format.md'),
+    'utf8',
+  );
+  assert.match(format, /exclusion_detail/u);
+  assert.match(format, /tolerances/u);
+  assert.match(format, /D16 OUTPUT CONTRACT/u);
+  assert.match(format, /synthesis-only sections\s+are not leaf requirements/u);
 });
