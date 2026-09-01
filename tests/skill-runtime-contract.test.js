@@ -1123,6 +1123,8 @@ test('the loaded authorities gate Grok candidacy on resolved flags and share one
 
   // 4. `--grok-candidate` travels through the coordinator, on the candidate
   //    branch only, and the standalone detector stays the non-candidate path.
+  assert.match(execution, /ok === false/u);
+  assert.doesNotMatch(execution, /!parsed\.ok/u);
   assert.match(execution, /grok-carrier-coordinator\.mjs[\s\S]{0,900}--grok-candidate/isu);
   assert.match(execution, /(?:not a candidate|non-candidate|no Grok)[\s\S]{0,240}detect-environment\.mjs|detect-environment\.mjs[\s\S]{0,240}(?:not a candidate|non-candidate|no Grok)/isu);
 

@@ -20,7 +20,12 @@ node {plugin_root}/hooks/scripts/grok-carrier-coordinator.mjs --cwd PROJECT_ROOT
 ```
 
 Its first stdout line is the environment JSON and its second is the coordinator
-descriptor carrying `control_path`. Keep that coordinator alive for the whole
+descriptor carrying `control_path`. The first line may instead be a one-line
+JSON object whose `ok` field is present and `ok === false`; in that case show
+`reason` and `remedy` unchanged and stop the whole review (fail-closed, not a
+degraded four-voice round). Success rows do not carry an `ok` key at all.
+
+Keep that coordinator alive for the whole
 round: classification, route persistence, route parsing, and the Grok bridge
 each acquire a fresh readable endpoint from it and re-detect nothing. An
 unconfirmed or terminated coordinator is terminal — fail closed rather than
