@@ -4,6 +4,43 @@
 
 All notable changes to deep-review are documented here. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0] — 2026-09-01
+
+### Added
+- First-failure diagnosis codes on strict reviewer reports (`exclusion_detail`),
+  plus `tolerances` / `admitted_with_tolerances` / sidecar `raw_report` when a
+  report is preserved or admitted under a named tolerance
+  (Sungmin-Cho/deep-review#64).
+- Coordinator startup refusals as one-line JSON with `ok === false` and
+  `unsupported_grok_containment`, `missing_grok_containment_helper`, or
+  `unsupported_grok_cli_version` (Sungmin-Cho/deep-review#65 diagnostic portion).
+
+### Changed
+- Codex and Claude bridge `parseCli` now accept exactly one of
+  `--routing-plan` or `--execution-route-json` together with `--reviewer-id`.
+  Dual-source invocations that previously preferred the inline route are now
+  rejected (Sungmin-Cho/deep-review#63).
+- Missing `## Code Review` containers that still carry the four canonical
+  sections are admitted with `missing_code_review_heading`.
+- Claude/Codex payloads end with the D16 OUTPUT CONTRACT (document routes
+  include Artifact Gate). Codex last-message bytes are preserved on
+  transport-success even when parse fails, except invalid UTF-8.
+
+### Fixed
+- `--grok` refusals no longer collapse to "carrier frame is missing" on
+  unsupported platforms, missing helpers, or CLI versions outside `{1.0.4}`.
+  This is diagnosis and documentation only: `--grok` stays inactive.
+
+### Security
+- Fail-closed reviewer counting is unchanged: a malformed report still does
+  not increment `N_actual`. UTF-8 that does not round-trip is not admitted.
+
+### Notes
+- Coupled rollback units: T4↔T6↔T7 (diagnosis/provenance/raw preservation),
+  T5↔T6↔T7 (lenient admit plus its carrier and bridge preservation),
+  T9↔T10 (typed coordinator refusal JSON/exit 3 plus version-axis reuse).
+  Reverting T9 alone would send version refusals to stderr/exit 1.
+
 ## [2.8.1] — 2026-08-29
 
 ### Added
