@@ -26,7 +26,7 @@ import {
 } from './helpers/git-fixture.js';
 import { writeContainedFile } from '../hooks/scripts/lib/runtime-context.mjs';
 import { runClaudeReviewer } from '../hooks/scripts/run-claude-reviewer.mjs';
-import { runCodexReviewer } from '../hooks/scripts/run-codex-reviewer.mjs';
+import { parseCli as parseCodexCli, runCodexReviewer } from '../hooks/scripts/run-codex-reviewer.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const codexBridgePath = join(pluginRoot, 'hooks', 'scripts', 'run-codex-reviewer.mjs');
@@ -1265,6 +1265,84 @@ test('Codex bridge CLI exits nonzero for adapter failure and preserves genuine c
       );
     });
   }
+});
+
+test('Codex bridge parseCli accepts exactly one execution source with --reviewer-id (T1)', () => {
+  const routeJson = '{"reviewer_id":"codex-review"}';
+
+  assert.deepEqual(
+    parseCodexCli(['--execution-route-json', routeJson, '--reviewer-id', 'codex-review']),
+    { executionRouteJson: routeJson, reviewerId: 'codex-review' },
+  );
+  assert.deepEqual(
+    parseCodexCli(['--routing-plan', 'plan.json', '--reviewer-id', 'codex-adversarial']),
+    { routingPlan: 'plan.json', reviewerId: 'codex-adversarial' },
+  );
+
+  // Last-value-wins is inherited parser behaviour, documented rather than
+  // changed: repeating a flag keeps the last occurrence.
+  assert.deepEqual(
+    parseCodexCli([
+      '--routing-plan', 'first.json',
+      '--routing-plan', 'second.json',
+      '--reviewer-id', 'codex-review',
+    ]),
+    { routingPlan: 'second.json', reviewerId: 'codex-review' },
+  );
+  assert.deepEqual(
+    parseCodexCli([
+      '--execution-route-json', '{"reviewer_id":"codex-review"}',
+      '--reviewer-id', 'codex-review',
+      '--reviewer-id', 'codex-adversarial',
+    ]),
+    { executionRouteJson: '{"reviewer_id":"codex-review"}', reviewerId: 'codex-adversarial' },
+  );
+
+  const sourceError = /exactly one execution source \(--routing-plan or --execution-route-json\) and --reviewer-id must be provided together/u;
+  assert.throws(() => parseCodexCli([]), sourceError);
+  assert.throws(() => parseCodexCli(['--reviewer-id', 'codex-review']), sourceError);
+  assert.throws(
+    () => parseCodexCli(['--execution-route-json', routeJson]),
+    sourceError,
+  );
+  assert.throws(
+    () => parseCodexCli(['--routing-plan', 'plan.json']),
+    sourceError,
+  );
+  assert.throws(
+    () => parseCodexCli([
+      '--routing-plan', 'plan.json',
+      '--execution-route-json', routeJson,
+      '--reviewer-id', 'codex-review',
+    ]),
+    sourceError,
+  );
+
+  assert.throws(
+    () => parseCodexCli(['--routing-plan', '', '--reviewer-id', 'codex-review']),
+    /--routing-plan must be non-empty/u,
+  );
+  assert.throws(
+    () => parseCodexCli(['--execution-route-json', '', '--reviewer-id', 'codex-review']),
+    /--execution-route-json must be non-empty/u,
+  );
+  assert.throws(
+    () => parseCodexCli(['--routing-plan', 'plan.json', '--reviewer-id', '']),
+    /--reviewer-id must be non-empty/u,
+  );
+});
+
+test('Codex bridge --help documents both execution sources (T1)', () => {
+  const run = spawnSync(process.execPath, [codexBridgePath, '--help'], {
+    encoding: 'utf8',
+    shell: false,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(
+    run.stdout,
+    /--routing-plan FILE \| --execution-route-json JSON/u,
+  );
+  assert.match(run.stdout, /--reviewer-id codex-review\|codex-adversarial/u);
 });
 
 // ---------------------------------------------------------------------------
