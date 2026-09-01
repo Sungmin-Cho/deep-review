@@ -26,7 +26,7 @@ import {
   validateContainedFilePath,
   writeContainedFile,
 } from './lib/runtime-context.mjs';
-import { parseReviewerReport } from './review-synthesis.mjs';
+import { diagnoseReviewerReport } from './review-synthesis.mjs';
 
 const AUTH_PATTERN = /not logged in|not authenticated|authentication failed|please.*(?:log in|login)|unauthorized|not authorized|forbidden|token.*expired|authorization failed|(?:invalid|incorrect|missing|expired|revoked)\s+(?:api[- ]?key|credentials?)|(?:api[- ]?key|credentials?)(?:\s+\S+){0,4}\s+(?:invalid|incorrect|missing|expired|revoked|required)|credentials?\s+(?:are|is)\s+required/iu;
 const MODEL_REJECTION_PATTERNS = [
@@ -173,22 +173,27 @@ function rejectionDimensions(result, applied) {
   return dimensions;
 }
 
-function processStatus(result, report) {
+function processStatus(result, candidate) {
   // A capture overflow truncates only the diagnostic stdout/stderr buffers; it
   // never signals the child (see lib/process.mjs appendCaptured). The canonical
   // report is written by Codex to --output-last-message and read from disk, so
   // a complete, independently validated report stays trustworthy even when a
   // verbose reasoning trace on stderr exhausts the shared capture budget.
-  // Overflow with no readable report still fails below via `!report`.
+  // Overflow with no readable report still fails below via a non-valid candidate.
   if (result.code === 124 || result.timedOut) return 'timeout';
   if (result.code !== 0 && AUTH_PATTERN.test(structuredDiagnostic(result.stderr))) {
     return 'not_authenticated';
   }
-  if (result.code !== 0 || !report) return 'failed';
+  if (result.code !== 0 || candidate?.kind !== 'valid') return 'failed';
   return 'success';
 }
 
-function readCanonicalReport(filePath) {
+function utf8RoundTrip(buffer) {
+  const text = buffer.toString('utf8');
+  return Buffer.from(text, 'utf8').equals(buffer) ? text : null;
+}
+
+function readLastMessage(filePath) {
   let descriptor;
   try {
     const before = lstatSync(filePath);
@@ -201,14 +206,36 @@ function readCanonicalReport(filePath) {
     if (after.isSymbolicLink() || !after.isFile()
         || opened.dev !== after.dev || opened.ino !== after.ino
         || opened.size <= 0 || opened.size > MAX_REPORT_BYTES) return null;
-    const report = readFileSync(descriptor);
-    const text = report.toString('utf8');
-    return report.length > 0
-      && report.length <= MAX_REPORT_BYTES
-      && text.trim().length > 0
-      && parseReviewerReport(text, { strict: true })
-      ? report
-      : null;
+    const bytes = readFileSync(descriptor);
+    if (bytes.length <= 0 || bytes.length > MAX_REPORT_BYTES) return null;
+    const digest = sha256(bytes);
+    const text = utf8RoundTrip(bytes);
+    if (text === null) {
+      return { kind: 'invalid_encoding', bytes: bytes.length, sha256: digest };
+    }
+    const diagnosed = diagnoseReviewerReport(text, { strict: true });
+    if (!diagnosed.ok) {
+      return {
+        kind: 'invalid_report',
+        bytes: bytes.length,
+        sha256: digest,
+        buffer: bytes,
+        diagnosis: diagnosed.failure,
+      };
+    }
+    return {
+      kind: 'valid',
+      bytes: bytes.length,
+      sha256: digest,
+      buffer: bytes,
+      parsed: {
+        verdict: diagnosed.verdict,
+        issues: diagnosed.issues,
+        ...(Array.isArray(diagnosed.tolerances) && diagnosed.tolerances.length > 0
+          ? { tolerances: diagnosed.tolerances }
+          : {}),
+      },
+    };
   } catch {
     return null;
   } finally {
@@ -354,13 +381,24 @@ function publishResult({
       reason: fallbackOccurred ? fallbackReason(fallbackDimensions) : null,
     },
     verification: verification(firstApplied, finalApplied, fallbackDimensions),
-    canonical_report: report
+    canonical_report: report?.kind === 'valid'
       ? {
           source: 'output-last-message',
-          bytes: report.length,
-          sha256: sha256(report),
+          bytes: report.bytes,
+          sha256: report.sha256,
+          ...(report.parsed.tolerances ? { tolerances: report.parsed.tolerances } : {}),
         }
       : null,
+    ...(report?.kind === 'invalid_report' || report?.kind === 'invalid_encoding'
+      ? {
+          raw_report: {
+            bytes: report.bytes,
+            sha256: report.sha256,
+            strict_valid: false,
+            diagnosis: report.kind === 'invalid_encoding' ? 'invalid_encoding' : report.diagnosis,
+          },
+        }
+      : {}),
     attempts,
   };
   const destinations = {
@@ -381,7 +419,7 @@ function publishResult({
     mode: 0o600,
     containedWriteSession,
   });
-  containedWriter(projectRoot, destinations.report, report ?? Buffer.alloc(0), {
+  containedWriter(projectRoot, destinations.report, report?.buffer ?? Buffer.alloc(0), {
     mode: 0o600,
     containedWriteSession,
   });
@@ -484,7 +522,7 @@ export async function runCodexReviewer(options = {}) {
         },
       );
       const candidate = result.code === 0 && !result.timedOut
-        ? readCanonicalReport(lastMessageFile)
+        ? readLastMessage(lastMessageFile)
         : null;
       attempts.push(attemptProvenance(attempts.length + 1, result, applied, candidate));
       return { result, candidate };

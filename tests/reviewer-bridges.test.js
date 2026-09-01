@@ -242,6 +242,13 @@ if (behavior === 'symlink') {
     lastMessage,
     '# Deep Review Report — 2026-07-26\\n\\n## Summary\\n\\n- **Verdict**: REQUEST_CHANGES\\n- **Issues**: 🔴 1건, 🟡 0건, ℹ️ 0건\\n\\n## Code Review\\n\\n### 🔴 Critical\\n\\nprose finding without bullet\\n\\n### 🟡 Warning\\n\\nNone.\\n\\n### ℹ️ Info\\n\\nNone.\\n\\n### 🟢 Passed\\n\\n- Contract valid.\\n',
   );
+} else if (behavior === 'missing-container') {
+  writeFileSync(
+    lastMessage,
+    '# Deep Review Report — 2026-07-26\\n\\n## Summary\\n\\n- **Verdict**: APPROVE\\n- **Issues**: 🔴 0건, 🟡 0건, ℹ️ 0건\\n\\n### 🔴 Critical\\n\\nNone.\\n\\n### 🟡 Warning\\n\\nNone.\\n\\n### ℹ️ Info\\n\\nNone.\\n\\n### 🟢 Passed\\n\\n- Contract valid.\\n',
+  );
+} else if (behavior === 'invalid-utf8') {
+  writeFileSync(lastMessage, Buffer.from([0xff, 0xfe, 0x80]));
 } else {
   writeFileSync(
     lastMessage,
@@ -936,6 +943,16 @@ test('Codex exec bridge fails closed without fallback when capture overflows and
 });
 
 test('Codex exec bridge fails closed for timeout, auth, generic, empty, whitespace, symlink, and oversized report', async (t) => {
+  const preserved = new Set([
+    'whitespace',
+    'malformed',
+    'duplicate-summary',
+    'warning-approve',
+    'duplicate-report-heading',
+    'duplicate-code-review',
+    'count-mismatch',
+    'invalid-finding-grammar',
+  ]);
   for (const [behavior, status, code] of [
     ['auth-model', 'not_authenticated', 7],
     ['timeout', 'timeout', 124],
@@ -974,14 +991,145 @@ test('Codex exec bridge fails closed for timeout, auth, generic, empty, whitespa
       assert.equal(result.status, status);
       assert.equal(result.code, code);
       assert.equal(readFileSync(`${outputFile}.status`, 'utf8'), `${status}\n`);
-      assert.equal(readFileSync(outputFile, 'utf8'), '');
+      const published = readFileSync(outputFile);
+      if (preserved.has(behavior)) {
+        assert.notEqual(published.length, 0, `${behavior} must preserve the last-message bytes`);
+      } else {
+        assert.equal(published.toString('utf8'), '');
+      }
       assert.equal(rows(log).length <= 1, true, `${behavior} must never retry`);
       const sidecar = JSON.parse(readFileSync(`${outputFile}.result.json`, 'utf8'));
       assert.equal(sidecar.attempt_count, 1);
       assert.equal(sidecar.canonical_report, null);
       assert.equal(sidecar.fallback.occurred, false);
+      if (preserved.has(behavior)) {
+        assert.equal(sidecar.raw_report.strict_valid, false);
+        assert.equal(typeof sidecar.raw_report.diagnosis, 'string');
+        assert.equal(sidecar.raw_report.bytes, published.length);
+      }
     });
   }
+});
+
+test('Codex exec bridge preserves invalid last-message bytes and admits #64 shape (T7)', async () => {
+  const root = workspace('codex-t7-preservation');
+  const projectRoot = codexProject(root);
+  const binary = fakeCodexCli(root);
+  const promptFile = join(root, 'payload.txt');
+  writeFileSync(promptFile, 'payload');
+
+  const malformedOut = join(projectRoot, 'malformed.md');
+  const malformed = await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile: malformedOut,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'malformed.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['malformed']),
+    },
+  });
+  assert.equal(malformed.status, 'failed');
+  assert.notEqual(readFileSync(malformedOut, 'utf8').length, 0);
+  const malformedSidecar = JSON.parse(readFileSync(`${malformedOut}.result.json`, 'utf8'));
+  assert.equal(malformedSidecar.canonical_report, null);
+  assert.equal(malformedSidecar.raw_report.diagnosis, 'report_title_invalid');
+
+  const duplicateOut = join(projectRoot, 'duplicate-summary.md');
+  await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile: duplicateOut,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'duplicate.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['duplicate-summary']),
+    },
+  });
+  const duplicateSidecar = JSON.parse(readFileSync(`${duplicateOut}.result.json`, 'utf8'));
+  assert.equal(duplicateSidecar.raw_report.diagnosis, 'verdict_label_invalid');
+
+  const missingOut = join(projectRoot, 'missing-container.md');
+  const missing = await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile: missingOut,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'missing.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['missing-container']),
+    },
+  });
+  assert.equal(missing.status, 'success');
+  const missingSidecar = JSON.parse(readFileSync(`${missingOut}.result.json`, 'utf8'));
+  assert.deepEqual(missingSidecar.canonical_report.tolerances, ['missing_code_review_heading']);
+  assert.equal(Object.hasOwn(missingSidecar, 'raw_report'), false);
+
+  const utf8Out = join(projectRoot, 'invalid-utf8.md');
+  const utf8 = await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile: utf8Out,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'utf8.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['invalid-utf8']),
+    },
+  });
+  assert.equal(utf8.status, 'failed');
+  assert.equal(readFileSync(utf8Out).length, 0);
+  const utf8Sidecar = JSON.parse(readFileSync(`${utf8Out}.result.json`, 'utf8'));
+  assert.equal(utf8Sidecar.canonical_report, null);
+  assert.equal(utf8Sidecar.raw_report.diagnosis, 'invalid_encoding');
+});
+
+test('transport failure does not preserve a leftover canonical last-message (T7)', async () => {
+  const root = workspace('codex-t7-transport-guard');
+  const projectRoot = codexProject(root);
+  const binary = fakeCodexCli(root);
+  const outputFile = join(projectRoot, 'auth.md');
+  const promptFile = join(root, 'payload.txt');
+  writeFileSync(promptFile, 'payload');
+  const result = await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'auth.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['auth-model']),
+    },
+  });
+  assert.equal(result.status, 'not_authenticated');
+  assert.equal(readFileSync(outputFile, 'utf8'), '');
+  const sidecar = JSON.parse(readFileSync(`${outputFile}.result.json`, 'utf8'));
+  assert.equal(sidecar.canonical_report, null);
+  assert.equal(Object.hasOwn(sidecar, 'raw_report'), false);
 });
 
 test('Codex exec bridge classifies credential failures before model rejection and never retries', async (t) => {

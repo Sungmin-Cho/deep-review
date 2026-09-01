@@ -107,7 +107,7 @@ function sectionFindingCount(output, heading) {
 export function normalizeAgyReport(output) {
   if (typeof output !== 'string' || output.length === 0) return null;
   const headings = [...output.matchAll(/^# Deep Review Report — [0-9]{4}-[0-9]{2}-[0-9]{2}$/gmu)];
-  if (headings.length !== 1 || !/^## Summary$/mu.test(output) || !/^## Code Review$/mu.test(output)) return null;
+  if (headings.length !== 1 || !/^## Summary$/mu.test(output)) return null;
   const verdict = /^- \*\*Verdict\*\*:\s*(APPROVE|CONCERN|REQUEST_CHANGES)\s*$/mu.exec(output)?.[1];
   const issues = /^- \*\*Issues\*\*:\s*[^\n]*?🔴\s*([0-9]+)[^\n]*?🟡\s*([0-9]+)[^\n]*?ℹ(?:️)?\s*([0-9]+)[^\n]*$/mu.exec(output);
   if (!verdict || !issues) return null;
