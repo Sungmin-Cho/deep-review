@@ -215,6 +215,173 @@ test('non-strict admission set is unchanged (T4)', async () => {
   assert.equal(Object.hasOwn(parseReviewerReport(summaryOnly), 'tolerances'), false);
 });
 
+function missingContainerReport(options) {
+  return canonicalReviewerReport(options).replace('\n## Code Review\n', '\n');
+}
+
+function insertCodeReviewContainer(report) {
+  return report.replace('### 🔴 Critical', '## Code Review\n\n### 🔴 Critical');
+}
+
+test('strict parser admits a missing Code Review container with tolerances (T5)', async () => {
+  const { diagnoseReviewerReport, parseReviewerReport } = await import(synthesisUrl);
+  const admitted = missingContainerReport();
+  const expected = {
+    verdict: 'APPROVE',
+    issues: { critical: 0, warning: 0, info: 0 },
+    tolerances: ['missing_code_review_heading'],
+  };
+  assert.deepEqual(diagnoseReviewerReport(admitted, { strict: true }), { ok: true, ...expected });
+  assert.deepEqual(parseReviewerReport(admitted, { strict: true }), expected);
+
+  const withSummaryProse = admitted.replace(
+    '## Summary\n\n- **Verdict**: APPROVE',
+    '## Summary\n\nReviewer notes about the diff.\n\n- Review Mode: 2-way\n- **Verdict**: APPROVE',
+  );
+  assert.deepEqual(parseReviewerReport(withSummaryProse, { strict: true }), expected);
+
+  assert.deepEqual(
+    parseReviewerReportFrozen(insertCodeReviewContainer(admitted), { strict: true }),
+    { verdict: 'APPROVE', issues: { critical: 0, warning: 0, info: 0 } },
+  );
+  assert.deepEqual(
+    parseReviewerReportFrozen(insertCodeReviewContainer(withSummaryProse), { strict: true }),
+    { verdict: 'APPROVE', issues: { critical: 0, warning: 0, info: 0 } },
+  );
+});
+
+test('lenient admission is a proper subset of insertion-transform validity (T5)', async () => {
+  const { diagnoseReviewerReport } = await import(synthesisUrl);
+  const hidden = missingContainerReport().replace(
+    '### 🔴 Critical',
+    '### Hidden Critical\n\nNone.\n\n### 🔴 Critical',
+  );
+  const findings = missingContainerReport().replace(
+    '### 🔴 Critical',
+    '## Findings\n\n### 🔴 Critical',
+  );
+  const trailingSpace = missingContainerReport().replace(
+    '### 🔴 Critical',
+    '## Code Review \n\n### 🔴 Critical',
+  );
+
+  for (const [name, report] of [
+    ['hidden critical', hidden],
+    ['Findings container', findings],
+    ['trailing-space Code Review', trailingSpace],
+  ]) {
+    const diagnosed = diagnoseReviewerReport(report, { strict: true });
+    assert.equal(diagnosed.ok, false, name);
+    const inserted = parseReviewerReportFrozen(insertCodeReviewContainer(report), { strict: true });
+    assert.notEqual(inserted, null, `${name} stays insertion-valid`);
+  }
+});
+
+test('lenient parser rejects smuggling and split shapes (T5)', async () => {
+  const { diagnoseReviewerReport } = await import(synthesisUrl);
+  const cases = [
+    [
+      'leading noncanonical ###',
+      missingContainerReport().replace(
+        '### 🔴 Critical',
+        '### Hidden Critical\n\nNone.\n\n### 🔴 Critical',
+      ),
+      'section_headings_invalid',
+    ],
+    [
+      'split by Appendix',
+      missingContainerReport().replace(
+        '### 🟡 Warning',
+        '## Appendix\n\n### 🟡 Warning',
+      ),
+      'section_headings_invalid',
+    ],
+    [
+      'Findings substitute container',
+      missingContainerReport().replace(
+        '### 🔴 Critical',
+        '## Findings\n\n### 🔴 Critical',
+      ),
+      'intervening_heading_before_code_review',
+    ],
+    [
+      'Artifact Gate before first ###',
+      missingContainerReport().replace(
+        '### 🔴 Critical',
+        '## Artifact Gate\n\n### 🔴 Critical',
+      ),
+      'intervening_heading_before_code_review',
+    ],
+    [
+      'trailing-space Code Review typo',
+      missingContainerReport().replace(
+        '### 🔴 Critical',
+        '## Code Review \n\n### 🔴 Critical',
+      ),
+      'intervening_heading_before_code_review',
+    ],
+    [
+      'canonical order swap',
+      missingContainerReport()
+        .replace('### 🔴 Critical', '### 🔴 TMP')
+        .replace('### 🟡 Warning', '### 🔴 Critical')
+        .replace('### 🔴 TMP', '### 🟡 Warning'),
+      'section_headings_invalid',
+    ],
+    [
+      'count mismatch',
+      missingContainerReport({ verdict: 'CONCERN', warning: 1, bodyWarning: 0 }),
+      'count_mismatch:warning',
+    ],
+    [
+      'duplicate canonical globally',
+      `${missingContainerReport()}\n## Appendix\n\n### 🔴 Critical\n`,
+      'section_headings_invalid',
+    ],
+  ];
+  for (const [name, report, failure] of cases) {
+    const diagnosed = diagnoseReviewerReport(report, { strict: true });
+    assert.equal(diagnosed.ok, false, name);
+    assert.equal(diagnosed.failure, failure, name);
+  }
+});
+
+test('document-scope trailing Artifact Gate is admitted; non-strict omits tolerances (T5)', async () => {
+  const { diagnoseReviewerReport, parseReviewerReport } = await import(synthesisUrl);
+  const withGate = `${missingContainerReport().trimEnd()}\n\n## Artifact Gate\n`;
+  assert.deepEqual(
+    parseReviewerReport(withGate, { strict: true }),
+    {
+      verdict: 'APPROVE',
+      issues: { critical: 0, warning: 0, info: 0 },
+      tolerances: ['missing_code_review_heading'],
+    },
+  );
+  const nonStrict = parseReviewerReport(missingContainerReport());
+  assert.deepEqual(nonStrict, { verdict: 'APPROVE', issues: { critical: 0, warning: 0, info: 0 } });
+  assert.equal(Object.hasOwn(nonStrict, 'tolerances'), false);
+  assert.equal(Object.hasOwn(diagnoseReviewerReport(missingContainerReport()), 'tolerances'), false);
+});
+
+test('finding-bullet Verdict text does not pollute truncated Summary labels (T5)', async () => {
+  const { parseReviewerReport } = await import(synthesisUrl);
+  const smuggled = missingContainerReport({
+    critical: 1,
+    verdict: 'REQUEST_CHANGES',
+  }).replace(
+    '- Critical finding 1.',
+    '- **Verdict**: APPROVE inside a finding.',
+  );
+  assert.deepEqual(
+    parseReviewerReport(smuggled, { strict: true }),
+    {
+      verdict: 'REQUEST_CHANGES',
+      issues: { critical: 1, warning: 0, info: 0 },
+      tolerances: ['missing_code_review_heading'],
+    },
+  );
+});
+
 test('parseReviewerReport stays equivalent to the frozen v2.8.1 oracle (T4)', async () => {
   const { parseReviewerReport } = await import(synthesisUrl);
   const fixtures = [

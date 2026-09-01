@@ -53,6 +53,66 @@ const CANONICAL_SECTION_HEADINGS = Object.freeze([
   '### 🟢 Passed',
 ]);
 const SECTION_KEYS = Object.freeze(['critical', 'warning', 'info', 'passed']);
+const MISSING_CODE_REVIEW_TOLERANCE = 'missing_code_review_heading';
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function diagnoseCanonicalSections(region, issues) {
+  const headings = matchesFor(region, /^###\s+\S.*$/gmu);
+  if (headings.length !== CANONICAL_SECTION_HEADINGS.length
+      || headings.some((heading, index) => heading[0] !== CANONICAL_SECTION_HEADINGS[index])) {
+    return { ok: false, failure: 'section_headings_invalid' };
+  }
+  if (region.slice(0, headings[0].index).trim().length > 0) {
+    return { ok: false, failure: 'prose_before_first_section' };
+  }
+  const counts = headings.map((heading, index) => {
+    const start = heading.index + heading[0].length;
+    const end = headings[index + 1]?.index ?? region.length;
+    return strictFindingCount(region.slice(start, end));
+  });
+  for (let index = 0; index < SECTION_KEYS.length; index += 1) {
+    if (counts[index] === null) {
+      return { ok: false, failure: `finding_lines_invalid:${SECTION_KEYS[index]}` };
+    }
+  }
+  const expected = [issues.critical, issues.warning, issues.info];
+  for (let index = 0; index < expected.length; index += 1) {
+    if (counts[index] !== expected[index]) {
+      return { ok: false, failure: `count_mismatch:${SECTION_KEYS[index]}` };
+    }
+  }
+  return { ok: true };
+}
+
+function diagnoseLenientCodeReview(report, summaryHeading, verdict, issues) {
+  const rest = report.slice(summaryHeading.index + summaryHeading[0].length);
+  const firstSection = /^###\s+\S.*$/mu.exec(rest);
+  const intervening = /^##\s+\S.*$/mu.exec(rest);
+  if (intervening && (!firstSection || intervening.index < firstSection.index)) {
+    return { ok: false, failure: 'intervening_heading_before_code_review' };
+  }
+  if (!firstSection || firstSection[0] !== CANONICAL_SECTION_HEADINGS[0]) {
+    return { ok: false, failure: 'section_headings_invalid' };
+  }
+  const region = intervening
+    ? rest.slice(firstSection.index, intervening.index)
+    : rest.slice(firstSection.index);
+  const sections = diagnoseCanonicalSections(region, issues);
+  if (!sections.ok) return sections;
+  for (const heading of CANONICAL_SECTION_HEADINGS) {
+    const appearances = matchesFor(report, new RegExp(`^${escapeRegExp(heading)}$`, 'gmu'));
+    if (appearances.length !== 1) return { ok: false, failure: 'section_headings_invalid' };
+  }
+  return {
+    ok: true,
+    verdict,
+    issues,
+    tolerances: [MISSING_CODE_REVIEW_TOLERANCE],
+  };
+}
 
 export function diagnoseReviewerReport(output, options = {}) {
   const strict = options?.strict === true;
@@ -87,7 +147,14 @@ export function diagnoseReviewerReport(output, options = {}) {
     return { ok: false, failure: 'code_review_before_summary' };
   }
 
-  const summary = sectionAfterHeading(report, summaryHeading);
+  let summary = sectionAfterHeading(report, summaryHeading);
+  if (strict && codeReviewHeadings.length === 0) {
+    const rest = report.slice(summaryHeading.index + summaryHeading[0].length);
+    const firstSection = /^###\s+\S.*$/mu.exec(rest);
+    if (firstSection && firstSection.index < summary.length) {
+      summary = rest.slice(0, firstSection.index);
+    }
+  }
   const verdictLabels = matchesFor(summary, /^- \*\*Verdict\*\*:/gmu);
   const issuesLabels = matchesFor(summary, /^- \*\*Issues\*\*:/gmu);
   if (verdictLabels.length !== 1) return { ok: false, failure: 'verdict_label_invalid' };
@@ -130,38 +197,13 @@ export function diagnoseReviewerReport(output, options = {}) {
     return { ok: true, verdict: verdictMatch[1], issues };
   }
 
-  // Count 0 is not code_review_heading_invalid; T5 will admit a subset of
-  // those reports. Until then the missing container cannot host the four
-  // canonical sections.
   if (codeReviewHeadings.length !== 1) {
-    return { ok: false, failure: 'section_headings_invalid' };
+    return diagnoseLenientCodeReview(report, summaryHeading, verdictMatch[1], issues);
   }
 
   const codeReview = sectionAfterHeading(report, codeReviewHeadings[0]);
-  const headings = matchesFor(codeReview, /^###\s+\S.*$/gmu);
-  if (headings.length !== CANONICAL_SECTION_HEADINGS.length
-      || headings.some((heading, index) => heading[0] !== CANONICAL_SECTION_HEADINGS[index])) {
-    return { ok: false, failure: 'section_headings_invalid' };
-  }
-  if (codeReview.slice(0, headings[0].index).trim().length > 0) {
-    return { ok: false, failure: 'prose_before_first_section' };
-  }
-  const counts = headings.map((heading, index) => {
-    const start = heading.index + heading[0].length;
-    const end = headings[index + 1]?.index ?? codeReview.length;
-    return strictFindingCount(codeReview.slice(start, end));
-  });
-  for (let index = 0; index < SECTION_KEYS.length; index += 1) {
-    if (counts[index] === null) {
-      return { ok: false, failure: `finding_lines_invalid:${SECTION_KEYS[index]}` };
-    }
-  }
-  const expected = [issues.critical, issues.warning, issues.info];
-  for (let index = 0; index < expected.length; index += 1) {
-    if (counts[index] !== expected[index]) {
-      return { ok: false, failure: `count_mismatch:${SECTION_KEYS[index]}` };
-    }
-  }
+  const sections = diagnoseCanonicalSections(codeReview, issues);
+  if (!sections.ok) return sections;
   return { ok: true, verdict: verdictMatch[1], issues };
 }
 
