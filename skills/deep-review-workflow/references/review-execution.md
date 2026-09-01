@@ -20,7 +20,12 @@ node {plugin_root}/hooks/scripts/grok-carrier-coordinator.mjs --cwd PROJECT_ROOT
 ```
 
 Its first stdout line is the environment JSON and its second is the coordinator
-descriptor carrying `control_path`. Keep that coordinator alive for the whole
+descriptor carrying `control_path`. The first line may instead be a one-line
+JSON object whose `ok` field is present and `ok === false`; in that case show
+`reason` and `remedy` unchanged and stop the whole review (fail-closed, not a
+degraded four-voice round). Success rows do not carry an `ok` key at all.
+
+Keep that coordinator alive for the whole
 round: classification, route persistence, route parsing, and the Grok bridge
 each acquire a fresh readable endpoint from it and re-detect nothing. An
 unconfirmed or terminated coordinator is terminal — fail closed rather than
@@ -407,6 +412,10 @@ On Claude Code, invoke the generic Codex exec bridge once per role:
 node {plugin_root}/hooks/scripts/run-codex-reviewer.mjs --project-root PROJECT_ROOT --plugin-root PLUGIN_ROOT_ABS --prompt-file PROMPT_FILE --execution-route-json EXECUTION_ROUTE_JSON --reviewer-id codex-review --output OUTPUT_FILE --timeout-seconds 900
 node {plugin_root}/hooks/scripts/run-codex-reviewer.mjs --project-root PROJECT_ROOT --plugin-root PLUGIN_ROOT_ABS --prompt-file PROMPT_FILE --execution-route-json EXECUTION_ROUTE_JSON --reviewer-id codex-adversarial --output OUTPUT_FILE --timeout-seconds 900
 ```
+
+OUTPUT_FILE must resolve inside PROJECT_ROOT — the isolated write session
+refuses writes outside the repository. The conventional path is
+`.deep-review/tmp/`.
 
 The bridge reads each route's resolved model/effort and applies the same
 explicit runtime-rejection-only single-retry rule.

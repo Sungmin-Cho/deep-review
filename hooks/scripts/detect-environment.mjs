@@ -161,7 +161,18 @@ async function detectGrokCompatibility(cwd, env, processRunner) {
       grok_compatibility_verified: true,
       grok_compatibility_evidence: evidence,
     };
-  } catch {
+  } catch (error) {
+    if (error?.grokVersionRejection) {
+      return {
+        grok_cli: false,
+        grok_cli_path: grokPath,
+        grok_version: error.grokVersionRejection.observed,
+        grok_compatibility_verified: false,
+        grok_compatibility_evidence: null,
+        grok_unavailable_reason: 'unsupported_grok_cli_version',
+        grok_supported_versions: error.grokVersionRejection.supported,
+      };
+    }
     return incompatibleGrok();
   }
 }

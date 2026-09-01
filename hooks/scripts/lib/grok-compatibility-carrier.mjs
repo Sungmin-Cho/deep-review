@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 export const GROK_CARRIER_MAX_BYTES = 65536;
 
-const SUPPORTED_GROK_CLI_VERSIONS = new Set(['1.0.4']);
+export const SUPPORTED_GROK_CLI_VERSIONS = new Set(['1.0.4']);
 const GROK_REQUIRED_HELP_FLAGS = Object.freeze([
   '--cwd',
   '--max-turns',
@@ -348,11 +348,16 @@ export function validateGrokCompatibilityCarrier(carrier) {
 export function parseGrokCompatibilityStdout(text, kind) {
   if (typeof text !== 'string') throw new TypeError('Grok CLI stdout must be text');
   if (kind === 'version') {
-    const match = /^grok (\d+\.\d+\.\d+) \(([a-f0-9]+)\) \[stable\]\s*$/u.exec(text);
+    const match = /^grok (\d+\.\d+\.\d+) \(([a-f0-9]+)\)(?: \[stable\])?\s*$/u.exec(text);
     if (!match) throw new TypeError('Grok CLI version stdout is malformed');
     const [, version, versionBuild] = match;
     if (!SUPPORTED_GROK_CLI_VERSIONS.has(version)) {
-      throw new TypeError(`unsupported Grok CLI version: ${version}`);
+      const supported = [...SUPPORTED_GROK_CLI_VERSIONS];
+      const error = new TypeError(
+        `unsupported Grok CLI version: ${version} (supported: ${supported.join(', ')})`,
+      );
+      error.grokVersionRejection = { observed: version, supported };
+      throw error;
     }
     return { version, version_build: versionBuild };
   }

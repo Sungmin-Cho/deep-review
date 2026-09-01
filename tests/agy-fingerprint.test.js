@@ -199,6 +199,29 @@ test('agy report normalization accepts only canonical reports with section/count
   assert.equal(localizedEmptySections, clean);
   assert.notEqual(parseReviewerReport(localizedEmptySections, { strict: true }), null);
 
+  const missingContainer = [
+    '# Deep Review Report — 2026-07-24',
+    '',
+    '## Summary',
+    '- **Verdict**: APPROVE',
+    '- **Issues**: 🔴 0건, 🟡 0건, ℹ️ 0건',
+    '',
+    '### 🔴 Critical',
+    'None.',
+    '### 🟡 Warning',
+    'None.',
+    '### ℹ️ Info',
+    'None.',
+    '### 🟢 Passed',
+    '- Security assignment cleared.',
+  ].join('\n');
+  const admittedMissing = normalizeAgyReport(missingContainer);
+  assert.equal(admittedMissing, missingContainer);
+  assert.deepEqual(
+    parseReviewerReport(admittedMissing, { strict: true }).tolerances,
+    ['missing_code_review_heading'],
+  );
+
   const findingReport = [
     '# Deep Review Report — 2026-07-24',
     '',

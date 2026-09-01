@@ -4,10 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } = require('node:fs');
 const { tmpdir } = require('node:os');
@@ -691,6 +693,15 @@ test('the shipped coordinator executable drains one frame from real process A an
     t.skip('POSIX private-socket endpoints; the Windows named-pipe polarity is covered by the release smoke job');
     return;
   }
+  const { resolveGrokContainmentPlatform } = await import(pathToFileURL(join(
+    __dirname, '..', 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs',
+  )).href);
+  const { defaultCoordinatorHelperExists } = await import(coordinatorLibUrl);
+  const gate = resolveGrokContainmentPlatform();
+  if (!gate.supported || !defaultCoordinatorHelperExists(gate.helper_path)) {
+    t.skip('shipped coordinator CLI success path requires an inventoried executable helper');
+    return;
+  }
   const grok = makeGrokBin('coordinator-e2e-');
   const repo = createGitFixture('coordinator repo');
   writeFileSync(join(repo, 'candidate.md'), '# Candidate\n');
@@ -752,6 +763,15 @@ test('the shipped coordinator executable drains one frame from real process A an
 test('every control-protocol message is observed on the private control path', async (t) => {
   if (process.platform === 'win32') {
     t.skip('POSIX private-socket endpoints');
+    return;
+  }
+  const { resolveGrokContainmentPlatform } = await import(pathToFileURL(join(
+    __dirname, '..', 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs',
+  )).href);
+  const { defaultCoordinatorHelperExists } = await import(coordinatorLibUrl);
+  const gate = resolveGrokContainmentPlatform();
+  if (!gate.supported || !defaultCoordinatorHelperExists(gate.helper_path)) {
+    t.skip('shipped coordinator CLI success path requires an inventoried executable helper');
     return;
   }
   const grok = makeGrokBin('coordinator-protocol-');
@@ -906,6 +926,7 @@ test('the coordinator drain fails closed across the negative frame matrix, with 
     await assert.rejects(
       () => createGrokCarrierCoordinator({
         cwd: repo, mode: 'review', env, detectorPath, drainTimeoutMs: 5000,
+        platform: 'linux', arch: 'x64', helperExists: () => true,
       }),
       expected,
       `${label} must fail closed`,
@@ -920,6 +941,7 @@ test('the coordinator drain fails closed across the negative frame matrix, with 
   await assert.rejects(
     () => createGrokCarrierCoordinator({
       cwd: repo, mode: 'review', env, detectorPath: stalled, drainTimeoutMs: 400,
+      platform: 'linux', arch: 'x64', helperExists: () => true,
     }),
     /deadline/u,
   );
@@ -935,6 +957,7 @@ test('the coordinator drain fails closed across the negative frame matrix, with 
   await assert.rejects(
     () => createGrokCarrierCoordinator({
       cwd: repo, mode: 'review', env, detectorPath: swapped, drainTimeoutMs: 5000,
+      platform: 'linux', arch: 'x64', helperExists: () => true,
     }),
     /carrier|identity|evidence/u,
   );
@@ -1181,4 +1204,254 @@ test('a stale environment_sha256 is rejected against the canonical bytes it clai
     await new Promise((resolvePromise) => endpointServer.close(resolvePromise));
     await new Promise((resolvePromise) => controlServer.close(resolvePromise));
   }
+});
+
+test('coordinator startup refuses unsupported platforms before spawning process A (T9)', async () => {
+  const {
+    createGrokCarrierCoordinator,
+  } = await import(coordinatorLibUrl);
+  const marker = join(makeTemporaryDirectory('t9-no-spawn-'), 'ran');
+  const detectorPath = join(makeTemporaryDirectory('t9-detector-'), 'detector.mjs');
+  writeFileSync(detectorPath, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'ran');`);
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: createGitFixture('t9 darwin'),
+      mode: 'review',
+      platform: 'darwin',
+      arch: 'arm64',
+      detectorPath,
+    }),
+    (error) => {
+      assert.equal(error.containment_refusal.ok, false);
+      assert.equal(error.containment_refusal.reason, 'unsupported_grok_containment');
+      assert.equal(error.containment_refusal.platform, 'darwin');
+      assert.equal(error.containment_refusal.arch, 'arm64');
+      assert.equal(error.containment_refusal.mode, 'review');
+      return true;
+    },
+  );
+  assert.equal(existsSync(marker), false);
+});
+
+test('coordinator startup refuses missing, directory, symlink, and non-executable helpers (T9)', async () => {
+  const {
+    createGrokCarrierCoordinator,
+    defaultCoordinatorHelperExists,
+  } = await import(coordinatorLibUrl);
+  const root = makeTemporaryDirectory('t9-helper-');
+  const cases = [
+    ['missing', join(root, 'absent-helper'), () => {}],
+    ['directory', join(root, 'dir-helper'), (target) => mkdirSync(target)],
+    ['symlink', join(root, 'link-helper'), (target) => {
+      writeFileSync(join(root, 'real-helper'), '#!/bin/sh\n', { mode: 0o755 });
+      symlinkSync(join(root, 'real-helper'), target);
+    }],
+    ['non-executable', join(root, 'plain-helper'), (target) => {
+      writeFileSync(target, '#!/bin/sh\n', { mode: 0o644 });
+    }],
+  ];
+  for (const [label, helperPath, setup] of cases) {
+    setup(helperPath);
+    if (label === 'non-executable' && process.platform === 'win32') {
+      // NTFS does not surface a Unix execute bit; access(X_OK) succeeds for a
+      // readable regular file. The product check stays lstat + X_OK.
+      continue;
+    }
+    assert.equal(defaultCoordinatorHelperExists(helperPath), false, label);
+    await assert.rejects(
+      () => createGrokCarrierCoordinator({
+        cwd: createGitFixture(`t9 ${label}`),
+        mode: 'dry-run',
+        platform: 'linux',
+        arch: 'x64',
+        helperExists: () => defaultCoordinatorHelperExists(helperPath),
+        detectorPath: join(root, 'unused.mjs'),
+      }),
+      (error) => {
+        assert.equal(error.containment_refusal.reason, 'missing_grok_containment_helper', label);
+        assert.equal(error.containment_refusal.mechanism, 'pid-namespace', label);
+        assert.match(error.containment_refusal.helper_path, /grok-linux-pidns-owner/u, label);
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(root, 'unused.mjs')), false, `${label} must not spawn`);
+  }
+
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: createGitFixture('t9 aarch64'),
+      mode: 'review',
+      platform: 'linux',
+      arch: 'arm64',
+    }),
+    (error) => error.containment_refusal.reason === 'unsupported_grok_containment',
+  );
+});
+
+test('coordinator CLI prints containment_refusal JSON and exits 3 (T9)', async () => {
+  const { runCoordinatorCli } = await import(pathToFileURL(coordinatorExecutablePath).href);
+  const lines = [];
+  let spawnCount = 0;
+  await runCoordinatorCli(['--cwd', createGitFixture('t9 cli'), '--mode', 'review'], {
+    createCoordinator: async () => {
+      spawnCount += 1;
+      const error = new Error('unsupported_grok_containment');
+      error.containment_refusal = {
+        ok: false,
+        reason: 'unsupported_grok_containment',
+        platform: 'darwin',
+        arch: 'arm64',
+        mechanism: null,
+        helper_path: null,
+        mode: 'review',
+        remedy: 'inactive',
+      };
+      throw error;
+    },
+    stdout: { write: (chunk) => { lines.push(chunk); } },
+    stderr: { write: () => { throw new Error('stderr must stay empty for containment refusal'); } },
+  });
+  assert.equal(spawnCount, 1);
+  assert.equal(process.exitCode, 3);
+  const parsed = JSON.parse(String(lines[0]).trim());
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.reason, 'unsupported_grok_containment');
+  assert.equal(Object.hasOwn(parsed, 'ok'), true);
+  process.exitCode = 0;
+});
+
+test('coordinator CLI usage errors stay exit 1 and do not look like containment refusal (T9)', async () => {
+  const { runCoordinatorCli } = await import(pathToFileURL(coordinatorExecutablePath).href);
+  const stderr = [];
+  await runCoordinatorCli(['--cwd', createGitFixture('t9 usage')], {
+    stdout: { write: () => { throw new Error('usage errors must not write stdout JSON'); } },
+    stderr: { write: (chunk) => { stderr.push(chunk); } },
+  });
+  assert.equal(process.exitCode, 1);
+  assert.match(stderr.join(''), /--mode/u);
+  process.exitCode = 0;
+});
+
+test('in-process coordinator success stdout has two lines and no ok key (T9)', async () => {
+  const { runCoordinatorCli } = await import(pathToFileURL(coordinatorExecutablePath).href);
+  const lines = [];
+  await runCoordinatorCli(['--cwd', createGitFixture('t9 success'), '--mode', 'review'], {
+    createCoordinator: async () => ({
+      environment: { grok_cli: true, grok_compatibility_verified: true },
+      coordinator_id: 'coord-1',
+      generation: 1,
+      pid: 1,
+      mode: 'review',
+      control_path: '/tmp/c.sock',
+      environment_sha256: 'a'.repeat(64),
+      terminated: Promise.resolve(),
+    }),
+    stdout: { write: (chunk) => { lines.push(String(chunk)); } },
+    stderr: { write: () => { throw new Error('success path must not write stderr'); } },
+  });
+  assert.equal(lines.length, 2);
+  const environment = JSON.parse(lines[0]);
+  const descriptor = JSON.parse(lines[1]);
+  assert.equal(Object.hasOwn(environment, 'ok'), false);
+  assert.equal(Object.hasOwn(descriptor, 'ok'), false);
+  assert.equal(descriptor.coordinator_id, 'coord-1');
+});
+
+test('detectEnvironment reports unsupported_grok_cli_version without verifying (T10)', async () => {
+  const { detectEnvironment } = await loadDetector();
+  const grok = makeGrokBin('t10-version-');
+  const grokFile = process.platform === 'win32' ? join(grok.root, 'grok-probe.js') : join(grok.bin, 'grok');
+  writeFileSync(grokFile, readFileSync(grokFile, 'utf8').replaceAll('1.0.4', '1.0.13'));
+  const env = pathEnvironment(grok.bin);
+  const detected = await detectEnvironment({ cwd: createGitFixture('t10 version'), env, grokCandidate: true });
+  assert.equal(detected.grok_cli, false);
+  assert.equal(detected.grok_compatibility_verified, false);
+  assert.equal(detected.grok_version, '1.0.13');
+  assert.equal(detected.grok_unavailable_reason, 'unsupported_grok_cli_version');
+  assert.deepEqual(detected.grok_supported_versions, ['1.0.4']);
+});
+
+test('missing carrier frame with closed-schema stdout becomes containment_refusal (T10)', async () => {
+  const { createGrokCarrierCoordinator } = await import(coordinatorLibUrl);
+  const root = makeTemporaryDirectory('t10-closed-');
+  const detectorPath = join(root, 'closed-schema.mjs');
+  const environment = {
+    grok_cli: false,
+    grok_compatibility_verified: false,
+    grok_compatibility_evidence: null,
+    grok_unavailable_reason: 'incompatible_grok_cli',
+  };
+  writeFileSync(detectorPath, [
+    `process.stdout.write(${JSON.stringify(`${JSON.stringify(environment)}\n`)});`,
+    '',
+  ].join('\n'));
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: createGitFixture('t10 closed'),
+      mode: 'review',
+      detectorPath,
+      platform: 'linux',
+      arch: 'x64',
+      helperExists: () => true,
+      drainTimeoutMs: 5000,
+    }),
+    (error) => error.containment_refusal?.reason === 'incompatible_grok_cli',
+  );
+
+  const versionDetector = join(root, 'version-schema.mjs');
+  writeFileSync(versionDetector, [
+    `process.stdout.write(${JSON.stringify(`${JSON.stringify({
+      ...environment,
+      grok_unavailable_reason: 'unsupported_grok_cli_version',
+      grok_version: '1.0.13',
+      grok_supported_versions: ['1.0.4'],
+    })}\n`)});`,
+    '',
+  ].join('\n'));
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: createGitFixture('t10 version schema'),
+      mode: 'review',
+      detectorPath: versionDetector,
+      platform: 'linux',
+      arch: 'x64',
+      helperExists: () => true,
+      drainTimeoutMs: 5000,
+    }),
+    (error) => {
+      assert.equal(error.containment_refusal.reason, 'unsupported_grok_cli_version');
+      assert.equal(error.containment_refusal.grok_version, '1.0.13');
+      return true;
+    },
+  );
+});
+
+test('closed-schema stdout with nonzero process A exit is not laundered (T10)', async () => {
+  const { createGrokCarrierCoordinator } = await import(coordinatorLibUrl);
+  const detectorPath = join(makeTemporaryDirectory('t10-nonzero-'), 'bad-exit.mjs');
+  writeFileSync(detectorPath, [
+    "process.stdout.write('{\"grok_cli\":false,\"grok_compatibility_verified\":false,\"grok_compatibility_evidence\":null,\"grok_unavailable_reason\":\"incompatible_grok_cli\"}\\n');",
+    'process.exit(2);',
+    '',
+  ].join('\n'));
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: createGitFixture('t10 nonzero'),
+      mode: 'review',
+      detectorPath,
+      platform: 'linux',
+      arch: 'x64',
+      helperExists: () => true,
+      drainTimeoutMs: 5000,
+    }),
+    (error) => !error.containment_refusal && /exited with code 2|carrier frame is missing/u.test(error.message),
+  );
+});
+
+test('coordinator CLI rejects --platform as an unknown argument (T9)', async () => {
+  const { parseArguments } = await import(pathToFileURL(coordinatorExecutablePath).href);
+  assert.throws(
+    () => parseArguments(['--cwd', '/tmp', '--mode', 'review', '--platform', 'linux']),
+    /unknown argument: --platform/u,
+  );
 });

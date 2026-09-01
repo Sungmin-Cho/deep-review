@@ -66,7 +66,9 @@ The runtime enforces this grammar:
     ```
 
     Its first stdout line is the environment JSON and its second is the
-    coordinator descriptor carrying `control_path`. Then run
+    coordinator descriptor carrying `control_path`. If that first line is JSON
+    whose `ok` field is present and `ok === false`, show `reason` and `remedy`
+    and stop the branch (fail-closed, not a degraded listing). Then run
     `node {plugin_root}/hooks/scripts/classify-artifacts.mjs --repo PROJECT_ROOT`
     (append `--grok-coordinator-control CONTROL_PATH` on the candidate branch,
     and `--explain-routing` when the route set `explainRouting`), print its

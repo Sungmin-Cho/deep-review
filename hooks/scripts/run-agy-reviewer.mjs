@@ -18,6 +18,7 @@ import {
 import { atomicWriteFile, resolvePluginRoot } from './lib/runtime-context.mjs';
 import { loadExecutionPlan, parseExecutionRouteJson } from './lib/execution-plan.mjs';
 import { parseReviewerReport } from './review-synthesis.mjs';
+import { buildReportContract } from './lib/report-contract.mjs';
 
 const BODY_LIMIT = 198_000;
 const READONLY_PREAMBLE = `READ-ONLY REVIEW MODE - ABSOLUTE, NON-NEGOTIABLE CONSTRAINT
@@ -31,36 +32,7 @@ them. Any workspace mutation invalidates this review.
 The review request follows below.
 ============================================================
 
-OUTPUT CONTRACT - REQUIRED
-============================================================
-Your entire response MUST use the canonical outer report contract below.
-Do not use an alternative title, security-audit title, or free-form verdict.
-
-# Deep Review Report — YYYY-MM-DD
-
-## Summary
-
-- **Verdict**: APPROVE | CONCERN | REQUEST_CHANGES
-- **Review Mode**: 1-way (agy only)
-- **Issues**: 🔴 N건, 🟡 N건, ℹ️ N건
-
-## Code Review
-
-### 🔴 Critical
-### 🟡 Warning
-### ℹ️ Info
-### 🟢 Passed
-
-Use REQUEST_CHANGES when any Critical exists, CONCERN when only Warnings exist,
-and APPROVE only when both Critical and Warning counts are zero. The issue
-counts MUST equal the findings in the sections. Missing or malformed contract
-fields cause this reviewer output to be excluded.
-Under each severity heading, write exactly one single-line \`- \` bullet per
-finding, with its evidence and remediation on that same bullet. For an empty
-severity section, write exactly \`None.\`. Keep Passed entries as \`- \` bullets.
-============================================================
-
-`;
+${buildReportContract({ reviewMode: '1-way (agy only)' })}`;
 const AUTH_PATTERN = /Reauthentication required|do not currently have an active account|OAuth token expired|Please run.*agy.*login|Not signed in|Authentication failed/iu;
 const UNSUPPORTED_MODEL_PATTERN = /unsupported[^\n]*(?:model|--model)|unknown[^\n]*(?:model|--model)|invalid[^\n]*model|unrecognized[^\n]*--model/iu;
 const SAFE_MODEL_PATTERN = /^[A-Za-z0-9 ._/()-]+$/u;
@@ -107,7 +79,7 @@ function sectionFindingCount(output, heading) {
 export function normalizeAgyReport(output) {
   if (typeof output !== 'string' || output.length === 0) return null;
   const headings = [...output.matchAll(/^# Deep Review Report — [0-9]{4}-[0-9]{2}-[0-9]{2}$/gmu)];
-  if (headings.length !== 1 || !/^## Summary$/mu.test(output) || !/^## Code Review$/mu.test(output)) return null;
+  if (headings.length !== 1 || !/^## Summary$/mu.test(output)) return null;
   const verdict = /^- \*\*Verdict\*\*:\s*(APPROVE|CONCERN|REQUEST_CHANGES)\s*$/mu.exec(output)?.[1];
   const issues = /^- \*\*Issues\*\*:\s*[^\n]*?🔴\s*([0-9]+)[^\n]*?🟡\s*([0-9]+)[^\n]*?ℹ(?:️)?\s*([0-9]+)[^\n]*$/mu.exec(output);
   if (!verdict || !issues) return null;

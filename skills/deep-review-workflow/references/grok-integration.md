@@ -45,6 +45,30 @@ zero probe children. On such a host, `unsupported_grok_containment` is the
 `operational_failure` reason a `--grok` review terminates with, and it fails the
 **entire review** rather than degrading to four voices.
 
+## Platform and helper availability
+
+D21 inventories only `linux/x64` (PID namespace) and `win32/x64` (Job Object).
+Every other platform/arch pair — including macOS — fails closed with
+`unsupported_grok_containment` before tmpdir, socket, or process A creation.
+On an inventoried platform the helper must be a regular executable file at the
+inventoried path; a missing, directory, symlink, or non-executable helper is
+`missing_grok_containment_helper`.
+
+Allowlist today is Grok CLI `1.0.4` only. Expanding it requires a resealed
+compatibility probe; this release documents the procedure and does not extend
+the pin. `npm run build:native` compiles `linux-x64` or `win32-x64` helpers
+(`GROK_NATIVE_TARGET`, `CC`). Built helpers are not in the release tarball, and
+compiling one is not a remedy: production `helperSpawner` still refuses and the
+contained runner still throws, so `--grok` stays inactive. The helper is a
+prerequisite for a later runtime-wiring workstream, not an on-switch.
+
+| reason | when | remedy |
+|---|---|---|
+| `unsupported_grok_containment` | platform/arch is not inventoried | do not expect `--grok` on this host |
+| `missing_grok_containment_helper` | inventoried platform, helper not a regular executable | later runtime-wiring ships the helper; compiling locally does not enable `--grok` |
+| `unsupported_grok_cli_version` | CLI version is outside `{1.0.4}` | reseal the compatibility probe before expanding the allowlist |
+| `incompatible_grok_cli` | CLI missing, banner malformed, or required help flags absent | install a compatible Grok CLI |
+
 ## Privacy gate
 
 Do not scan, create state, or patch config when `--no-grok` is effective,

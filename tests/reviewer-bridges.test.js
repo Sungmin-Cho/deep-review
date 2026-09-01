@@ -25,10 +25,11 @@ import {
   fixtureRootFor,
 } from './helpers/git-fixture.js';
 import { writeContainedFile } from '../hooks/scripts/lib/runtime-context.mjs';
-import { runClaudeReviewer } from '../hooks/scripts/run-claude-reviewer.mjs';
-import { runCodexReviewer } from '../hooks/scripts/run-codex-reviewer.mjs';
+import { parseCli as parseClaudeCli, runClaudeReviewer } from '../hooks/scripts/run-claude-reviewer.mjs';
+import { parseCli as parseCodexCli, runCodexReviewer } from '../hooks/scripts/run-codex-reviewer.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const claudeBridgePath = join(pluginRoot, 'hooks', 'scripts', 'run-claude-reviewer.mjs');
 const codexBridgePath = join(pluginRoot, 'hooks', 'scripts', 'run-codex-reviewer.mjs');
 
 function workspace(label) {
@@ -241,6 +242,13 @@ if (behavior === 'symlink') {
     lastMessage,
     '# Deep Review Report — 2026-07-26\\n\\n## Summary\\n\\n- **Verdict**: REQUEST_CHANGES\\n- **Issues**: 🔴 1건, 🟡 0건, ℹ️ 0건\\n\\n## Code Review\\n\\n### 🔴 Critical\\n\\nprose finding without bullet\\n\\n### 🟡 Warning\\n\\nNone.\\n\\n### ℹ️ Info\\n\\nNone.\\n\\n### 🟢 Passed\\n\\n- Contract valid.\\n',
   );
+} else if (behavior === 'missing-container') {
+  writeFileSync(
+    lastMessage,
+    '# Deep Review Report — 2026-07-26\\n\\n## Summary\\n\\n- **Verdict**: APPROVE\\n- **Issues**: 🔴 0건, 🟡 0건, ℹ️ 0건\\n\\n### 🔴 Critical\\n\\nNone.\\n\\n### 🟡 Warning\\n\\nNone.\\n\\n### ℹ️ Info\\n\\nNone.\\n\\n### 🟢 Passed\\n\\n- Contract valid.\\n',
+  );
+} else if (behavior === 'invalid-utf8') {
+  writeFileSync(lastMessage, Buffer.from([0xff, 0xfe, 0x80]));
 } else {
   writeFileSync(
     lastMessage,
@@ -935,6 +943,16 @@ test('Codex exec bridge fails closed without fallback when capture overflows and
 });
 
 test('Codex exec bridge fails closed for timeout, auth, generic, empty, whitespace, symlink, and oversized report', async (t) => {
+  const preserved = new Set([
+    'whitespace',
+    'malformed',
+    'duplicate-summary',
+    'warning-approve',
+    'duplicate-report-heading',
+    'duplicate-code-review',
+    'count-mismatch',
+    'invalid-finding-grammar',
+  ]);
   for (const [behavior, status, code] of [
     ['auth-model', 'not_authenticated', 7],
     ['timeout', 'timeout', 124],
@@ -973,14 +991,145 @@ test('Codex exec bridge fails closed for timeout, auth, generic, empty, whitespa
       assert.equal(result.status, status);
       assert.equal(result.code, code);
       assert.equal(readFileSync(`${outputFile}.status`, 'utf8'), `${status}\n`);
-      assert.equal(readFileSync(outputFile, 'utf8'), '');
+      const published = readFileSync(outputFile);
+      if (preserved.has(behavior)) {
+        assert.notEqual(published.length, 0, `${behavior} must preserve the last-message bytes`);
+      } else {
+        assert.equal(published.toString('utf8'), '');
+      }
       assert.equal(rows(log).length <= 1, true, `${behavior} must never retry`);
       const sidecar = JSON.parse(readFileSync(`${outputFile}.result.json`, 'utf8'));
       assert.equal(sidecar.attempt_count, 1);
       assert.equal(sidecar.canonical_report, null);
       assert.equal(sidecar.fallback.occurred, false);
+      if (preserved.has(behavior)) {
+        assert.equal(sidecar.raw_report.strict_valid, false);
+        assert.equal(typeof sidecar.raw_report.diagnosis, 'string');
+        assert.equal(sidecar.raw_report.bytes, published.length);
+      }
     });
   }
+});
+
+test('Codex exec bridge preserves invalid last-message bytes and admits #64 shape (T7)', async () => {
+  const root = workspace('codex-t7-preservation');
+  const projectRoot = codexProject(root);
+  const binary = fakeCodexCli(root);
+  const promptFile = join(root, 'payload.txt');
+  writeFileSync(promptFile, 'payload');
+
+  const malformedOut = join(projectRoot, 'malformed.md');
+  const malformed = await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile: malformedOut,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'malformed.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['malformed']),
+    },
+  });
+  assert.equal(malformed.status, 'failed');
+  assert.notEqual(readFileSync(malformedOut, 'utf8').length, 0);
+  const malformedSidecar = JSON.parse(readFileSync(`${malformedOut}.result.json`, 'utf8'));
+  assert.equal(malformedSidecar.canonical_report, null);
+  assert.equal(malformedSidecar.raw_report.diagnosis, 'report_title_invalid');
+
+  const duplicateOut = join(projectRoot, 'duplicate-summary.md');
+  await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile: duplicateOut,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'duplicate.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['duplicate-summary']),
+    },
+  });
+  const duplicateSidecar = JSON.parse(readFileSync(`${duplicateOut}.result.json`, 'utf8'));
+  assert.equal(duplicateSidecar.raw_report.diagnosis, 'verdict_label_invalid');
+
+  const missingOut = join(projectRoot, 'missing-container.md');
+  const missing = await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile: missingOut,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'missing.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['missing-container']),
+    },
+  });
+  assert.equal(missing.status, 'success');
+  const missingSidecar = JSON.parse(readFileSync(`${missingOut}.result.json`, 'utf8'));
+  assert.deepEqual(missingSidecar.canonical_report.tolerances, ['missing_code_review_heading']);
+  assert.equal(Object.hasOwn(missingSidecar, 'raw_report'), false);
+
+  const utf8Out = join(projectRoot, 'invalid-utf8.md');
+  const utf8 = await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile: utf8Out,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'utf8.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['invalid-utf8']),
+    },
+  });
+  assert.equal(utf8.status, 'failed');
+  assert.equal(readFileSync(utf8Out).length, 0);
+  const utf8Sidecar = JSON.parse(readFileSync(`${utf8Out}.result.json`, 'utf8'));
+  assert.equal(utf8Sidecar.canonical_report, null);
+  assert.equal(utf8Sidecar.raw_report.diagnosis, 'invalid_encoding');
+});
+
+test('transport failure does not preserve a leftover canonical last-message (T7)', async () => {
+  const root = workspace('codex-t7-transport-guard');
+  const projectRoot = codexProject(root);
+  const binary = fakeCodexCli(root);
+  const outputFile = join(projectRoot, 'auth.md');
+  const promptFile = join(root, 'payload.txt');
+  writeFileSync(promptFile, 'payload');
+  const result = await runCodexReviewer({
+    projectRoot,
+    pluginRoot,
+    promptFile,
+    outputFile,
+    reviewerId: 'codex-review',
+    binary,
+    executionPlan: codexPlan(),
+    timeoutSeconds: 5,
+    env: {
+      ...process.env,
+      FAKE_LOG: join(root, 'auth.jsonl'),
+      FAKE_BEHAVIORS: JSON.stringify(['auth-model']),
+    },
+  });
+  assert.equal(result.status, 'not_authenticated');
+  assert.equal(readFileSync(outputFile, 'utf8'), '');
+  const sidecar = JSON.parse(readFileSync(`${outputFile}.result.json`, 'utf8'));
+  assert.equal(sidecar.canonical_report, null);
+  assert.equal(Object.hasOwn(sidecar, 'raw_report'), false);
 });
 
 test('Codex exec bridge classifies credential failures before model rejection and never retries', async (t) => {
@@ -1267,6 +1416,232 @@ test('Codex bridge CLI exits nonzero for adapter failure and preserves genuine c
   }
 });
 
+test('Codex bridge parseCli accepts exactly one execution source with --reviewer-id (T1)', () => {
+  const routeJson = '{"reviewer_id":"codex-review"}';
+
+  assert.deepEqual(
+    parseCodexCli(['--execution-route-json', routeJson, '--reviewer-id', 'codex-review']),
+    { executionRouteJson: routeJson, reviewerId: 'codex-review' },
+  );
+  assert.deepEqual(
+    parseCodexCli(['--routing-plan', 'plan.json', '--reviewer-id', 'codex-adversarial']),
+    { routingPlan: 'plan.json', reviewerId: 'codex-adversarial' },
+  );
+
+  // Last-value-wins is inherited parser behaviour, documented rather than
+  // changed: repeating a flag keeps the last occurrence.
+  assert.deepEqual(
+    parseCodexCli([
+      '--routing-plan', 'first.json',
+      '--routing-plan', 'second.json',
+      '--reviewer-id', 'codex-review',
+    ]),
+    { routingPlan: 'second.json', reviewerId: 'codex-review' },
+  );
+  assert.deepEqual(
+    parseCodexCli([
+      '--execution-route-json', '{"reviewer_id":"codex-review"}',
+      '--reviewer-id', 'codex-review',
+      '--reviewer-id', 'codex-adversarial',
+    ]),
+    { executionRouteJson: '{"reviewer_id":"codex-review"}', reviewerId: 'codex-adversarial' },
+  );
+
+  const sourceError = /exactly one execution source \(--routing-plan or --execution-route-json\) and --reviewer-id must be provided together/u;
+  assert.throws(() => parseCodexCli([]), sourceError);
+  assert.throws(() => parseCodexCli(['--reviewer-id', 'codex-review']), sourceError);
+  assert.throws(
+    () => parseCodexCli(['--execution-route-json', routeJson]),
+    sourceError,
+  );
+  assert.throws(
+    () => parseCodexCli(['--routing-plan', 'plan.json']),
+    sourceError,
+  );
+  assert.throws(
+    () => parseCodexCli([
+      '--routing-plan', 'plan.json',
+      '--execution-route-json', routeJson,
+      '--reviewer-id', 'codex-review',
+    ]),
+    sourceError,
+  );
+
+  assert.throws(
+    () => parseCodexCli(['--routing-plan', '', '--reviewer-id', 'codex-review']),
+    /--routing-plan must be non-empty/u,
+  );
+  assert.throws(
+    () => parseCodexCli(['--execution-route-json', '', '--reviewer-id', 'codex-review']),
+    /--execution-route-json must be non-empty/u,
+  );
+  assert.throws(
+    () => parseCodexCli(['--routing-plan', 'plan.json', '--reviewer-id', '']),
+    /--reviewer-id must be non-empty/u,
+  );
+});
+
+test('Codex bridge --help documents both execution sources (T1)', () => {
+  const run = spawnSync(process.execPath, [codexBridgePath, '--help'], {
+    encoding: 'utf8',
+    shell: false,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(
+    run.stdout,
+    /--routing-plan FILE \| --execution-route-json JSON/u,
+  );
+  assert.match(run.stdout, /--reviewer-id codex-review\|codex-adversarial/u);
+});
+
+test('Claude bridge parseCli pairs an optional execution source with --reviewer-id (T2)', () => {
+  const routeJson = '{"reviewer_id":"claude-opus"}';
+  const sourceError = /exactly one execution source \(--routing-plan or --execution-route-json\) and --reviewer-id must be provided together/u;
+
+  // Source 0 is the shadow-plan path and stays legal.
+  assert.deepEqual(parseClaudeCli([]), {});
+  assert.deepEqual(
+    parseClaudeCli(['--execution-route-json', routeJson, '--reviewer-id', 'claude-opus']),
+    { executionRouteJson: routeJson, reviewerId: 'claude-opus' },
+  );
+  assert.deepEqual(
+    parseClaudeCli(['--routing-plan', 'plan.json', '--reviewer-id', 'claude-opus']),
+    { routingPlan: 'plan.json', reviewerId: 'claude-opus' },
+  );
+
+  assert.deepEqual(
+    parseClaudeCli([
+      '--routing-plan', 'first.json',
+      '--routing-plan', 'second.json',
+      '--reviewer-id', 'claude-opus',
+    ]),
+    { routingPlan: 'second.json', reviewerId: 'claude-opus' },
+  );
+
+  assert.throws(() => parseClaudeCli(['--reviewer-id', 'claude-opus']), sourceError);
+  assert.throws(
+    () => parseClaudeCli(['--execution-route-json', routeJson]),
+    sourceError,
+  );
+  assert.throws(
+    () => parseClaudeCli(['--routing-plan', 'plan.json']),
+    sourceError,
+  );
+  assert.throws(
+    () => parseClaudeCli([
+      '--routing-plan', 'plan.json',
+      '--execution-route-json', routeJson,
+      '--reviewer-id', 'claude-opus',
+    ]),
+    sourceError,
+  );
+
+  assert.throws(
+    () => parseClaudeCli(['--routing-plan', '', '--reviewer-id', 'claude-opus']),
+    /--routing-plan must be non-empty/u,
+  );
+  assert.throws(
+    () => parseClaudeCli(['--execution-route-json', '', '--reviewer-id', 'claude-opus']),
+    /--execution-route-json must be non-empty/u,
+  );
+  assert.throws(
+    () => parseClaudeCli(['--routing-plan', 'plan.json', '--reviewer-id', '']),
+    /--reviewer-id must be non-empty/u,
+  );
+});
+
+test('Claude bridge --help documents the optional execution source pair (T2)', () => {
+  const run = spawnSync(process.execPath, [claudeBridgePath, '--help'], {
+    encoding: 'utf8',
+    shell: false,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(
+    run.stdout,
+    /\[\(--routing-plan FILE \| --execution-route-json JSON\) --reviewer-id ID\]/u,
+  );
+});
+
+function documentedCodexRoute(reviewerId) {
+  return {
+    protocol_version: '3.0',
+    reviewer_id: reviewerId,
+    provider: 'codex',
+    adapter_id: 'codex-cli',
+    assignment_role: reviewerId === 'codex-adversarial' ? 'adversarial' : 'standard',
+    rubric_id: reviewerId === 'codex-adversarial' ? 'adversarial-v1' : 'standard-v1',
+    wave: 1,
+    required: true,
+    selection_reason: 'T3 documented command-line fixture',
+    resolved: { model: 'explicit/model Ω', effort: 'high' },
+    artifact_phase: 'implementation',
+    risk: 'low',
+    document_review_mode: 'full-readiness',
+  };
+}
+
+test('Codex bridge CLI runs the documented §4.2 execution-route-json command line (T3)', () => {
+  const root = workspace('codex-cli-documented');
+  const projectRoot = codexProject(root);
+  const binary = fakeCodexCli(root);
+  mkdirSync(join(projectRoot, '.deep-review', 'tmp'), { recursive: true });
+  const outputFile = join(projectRoot, '.deep-review', 'tmp', 'codex-review.md');
+  const promptFile = join(root, 'payload.txt');
+  const log = join(root, 'argv.jsonl');
+  writeFileSync(promptFile, 'DOCUMENTED ROUTE PAYLOAD');
+
+  const run = spawnSync(process.execPath, [
+    codexBridgePath,
+    '--project-root', projectRoot,
+    '--plugin-root', pluginRoot,
+    '--prompt-file', promptFile,
+    '--execution-route-json', JSON.stringify(documentedCodexRoute('codex-review')),
+    '--reviewer-id', 'codex-review',
+    '--output', outputFile,
+    '--timeout-seconds', '900',
+    '--binary', binary,
+  ], {
+    cwd: root,
+    env: { ...process.env, FAKE_LOG: log },
+    encoding: 'utf8',
+    shell: false,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(readFileSync(`${outputFile}.status`, 'utf8'), 'success\n');
+  assert.equal(rows(log).length, 1);
+});
+
+test('Codex bridge CLI refuses --output outside PROJECT_ROOT (T3)', () => {
+  const root = workspace('codex-cli-outside-output');
+  const projectRoot = codexProject(root);
+  const binary = fakeCodexCli(root);
+  const outputFile = join(root, 'outside-result.md');
+  const promptFile = join(root, 'payload.txt');
+  const log = join(root, 'argv.jsonl');
+  writeFileSync(promptFile, 'OUTSIDE OUTPUT');
+
+  const run = spawnSync(process.execPath, [
+    codexBridgePath,
+    '--project-root', projectRoot,
+    '--plugin-root', pluginRoot,
+    '--prompt-file', promptFile,
+    '--execution-route-json', JSON.stringify(documentedCodexRoute('codex-adversarial')),
+    '--reviewer-id', 'codex-adversarial',
+    '--output', outputFile,
+    '--timeout-seconds', '900',
+    '--binary', binary,
+  ], {
+    cwd: root,
+    env: { ...process.env, FAKE_LOG: log },
+    encoding: 'utf8',
+    shell: false,
+  });
+  assert.notEqual(run.status, 0, run.stdout);
+  assert.match(run.stderr, /refusing to write outside the repository root/u);
+  assert.equal(existsSync(log), false);
+  assert.equal(existsSync(outputFile), false);
+});
+
 // ---------------------------------------------------------------------------
 // SLICE-010a / T-PROBE-8 — the PUBLIC half of D22.
 //
@@ -1414,6 +1789,15 @@ async function startCoordinatorFromInstructions(relativePath, mode, repo, env) {
 test('T-PROBE-8: the public normal-review and dry-run/explain entrypoints cannot bypass the coordinator, re-detect, or outlive it', async (t) => {
   if (process.platform === 'win32') {
     t.skip('POSIX private-socket endpoints; the Windows named-pipe polarity is covered by the release smoke job');
+    return;
+  }
+  const { resolveGrokContainmentPlatform } = await import(pathToFileURL(
+    join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs'),
+  ).href);
+  const { defaultCoordinatorHelperExists } = await import(coordinatorLibraryUrl);
+  const gate = resolveGrokContainmentPlatform();
+  if (!gate.supported || !defaultCoordinatorHelperExists(gate.helper_path)) {
+    t.skip('shipped coordinator CLI success path requires an inventoried executable helper');
     return;
   }
   const grok = grokProbeBin('grok-public-entrypoints-');
@@ -1600,6 +1984,7 @@ test('T-PROBE-8: the negative frame matrix fails closed with a real process A an
     'try {',
     '  coordinator = await createGrokCarrierCoordinator({',
     '    cwd, mode: "review", env: process.env, detectorPath, drainTimeoutMs: Number(deadline),',
+    '    platform: "linux", arch: "x64", helperExists: () => true,',
     '  });',
     '} catch (error) {',
     '  process.stdout.write(`${JSON.stringify({ acquired: false, message: error.message })}\\n`);',

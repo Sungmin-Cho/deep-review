@@ -224,8 +224,20 @@ export function parseCli(argv) {
     values[key] = argv[index + 1];
     index += 1;
   }
-  if (Boolean(values.routingPlan) !== Boolean(values.reviewerId)) {
-    throw new Error('--routing-plan and --reviewer-id must be provided together');
+  const hasRoutingPlan = Object.hasOwn(values, 'routingPlan');
+  const hasExecutionRouteJson = Object.hasOwn(values, 'executionRouteJson');
+  const hasReviewerId = Object.hasOwn(values, 'reviewerId');
+  for (const [present, key, flag] of [
+    [hasRoutingPlan, 'routingPlan', '--routing-plan'],
+    [hasExecutionRouteJson, 'executionRouteJson', '--execution-route-json'],
+    [hasReviewerId, 'reviewerId', '--reviewer-id'],
+  ]) {
+    if (present && values[key].length === 0) throw new Error(`${flag} must be non-empty`);
+  }
+  const executionSourceCount = Number(hasRoutingPlan) + Number(hasExecutionRouteJson);
+  if (executionSourceCount > 1
+      || (executionSourceCount === 1) !== hasReviewerId) {
+    throw new Error('exactly one execution source (--routing-plan or --execution-route-json) and --reviewer-id must be provided together');
   }
   return values;
 }
@@ -233,7 +245,7 @@ export function parseCli(argv) {
 async function main() {
   const options = parseCli(process.argv.slice(2));
   if (options.help) {
-    process.stdout.write('Usage: run-claude-reviewer.mjs --project-root DIR --plugin-root DIR --prompt-file FILE --output FILE [--model MODEL] [--routing-plan FILE --reviewer-id ID] [--agent NAME] [--timeout-seconds N]\n');
+    process.stdout.write('Usage: run-claude-reviewer.mjs --project-root DIR --plugin-root DIR --prompt-file FILE --output FILE [--model MODEL] [(--routing-plan FILE | --execution-route-json JSON) --reviewer-id ID] [--agent NAME] [--timeout-seconds N]\n');
     return;
   }
   options.pluginRoot ??= resolvePluginRoot();

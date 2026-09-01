@@ -308,6 +308,10 @@ test('Codex bridge and host assertions route both roles without companion fallba
     );
   }
   assert.doesNotMatch(combined, /--kind|--companion|--focus-file|index exposure/iu);
+  assert.match(
+    execution.replace(/\r\n|\r/gu, '\n'),
+    /--reviewer-id codex-adversarial --output OUTPUT_FILE --timeout-seconds 900\n```\n\nOUTPUT_FILE must resolve inside PROJECT_ROOT[\s\S]{0,240}\.deep-review\/tmp\//u,
+  );
 });
 
 test('public review skill documents every Phase 2 routing override', () => {
@@ -835,7 +839,7 @@ test('document instructions use practical blockers and readiness-owned final ver
   }
 
   for (const relativePath of ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {
-    assert.equal(JSON.parse(read(relativePath)).version, '2.8.1', relativePath);
+    assert.equal(JSON.parse(read(relativePath)).version, '2.9.0', relativePath);
   }
 
   const changelog = read('CHANGELOG.md');
@@ -1119,6 +1123,8 @@ test('the loaded authorities gate Grok candidacy on resolved flags and share one
 
   // 4. `--grok-candidate` travels through the coordinator, on the candidate
   //    branch only, and the standalone detector stays the non-candidate path.
+  assert.match(execution, /ok === false/u);
+  assert.doesNotMatch(execution, /!parsed\.ok/u);
   assert.match(execution, /grok-carrier-coordinator\.mjs[\s\S]{0,900}--grok-candidate/isu);
   assert.match(execution, /(?:not a candidate|non-candidate|no Grok)[\s\S]{0,240}detect-environment\.mjs|detect-environment\.mjs[\s\S]{0,240}(?:not a candidate|non-candidate|no Grok)/isu);
 

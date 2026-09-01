@@ -20,7 +20,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import { canonicalStringify } from '../hooks/scripts/lib/grok-compatibility-carrier.mjs';
@@ -1010,15 +1010,17 @@ test('a timeout and an auth stderr map to their own terminal statuses, not to su
   assert.equal(unauthenticated, 'not_authenticated');
 });
 
-test('build-reviewer-payload.mjs gains no Artifact Gate injection', () => {
-  const source = readFileSync(join(pluginRoot, 'hooks', 'scripts', 'build-reviewer-payload.mjs'), 'utf8');
-  for (const token of ['Artifact Gate', 'parseArtifactGate', 'buildReportContract', 'artifact_gate']) {
-    assert.equal(
-      source.includes(token),
-      false,
-      `the payload builder must not inject ${token} — D16 has exactly one injection site`,
-    );
-  }
+test('build-reviewer-payload.mjs does not inject D16 into grok or agy payloads (T8)', async () => {
+  const { buildReviewerPayload } = await import(
+    pathToFileURL(join(pluginRoot, 'hooks', 'scripts', 'build-reviewer-payload.mjs')).href
+  );
+  const result = buildReviewerPayload({
+    pluginRoot,
+    diff: 'GROK_OR_AGY_DIFF',
+  });
+  const prompt = readFileSync(result.promptFile, 'utf8');
+  assert.doesNotMatch(prompt, /===== OUTPUT CONTRACT =====/);
+  assert.equal(prompt.trimEnd().endsWith('GROK_OR_AGY_DIFF'), true);
 });
 
 // ---------------------------------------------------------------------------

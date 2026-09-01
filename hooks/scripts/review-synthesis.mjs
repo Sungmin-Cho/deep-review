@@ -46,88 +46,175 @@ function normalizedCanonicalLabelCounts(summary) {
   return counts;
 }
 
-function strictCodeReviewIsValid(output, issues) {
-  const codeReviewHeadings = matchesFor(output, /^## Code Review$/gmu);
-  if (codeReviewHeadings.length !== 1) return false;
-  const codeReview = sectionAfterHeading(output, codeReviewHeadings[0]);
-  const canonicalHeadings = [
-    '### 🔴 Critical',
-    '### 🟡 Warning',
-    '### ℹ️ Info',
-    '### 🟢 Passed',
-  ];
-  const headings = matchesFor(codeReview, /^###\s+\S.*$/gmu);
-  if (headings.length !== canonicalHeadings.length
-      || headings.some((heading, index) => heading[0] !== canonicalHeadings[index])) {
-    return false;
-  }
-  if (codeReview.slice(0, headings[0].index).trim().length > 0) return false;
-  const counts = headings.map((heading, index) => {
-    const start = heading.index + heading[0].length;
-    const end = headings[index + 1]?.index ?? codeReview.length;
-    return strictFindingCount(codeReview.slice(start, end));
-  });
-  return counts.every((count) => count !== null)
-    && counts[0] === issues.critical
-    && counts[1] === issues.warning
-    && counts[2] === issues.info;
+const CANONICAL_SECTION_HEADINGS = Object.freeze([
+  '### 🔴 Critical',
+  '### 🟡 Warning',
+  '### ℹ️ Info',
+  '### 🟢 Passed',
+]);
+const SECTION_KEYS = Object.freeze(['critical', 'warning', 'info', 'passed']);
+const MISSING_CODE_REVIEW_TOLERANCE = 'missing_code_review_heading';
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
-export function parseReviewerReport(output, options = {}) {
-  if (typeof output !== 'string' || output.length === 0) return null;
+function diagnoseCanonicalSections(region, issues) {
+  const headings = matchesFor(region, /^###\s+\S.*$/gmu);
+  if (headings.length !== CANONICAL_SECTION_HEADINGS.length
+      || headings.some((heading, index) => heading[0] !== CANONICAL_SECTION_HEADINGS[index])) {
+    return { ok: false, failure: 'section_headings_invalid' };
+  }
+  if (region.slice(0, headings[0].index).trim().length > 0) {
+    return { ok: false, failure: 'prose_before_first_section' };
+  }
+  const counts = headings.map((heading, index) => {
+    const start = heading.index + heading[0].length;
+    const end = headings[index + 1]?.index ?? region.length;
+    return strictFindingCount(region.slice(start, end));
+  });
+  for (let index = 0; index < SECTION_KEYS.length; index += 1) {
+    if (counts[index] === null) {
+      return { ok: false, failure: `finding_lines_invalid:${SECTION_KEYS[index]}` };
+    }
+  }
+  const expected = [issues.critical, issues.warning, issues.info];
+  for (let index = 0; index < expected.length; index += 1) {
+    if (counts[index] !== expected[index]) {
+      return { ok: false, failure: `count_mismatch:${SECTION_KEYS[index]}` };
+    }
+  }
+  return { ok: true };
+}
+
+function diagnoseLenientCodeReview(report, summaryHeading, verdict, issues) {
+  const rest = report.slice(summaryHeading.index + summaryHeading[0].length);
+  const firstSection = /^###\s+\S.*$/mu.exec(rest);
+  const intervening = /^##\s+\S.*$/mu.exec(rest);
+  if (intervening && (!firstSection || intervening.index < firstSection.index)) {
+    return { ok: false, failure: 'intervening_heading_before_code_review' };
+  }
+  if (!firstSection || firstSection[0] !== CANONICAL_SECTION_HEADINGS[0]) {
+    return { ok: false, failure: 'section_headings_invalid' };
+  }
+  const region = intervening
+    ? rest.slice(firstSection.index, intervening.index)
+    : rest.slice(firstSection.index);
+  const sections = diagnoseCanonicalSections(region, issues);
+  if (!sections.ok) return sections;
+  for (const heading of CANONICAL_SECTION_HEADINGS) {
+    const appearances = matchesFor(report, new RegExp(`^${escapeRegExp(heading)}$`, 'gmu'));
+    if (appearances.length !== 1) return { ok: false, failure: 'section_headings_invalid' };
+  }
+  return {
+    ok: true,
+    verdict,
+    issues,
+    tolerances: [MISSING_CODE_REVIEW_TOLERANCE],
+  };
+}
+
+export function diagnoseReviewerReport(output, options = {}) {
+  const strict = options?.strict === true;
+  if (typeof output !== 'string' || output.length === 0) {
+    return { ok: false, failure: 'empty_output' };
+  }
   const reportHeadings = matchesFor(
     output,
     /^# Deep Review Report — [0-9]{4}-[0-9]{2}-[0-9]{2}$/gmu,
   );
-  if (reportHeadings.length !== 1) return null;
+  if (reportHeadings.length !== 1) return { ok: false, failure: 'report_title_invalid' };
   const [reportHeading] = reportHeadings;
-  if (output.slice(0, reportHeading.index).trim().length > 0) return null;
+  if (output.slice(0, reportHeading.index).trim().length > 0) {
+    return { ok: false, failure: 'prose_before_title' };
+  }
   const report = output.slice(reportHeading.index);
   const summaryHeadings = matchesFor(report, /^## Summary$/gmu);
   const codeReviewHeadings = matchesFor(report, /^## Code Review$/gmu);
-  if (summaryHeadings.length !== 1 || codeReviewHeadings.length > 1) return null;
+  if (summaryHeadings.length !== 1) return { ok: false, failure: 'summary_heading_invalid' };
+  if (codeReviewHeadings.length >= 2) {
+    return { ok: false, failure: 'code_review_heading_invalid' };
+  }
   const [summaryHeading] = summaryHeadings;
   const betweenReportAndSummary = report.slice(
     reportHeading[0].length,
     summaryHeading.index,
   );
-  if (betweenReportAndSummary.trim().length > 0) return null;
-  if (codeReviewHeadings[0] && codeReviewHeadings[0].index < summaryHeading.index) {
-    return null;
+  if (betweenReportAndSummary.trim().length > 0) {
+    return { ok: false, failure: 'prose_before_summary' };
   }
-  if (options?.strict === true && codeReviewHeadings.length !== 1) return null;
+  if (codeReviewHeadings[0] && codeReviewHeadings[0].index < summaryHeading.index) {
+    return { ok: false, failure: 'code_review_before_summary' };
+  }
 
-  const summary = sectionAfterHeading(report, summaryHeading);
+  let summary = sectionAfterHeading(report, summaryHeading);
+  if (strict && codeReviewHeadings.length === 0) {
+    const rest = report.slice(summaryHeading.index + summaryHeading[0].length);
+    const firstSection = /^###\s+\S.*$/mu.exec(rest);
+    if (firstSection && firstSection.index < summary.length) {
+      summary = rest.slice(0, firstSection.index);
+    }
+  }
   const verdictLabels = matchesFor(summary, /^- \*\*Verdict\*\*:/gmu);
   const issuesLabels = matchesFor(summary, /^- \*\*Issues\*\*:/gmu);
-  if (verdictLabels.length !== 1 || issuesLabels.length !== 1) return null;
-  if (options?.strict === true) {
+  if (verdictLabels.length !== 1) return { ok: false, failure: 'verdict_label_invalid' };
+  if (issuesLabels.length !== 1) return { ok: false, failure: 'issues_label_invalid' };
+  if (strict) {
     const normalizedLabels = normalizedCanonicalLabelCounts(summary);
-    if (normalizedLabels.verdict !== 1 || normalizedLabels.issues !== 1) return null;
+    if (normalizedLabels.verdict !== 1) return { ok: false, failure: 'verdict_label_invalid' };
+    if (normalizedLabels.issues !== 1) return { ok: false, failure: 'issues_label_invalid' };
   }
   const verdictMatches = [
     ...summary.matchAll(
       /^- \*\*Verdict\*\*:\s*(APPROVE|CONCERN|REQUEST_CHANGES)\s*$/gmu,
     ),
   ];
-  const issuesPattern = options?.strict === true
+  const issuesPattern = strict
     ? /^- \*\*Issues\*\*: 🔴 ([0-9]+)건, 🟡 ([0-9]+)건, ℹ(?:️)? ([0-9]+)건$/gmu
     : /^- \*\*Issues\*\*:\s*[^\n]*?🔴\s*([0-9]+)[^\n]*?🟡\s*([0-9]+)[^\n]*?ℹ(?:️)?\s*([0-9]+)[^\n]*$/gmu;
   const issuesMatches = [...summary.matchAll(issuesPattern)];
-  if (verdictMatches.length !== 1 || issuesMatches.length !== 1) return null;
+  if (verdictMatches.length !== 1) return { ok: false, failure: 'verdict_value_invalid' };
+  if (issuesMatches.length !== 1) return { ok: false, failure: 'issues_line_invalid' };
   const [verdictMatch] = verdictMatches;
   const [issuesMatch] = issuesMatches;
-  if (!VERDICTS.has(verdictMatch[1])) return null;
+  if (!VERDICTS.has(verdictMatch[1])) return { ok: false, failure: 'verdict_value_invalid' };
   const issues = {
     critical: Number(issuesMatch[1]),
     warning: Number(issuesMatch[2]),
     info: Number(issuesMatch[3]),
   };
-  if (issues.critical > 0 && verdictMatch[1] !== 'REQUEST_CHANGES') return null;
-  if (issues.critical === 0 && issues.warning > 0 && verdictMatch[1] === 'APPROVE') return null;
-  if (issues.critical === 0 && issues.warning === 0 && verdictMatch[1] !== 'APPROVE') return null;
-  if (options?.strict === true && !strictCodeReviewIsValid(report, issues)) return null;
-  return { verdict: verdictMatch[1], issues };
+  if (issues.critical > 0 && verdictMatch[1] !== 'REQUEST_CHANGES') {
+    return { ok: false, failure: 'verdict_issues_inconsistent' };
+  }
+  if (issues.critical === 0 && issues.warning > 0 && verdictMatch[1] === 'APPROVE') {
+    return { ok: false, failure: 'verdict_issues_inconsistent' };
+  }
+  if (issues.critical === 0 && issues.warning === 0 && verdictMatch[1] !== 'APPROVE') {
+    return { ok: false, failure: 'verdict_issues_inconsistent' };
+  }
+
+  if (!strict) {
+    return { ok: true, verdict: verdictMatch[1], issues };
+  }
+
+  if (codeReviewHeadings.length !== 1) {
+    return diagnoseLenientCodeReview(report, summaryHeading, verdictMatch[1], issues);
+  }
+
+  const codeReview = sectionAfterHeading(report, codeReviewHeadings[0]);
+  const sections = diagnoseCanonicalSections(codeReview, issues);
+  if (!sections.ok) return sections;
+  return { ok: true, verdict: verdictMatch[1], issues };
+}
+
+export function parseReviewerReport(output, options = {}) {
+  const diagnosed = diagnoseReviewerReport(output, options);
+  if (!diagnosed.ok) return null;
+  const parsed = { verdict: diagnosed.verdict, issues: diagnosed.issues };
+  if (Array.isArray(diagnosed.tolerances) && diagnosed.tolerances.length > 0) {
+    parsed.tolerances = diagnosed.tolerances;
+  }
+  return parsed;
 }
 
 function fingerprintFailure(before, after) {
@@ -159,14 +246,15 @@ export function evaluateReviewerAttempt({
       issues: null,
     };
   }
-  const parsed = parseReviewerReport(output, { strict: true });
-  if (!parsed) {
+  const diagnosed = diagnoseReviewerReport(output, { strict: true });
+  if (!diagnosed.ok) {
     return {
       ...(reviewerId ? { reviewer_id: reviewerId } : {}),
       role,
       output_digest: outputDigest,
       included: false,
       exclusion: 'malformed_or_empty_result',
+      exclusion_detail: diagnosed.failure,
       verdict: null,
       issues: null,
     };
@@ -177,7 +265,11 @@ export function evaluateReviewerAttempt({
     output_digest: outputDigest,
     included: true,
     exclusion: null,
-    ...parsed,
+    verdict: diagnosed.verdict,
+    issues: diagnosed.issues,
+    ...(Array.isArray(diagnosed.tolerances) && diagnosed.tolerances.length > 0
+      ? { tolerances: diagnosed.tolerances }
+      : {}),
   };
 }
 
@@ -224,7 +316,13 @@ export function synthesizeReviewAttempts(attempts, consensus) {
   const included = attempts.filter((attempt) => attempt?.included === true);
   const exclusions = attempts
     .filter((attempt) => attempt?.included !== true)
-    .map((attempt) => ({ role: attempt?.role || 'unknown', reason: attempt?.exclusion || 'not_successful' }));
+    .map((attempt) => {
+      const row = { role: attempt?.role || 'unknown', reason: attempt?.exclusion || 'not_successful' };
+      if (typeof attempt?.exclusion_detail === 'string' && attempt.exclusion_detail.length > 0) {
+        row.detail = attempt.exclusion_detail;
+      }
+      return row;
+    });
   if (included.length === 0) {
     return {
       status: 'operational_failure',
@@ -552,6 +650,23 @@ function providerFamilyCount(attempts, routingPlan) {
  * original evidence and its canonical rubric, then calls this function again
  * with every attempt and `expansionWavesUsed: 1`.
  */
+function admittedWithTolerancesProvenance(attempts) {
+  const rows = (Array.isArray(attempts) ? attempts : [])
+    .filter((attempt) => (
+      attempt?.included === true
+      && Array.isArray(attempt.tolerances)
+      && attempt.tolerances.length > 0
+    ))
+    .map((attempt) => ({
+      reviewer_id: attemptReviewerId(attempt),
+      tolerances: attempt.tolerances,
+    }))
+    .sort((left, right) => (
+      canonicalReviewerIndex(left.reviewer_id) - canonicalReviewerIndex(right.reviewer_id)
+    ));
+  return rows.length > 0 ? { admitted_with_tolerances: rows } : {};
+}
+
 export function synthesizeReviewRound({
   attempts,
   consensus,
@@ -562,6 +677,7 @@ export function synthesizeReviewRound({
   dispatch = null,
 } = {}) {
   if (!Array.isArray(attempts)) throw new TypeError('attempts must be an array');
+  const toleranceProvenance = admittedWithTolerancesProvenance(attempts);
   if (!routingPlan || routingPlan.protocol_version !== '3.0') {
     throw new Error('adaptive synthesis requires routing plan protocol 3.0');
   }
@@ -588,6 +704,7 @@ export function synthesizeReviewRound({
       operational_failure_reason: routingShortfalls.includes(UNSUPPORTED_GROK_CONTAINMENT)
         ? UNSUPPORTED_GROK_CONTAINMENT
         : null,
+      ...toleranceProvenance,
     };
   }
   if (routingIdentityError(routingPlan)) {
@@ -599,6 +716,7 @@ export function synthesizeReviewRound({
       phase6_allowed: false,
       exclusions: [],
       error: 'invalid_routing_plan_identity',
+      ...toleranceProvenance,
     };
   }
   const hasMaterializedWave2 = (routingPlan.routes || []).some((route) => route.wave === 2);
@@ -611,6 +729,7 @@ export function synthesizeReviewRound({
       phase6_allowed: false,
       exclusions: [],
       error: 'invalid_routing_plan_identity',
+      ...toleranceProvenance,
     };
   }
   const effectiveExpansionWavesUsed = hasMaterializedWave2
@@ -658,6 +777,7 @@ export function synthesizeReviewRound({
       phase6_allowed: false,
       exclusions: [],
       error: 'invalid_reviewer_identity',
+      ...toleranceProvenance,
     };
   }
   const shadowMode = routingPlan.shadow_mode === true;
@@ -680,6 +800,7 @@ export function synthesizeReviewRound({
         exclusions: [],
         error: 'invalid_readiness_admission',
         readiness_admission_error: error.reason || 'dispatch_malformed',
+        ...toleranceProvenance,
       };
     }
   }
@@ -703,6 +824,7 @@ export function synthesizeReviewRound({
       exclusions: synthesis.exclusions || [],
       error: 'required_reviewer_unavailable',
       missing_required_reviewers: missingHardRoutes.map((route) => route.reviewer_id),
+      ...toleranceProvenance,
     };
   }
   const reasons = shadowMode ? [] : expansionReasons({
@@ -761,6 +883,7 @@ export function synthesizeReviewRound({
         next_assignment: replacement,
         expanded_routing_plan: expandedRoutingPlan,
         exclusions: synthesis.exclusions || [],
+        ...toleranceProvenance,
       };
     }
     expansionRejected = 'no_unused_candidate';
@@ -781,6 +904,7 @@ export function synthesizeReviewRound({
       exclusions: synthesis.exclusions || [],
       error: 'critical_reviewer_floor',
       ...(expansionRejected ? { expansion_rejected: expansionRejected } : {}),
+      ...toleranceProvenance,
     };
   }
   if (synthesis.status !== 'reviewed') {
@@ -788,6 +912,7 @@ export function synthesizeReviewRound({
       ...synthesis,
       needs_expansion: false,
       ...(expansionRejected ? { expansion_rejected: expansionRejected } : {}),
+      ...toleranceProvenance,
     };
   }
 
@@ -830,6 +955,7 @@ export function synthesizeReviewRound({
       : {}),
     ...(documentBlocked ? { document_blocked: true } : {}),
     ...(expansionRejected ? { expansion_rejected: expansionRejected } : {}),
+    ...toleranceProvenance,
   };
 }
 

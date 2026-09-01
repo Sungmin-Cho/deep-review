@@ -4,6 +4,42 @@
 
 deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)와 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)을 따릅니다.
 
+## [2.9.0] — 2026-09-01
+
+### 추가
+- strict 리뷰어 리포트의 최초-실패 진단 코드(`exclusion_detail`)와, 관용
+  admit 또는 원문 보존 시의 `tolerances` / `admitted_with_tolerances` /
+  sidecar `raw_report` (Sungmin-Cho/deep-review#64).
+- coordinator 기동 거부를 `ok === false` 한 줄 JSON으로 노출. 사유는
+  `unsupported_grok_containment`, `missing_grok_containment_helper`,
+  `unsupported_grok_cli_version` (Sungmin-Cho/deep-review#65 진단 부분).
+
+### 변경
+- Codex·Claude 브리지 `parseCli`는 `--routing-plan` 또는
+  `--execution-route-json` 중 정확히 하나와 `--reviewer-id`를 함께 받는다.
+  이전에는 이중-source가 inline 쪽을 조용히 이겼지만 이제는 거부한다
+  (Sungmin-Cho/deep-review#63).
+- `## Code Review` 컨테이너가 없어도 4대 canonical 절이 있으면
+  `missing_code_review_heading` 관용으로 admit한다.
+- Claude/Codex 페이로드는 D16 OUTPUT CONTRACT를 최종 절로 둔다(문서
+  라우트는 Artifact Gate 포함). Codex last-message는 transport-success에서
+  파스 실패여도 보존하되, 유효하지 않은 UTF-8은 보존하지 않는다.
+
+### 수정
+- `--grok` 거부가 미지원 플랫폼·헬퍼 부재·allowlist 밖 버전에서
+  "carrier frame is missing"으로 붕괴하지 않는다. 진단·문서 수리일 뿐
+  `--grok` 활성화가 아니다.
+
+### 보안
+- fail-closed 리뷰어 카운트는 그대로다. 기형 리포트는 `N_actual`을
+  올리지 않는다. UTF-8 왕복에 실패하는 바이트는 admit하지 않는다.
+
+### 참고
+- 결합 롤백 단위: T4↔T6↔T7(진단/provenance/원문 보존),
+  T5↔T6↔T7(관용 admit과 그 carrier·브리지 보존),
+  T9↔T10(typed coordinator 거부 JSON/exit 3과 버전-축 재사용).
+  T9만 되돌리면 버전 거부가 stderr/exit 1로 퇴화한다.
+
 ## [2.8.1] — 2026-08-29
 
 ### 추가

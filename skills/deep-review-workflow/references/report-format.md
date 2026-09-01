@@ -58,6 +58,13 @@ adapter result fields `requested_*`, `resolved_*`, `applied_*`, and
 output, render `requested-but-unverified`; never use that label for a request
 that was omitted. Include fallback authorization, applied substitute, and reason.
 
+When a leaf report is isolated, render that reviewer's `exclusion_detail`
+closed-enum code next to `malformed_or_empty_result`. When a leaf report is
+admitted with tolerances, render `tolerances` (today: `missing_code_review_heading`)
+as a provenance note. The mechanical skeleton of a *leaf* reviewer report is the
+D16 OUTPUT CONTRACT; Cross-Model Verification and other synthesis-only sections
+are not leaf requirements.
+
 For pure document scope, every trusted reviewer report must emit the literal
 heading `## Artifact Gate` exactly once. The `json` fence must be on the
 immediately following line with no intervening prose:

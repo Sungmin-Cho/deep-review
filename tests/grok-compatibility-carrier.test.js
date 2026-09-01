@@ -330,4 +330,19 @@ test('the sole Grok CLI stdout parser accepts only the admitted version banner a
   ]) {
     assert.throws(() => parseGrokCompatibilityStdout(text, kind), pattern, name);
   }
+  let rejected;
+  try {
+    parseGrokCompatibilityStdout('grok 1.0.13 (d846eb93d94d) [stable]\n', 'version');
+  } catch (error) {
+    rejected = error;
+  }
+  assert.match(rejected.message, /unsupported Grok CLI version: 1\.0\.13 \(supported: 1\.0\.4\)/u);
+  assert.deepEqual(rejected.grokVersionRejection, { observed: '1.0.13', supported: ['1.0.4'] });
+  let rejectedUnstable;
+  try {
+    parseGrokCompatibilityStdout('grok 1.0.13 (d846eb93d94d)\n', 'version');
+  } catch (error) {
+    rejectedUnstable = error;
+  }
+  assert.equal(rejectedUnstable.grokVersionRejection.observed, '1.0.13');
 });

@@ -1768,6 +1768,15 @@ test('a production carrier fixture traversing detection, classification, dry-run
     t.skip('POSIX private-socket endpoints; the Windows named-pipe polarity is covered by the release smoke job');
     return;
   }
+  const { resolveGrokContainmentPlatform } = await import(pathToFileURL(path.join(
+    root, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs',
+  )).href);
+  const { defaultCoordinatorHelperExists } = await import(coordinatorLibUrl);
+  const gate = resolveGrokContainmentPlatform();
+  if (!gate.supported || !defaultCoordinatorHelperExists(gate.helper_path)) {
+    t.skip('shipped coordinator CLI success path requires an inventoried executable helper');
+    return;
+  }
   const grok = carrierGrokBin('carrier-production-');
   const repo = createGitFixture('carrier production repo');
   fs.writeFileSync(path.join(repo, 'candidate.md'), '# Candidate design\n\nA short design note.\n');
