@@ -1252,6 +1252,11 @@ test('coordinator startup refuses missing, directory, symlink, and non-executabl
   ];
   for (const [label, helperPath, setup] of cases) {
     setup(helperPath);
+    if (label === 'non-executable' && process.platform === 'win32') {
+      // NTFS does not surface a Unix execute bit; access(X_OK) succeeds for a
+      // readable regular file. The product check stays lstat + X_OK.
+      continue;
+    }
     assert.equal(defaultCoordinatorHelperExists(helperPath), false, label);
     await assert.rejects(
       () => createGrokCarrierCoordinator({
