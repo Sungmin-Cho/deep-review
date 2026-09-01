@@ -1352,6 +1352,97 @@ test('in-process coordinator success stdout has two lines and no ok key (T9)', a
   assert.equal(descriptor.coordinator_id, 'coord-1');
 });
 
+test('detectEnvironment reports unsupported_grok_cli_version without verifying (T10)', async () => {
+  const { detectEnvironment } = await loadDetector();
+  const grok = makeGrokBin('t10-version-');
+  const grokFile = process.platform === 'win32' ? join(grok.root, 'grok-probe.js') : join(grok.bin, 'grok');
+  writeFileSync(grokFile, readFileSync(grokFile, 'utf8').replaceAll('1.0.4', '1.0.13'));
+  const env = pathEnvironment(grok.bin);
+  const detected = await detectEnvironment({ cwd: createGitFixture('t10 version'), env, grokCandidate: true });
+  assert.equal(detected.grok_cli, false);
+  assert.equal(detected.grok_compatibility_verified, false);
+  assert.equal(detected.grok_version, '1.0.13');
+  assert.equal(detected.grok_unavailable_reason, 'unsupported_grok_cli_version');
+  assert.deepEqual(detected.grok_supported_versions, ['1.0.4']);
+});
+
+test('missing carrier frame with closed-schema stdout becomes containment_refusal (T10)', async () => {
+  const { createGrokCarrierCoordinator } = await import(coordinatorLibUrl);
+  const root = makeTemporaryDirectory('t10-closed-');
+  const detectorPath = join(root, 'closed-schema.mjs');
+  const environment = {
+    grok_cli: false,
+    grok_compatibility_verified: false,
+    grok_compatibility_evidence: null,
+    grok_unavailable_reason: 'incompatible_grok_cli',
+  };
+  writeFileSync(detectorPath, [
+    `process.stdout.write(${JSON.stringify(`${JSON.stringify(environment)}\n`)});`,
+    '',
+  ].join('\n'));
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: createGitFixture('t10 closed'),
+      mode: 'review',
+      detectorPath,
+      platform: 'linux',
+      arch: 'x64',
+      helperExists: () => true,
+      drainTimeoutMs: 5000,
+    }),
+    (error) => error.containment_refusal?.reason === 'incompatible_grok_cli',
+  );
+
+  const versionDetector = join(root, 'version-schema.mjs');
+  writeFileSync(versionDetector, [
+    `process.stdout.write(${JSON.stringify(`${JSON.stringify({
+      ...environment,
+      grok_unavailable_reason: 'unsupported_grok_cli_version',
+      grok_version: '1.0.13',
+      grok_supported_versions: ['1.0.4'],
+    })}\n`)});`,
+    '',
+  ].join('\n'));
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: createGitFixture('t10 version schema'),
+      mode: 'review',
+      detectorPath: versionDetector,
+      platform: 'linux',
+      arch: 'x64',
+      helperExists: () => true,
+      drainTimeoutMs: 5000,
+    }),
+    (error) => {
+      assert.equal(error.containment_refusal.reason, 'unsupported_grok_cli_version');
+      assert.equal(error.containment_refusal.grok_version, '1.0.13');
+      return true;
+    },
+  );
+});
+
+test('closed-schema stdout with nonzero process A exit is not laundered (T10)', async () => {
+  const { createGrokCarrierCoordinator } = await import(coordinatorLibUrl);
+  const detectorPath = join(makeTemporaryDirectory('t10-nonzero-'), 'bad-exit.mjs');
+  writeFileSync(detectorPath, [
+    "process.stdout.write('{\"grok_cli\":false,\"grok_compatibility_verified\":false,\"grok_compatibility_evidence\":null,\"grok_unavailable_reason\":\"incompatible_grok_cli\"}\\n');",
+    'process.exit(2);',
+    '',
+  ].join('\n'));
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({
+      cwd: createGitFixture('t10 nonzero'),
+      mode: 'review',
+      detectorPath,
+      platform: 'linux',
+      arch: 'x64',
+      helperExists: () => true,
+      drainTimeoutMs: 5000,
+    }),
+    (error) => !error.containment_refusal && /exited with code 2|carrier frame is missing/u.test(error.message),
+  );
+});
+
 test('coordinator CLI rejects --platform as an unknown argument (T9)', async () => {
   const { parseArguments } = await import(pathToFileURL(coordinatorExecutablePath).href);
   assert.throws(

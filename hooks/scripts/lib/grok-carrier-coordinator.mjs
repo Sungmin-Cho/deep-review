@@ -323,7 +323,9 @@ export function defaultCoordinatorHelperExists(helperPath) {
   }
 }
 
-function containmentRefusalError({ reason, platform, arch, mechanism, helperPath, mode, remedy }) {
+function containmentRefusalError({
+  reason, platform, arch, mechanism, helperPath, mode, remedy, observed, supported,
+}) {
   const refusal = {
     ok: false,
     reason,
@@ -333,6 +335,8 @@ function containmentRefusalError({ reason, platform, arch, mechanism, helperPath
     helper_path: helperPath,
     mode,
     remedy,
+    ...(observed ? { grok_version: observed } : {}),
+    ...(supported ? { grok_supported_versions: supported } : {}),
   };
   const error = new Error(reason);
   error.containment_refusal = refusal;
@@ -371,6 +375,48 @@ export function evaluateCoordinatorContainment({
   return gate;
 }
 
+function isVersionString(value) {
+  return typeof value === 'string' && /^\d+\.\d+\.\d+$/u.test(value);
+}
+
+function closedSchemaContainmentRefusal(stdout, mode) {
+  let environment;
+  try {
+    environment = JSON.parse(String(stdout ?? '').trim().split('\n')[0] ?? '');
+  } catch {
+    return null;
+  }
+  if (!environment || typeof environment !== 'object' || Array.isArray(environment)) return null;
+  if (environment.grok_cli !== false) return null;
+  if (environment.grok_compatibility_verified !== false) return null;
+  if (environment.grok_compatibility_evidence !== null) return null;
+  const reason = environment.grok_unavailable_reason;
+  if (reason !== 'incompatible_grok_cli' && reason !== 'unsupported_grok_cli_version') {
+    return null;
+  }
+  if (reason === 'unsupported_grok_cli_version') {
+    if (!isVersionString(environment.grok_version)) return null;
+    if (!Array.isArray(environment.grok_supported_versions)
+        || environment.grok_supported_versions.length === 0
+        || environment.grok_supported_versions.some((value) => !isVersionString(value))) {
+      return null;
+    }
+  }
+  return {
+    reason,
+    platform: process.platform,
+    arch: process.arch,
+    mechanism: null,
+    helperPath: null,
+    mode,
+    remedy: reason === 'unsupported_grok_cli_version'
+      ? `Unsupported Grok CLI version ${environment.grok_version}.`
+      : 'Grok CLI is present but incompatible.',
+    observed: environment.grok_version || null,
+    supported: environment.grok_supported_versions || null,
+  };
+}
+
 export async function createGrokCarrierCoordinator({
   cwd = process.cwd(),
   mode = 'review',
@@ -394,28 +440,51 @@ export async function createGrokCarrierCoordinator({
   // Every frame polarity is settled here, BEFORE any coordinator identity,
   // private path, or downstream work exists.
   let carrierBytes;
+  let drainError = null;
   try {
     carrierBytes = await producer.drained;
   } catch (error) {
-    producer.child.kill('SIGKILL');
-    throw error;
+    drainError = error;
   }
-  const exitCode = await Promise.race([
-    producer.exited,
-    new Promise((_resolvePromise, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error('carrier producer exit deadline exceeded')),
-        drainTimeoutMs,
-      );
-      if (typeof timer.unref === 'function') timer.unref();
-    }),
-  ]);
+  let exitCode;
+  try {
+    exitCode = await Promise.race([
+      producer.exited,
+      new Promise((_resolvePromise, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('carrier producer exit deadline exceeded')),
+          drainTimeoutMs,
+        );
+        if (typeof timer.unref === 'function') timer.unref();
+      }),
+    ]);
+  } catch (error) {
+    producer.child.kill('SIGKILL');
+    throw drainError ?? error;
+  }
+  if (drainError) {
+    if (exitCode === 0 && /carrier frame is missing/u.test(drainError.message)) {
+      const refusal = closedSchemaContainmentRefusal(producer.stdout(), mode);
+      if (refusal) throw containmentRefusalError(refusal);
+    }
+    producer.child.kill('SIGKILL');
+    throw drainError;
+  }
   if (exitCode !== 0) {
     throw new Error(`carrier producer exited with code ${exitCode}: ${producer.stderr().trim()}`);
   }
-  const carrier = validateGrokCompatibilityCarrier(
-    parseGrokCompatibilityCarrierFrame(carrierBytes),
-  );
+  let parsedFrame;
+  try {
+    parsedFrame = parseGrokCompatibilityCarrierFrame(carrierBytes);
+  } catch (error) {
+    if (/carrier frame is missing/u.test(error.message)) {
+      const refusal = closedSchemaContainmentRefusal(producer.stdout(), mode);
+      if (refusal) throw containmentRefusalError(refusal);
+      throw new Error('carrier frame is missing');
+    }
+    throw error;
+  }
+  const carrier = validateGrokCompatibilityCarrier(parsedFrame);
 
   let environment;
   try {
