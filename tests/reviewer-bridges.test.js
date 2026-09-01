@@ -1791,6 +1791,15 @@ test('T-PROBE-8: the public normal-review and dry-run/explain entrypoints cannot
     t.skip('POSIX private-socket endpoints; the Windows named-pipe polarity is covered by the release smoke job');
     return;
   }
+  const { resolveGrokContainmentPlatform } = await import(pathToFileURL(
+    join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs'),
+  ).href);
+  const { defaultCoordinatorHelperExists } = await import(coordinatorLibraryUrl);
+  const gate = resolveGrokContainmentPlatform();
+  if (!gate.supported || !defaultCoordinatorHelperExists(gate.helper_path)) {
+    t.skip('shipped coordinator CLI success path requires an inventoried executable helper');
+    return;
+  }
   const grok = grokProbeBin('grok-public-entrypoints-');
   const repo = createGitFixture('public entrypoint repo');
   writeFileSync(join(repo, 'candidate.md'), '# Candidate design\n\nA short design note.\n');
@@ -1975,6 +1984,7 @@ test('T-PROBE-8: the negative frame matrix fails closed with a real process A an
     'try {',
     '  coordinator = await createGrokCarrierCoordinator({',
     '    cwd, mode: "review", env: process.env, detectorPath, drainTimeoutMs: Number(deadline),',
+    '    platform: "linux", arch: "x64", helperExists: () => true,',
     '  });',
     '} catch (error) {',
     '  process.stdout.write(`${JSON.stringify({ acquired: false, message: error.message })}\\n`);',

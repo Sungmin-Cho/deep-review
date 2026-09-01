@@ -14,10 +14,21 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  lstatSync,
+  mkdtempSync,
+  rmSync,
+} from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import {
+  MISSING_GROK_CONTAINMENT_HELPER,
+  UNSUPPORTED_GROK_CONTAINMENT,
+  resolveGrokContainmentPlatform,
+} from './grok-process-supervisor.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   GROK_CARRIER_MAX_BYTES,
@@ -301,6 +312,65 @@ function drainProducer({ nodePath, detectorPath, cwd, env, drainTimeoutMs }) {
   };
 }
 
+export function defaultCoordinatorHelperExists(helperPath) {
+  try {
+    const stat = lstatSync(helperPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) return false;
+    accessSync(helperPath, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function containmentRefusalError({ reason, platform, arch, mechanism, helperPath, mode, remedy }) {
+  const refusal = {
+    ok: false,
+    reason,
+    platform,
+    arch,
+    mechanism,
+    helper_path: helperPath,
+    mode,
+    remedy,
+  };
+  const error = new Error(reason);
+  error.containment_refusal = refusal;
+  return error;
+}
+
+export function evaluateCoordinatorContainment({
+  platform = process.platform,
+  arch = process.arch,
+  helperExists = defaultCoordinatorHelperExists,
+  mode = 'review',
+} = {}) {
+  const gate = resolveGrokContainmentPlatform({ platform, arch });
+  if (!gate.supported) {
+    throw containmentRefusalError({
+      reason: UNSUPPORTED_GROK_CONTAINMENT,
+      platform: gate.platform,
+      arch: gate.arch,
+      mechanism: null,
+      helperPath: null,
+      mode,
+      remedy: 'Grok containment is not inventoried on this platform; --grok stays inactive.',
+    });
+  }
+  if (!helperExists(gate.helper_path)) {
+    throw containmentRefusalError({
+      reason: MISSING_GROK_CONTAINMENT_HELPER,
+      platform: gate.platform,
+      arch: gate.arch,
+      mechanism: gate.mechanism,
+      helperPath: gate.helper_path,
+      mode,
+      remedy: 'The inventoried containment helper is missing or not a regular executable file.',
+    });
+  }
+  return gate;
+}
+
 export async function createGrokCarrierCoordinator({
   cwd = process.cwd(),
   mode = 'review',
@@ -308,10 +378,14 @@ export async function createGrokCarrierCoordinator({
   detectorPath = defaultDetectorPath(),
   nodePath = process.execPath,
   drainTimeoutMs = COORDINATOR_DRAIN_TIMEOUT_MS,
+  platform = process.platform,
+  arch = process.arch,
+  helperExists = defaultCoordinatorHelperExists,
 } = {}) {
   if (!COORDINATOR_MODES.includes(mode)) {
     throw new TypeError(`coordinator mode must be one of ${COORDINATOR_MODES.join(', ')}`);
   }
+  evaluateCoordinatorContainment({ platform, arch, helperExists, mode });
   const workingDirectory = resolve(cwd);
   const producer = drainProducer({
     nodePath, detectorPath, cwd: workingDirectory, env, drainTimeoutMs,

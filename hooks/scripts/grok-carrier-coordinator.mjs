@@ -45,30 +45,45 @@ export function parseArguments(argv) {
   return { cwd: resolve(cwd), mode };
 }
 
+export async function runCoordinatorCli(argv, {
+  createCoordinator = createGrokCarrierCoordinator,
+  stdout = process.stdout,
+  stderr = process.stderr,
+} = {}) {
+  try {
+    const options = parseArguments(argv);
+    const coordinator = await createCoordinator({
+      cwd: options.cwd,
+      mode: options.mode,
+      env: process.env,
+    });
+    stdout.write(`${JSON.stringify(coordinator.environment)}\n`);
+    stdout.write(`${JSON.stringify({
+      protocol_version: COORDINATOR_PROTOCOL_VERSION,
+      coordinator_id: coordinator.coordinator_id,
+      generation: coordinator.generation,
+      pid: coordinator.pid,
+      mode: coordinator.mode,
+      control_path: coordinator.control_path,
+      environment_sha256: coordinator.environment_sha256,
+    })}\n`);
+    await coordinator.terminated;
+  } catch (error) {
+    if (error?.containment_refusal) {
+      stdout.write(`${JSON.stringify(error.containment_refusal)}\n`);
+      process.exitCode = 3;
+      return;
+    }
+    stderr.write(`grok-carrier-coordinator: ${error.message}\n`);
+    process.exitCode = 1;
+  }
+}
+
 async function main() {
-  const options = parseArguments(process.argv.slice(2));
-  const coordinator = await createGrokCarrierCoordinator({
-    cwd: options.cwd,
-    mode: options.mode,
-    env: process.env,
-  });
-  process.stdout.write(`${JSON.stringify(coordinator.environment)}\n`);
-  process.stdout.write(`${JSON.stringify({
-    protocol_version: COORDINATOR_PROTOCOL_VERSION,
-    coordinator_id: coordinator.coordinator_id,
-    generation: coordinator.generation,
-    pid: coordinator.pid,
-    mode: coordinator.mode,
-    control_path: coordinator.control_path,
-    environment_sha256: coordinator.environment_sha256,
-  })}\n`);
-  await coordinator.terminated;
+  await runCoordinatorCli(process.argv.slice(2));
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
 if (invokedPath === import.meta.url) {
-  main().catch((error) => {
-    process.stderr.write(`grok-carrier-coordinator: ${error.message}\n`);
-    process.exitCode = 1;
-  });
+  main();
 }
