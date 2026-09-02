@@ -31,8 +31,10 @@
 // The inventoried helper artifacts are production artifacts that are not
 // present in this tree. Until one exists and loads, every platform refuses.
 
-import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import {
   DEFAULT_NATIVE_DIRECTORY,
@@ -45,6 +47,16 @@ import {
   nativeTreeState,
   parseSha256Sums,
 } from './grok-native-artifact.mjs';
+import { parseOwnerControlLines, sanitizeHelperStderr } from './grok-owner-control.mjs';
+import {
+  consumeOwnerRecord,
+  readOwnerRecord,
+  recordDirectory,
+  sweepOwnerRecords,
+  unlinkOwnerRecord,
+  validateOwnerRecord,
+  writeOwnerRecord,
+} from './grok-owner-record.mjs';
 export {
   GROK_CONTAINMENT_INVENTORY,
   NATIVE_INVENTORY_PATHS,
@@ -74,6 +86,14 @@ export const GROK_INVALID_LIFECYCLE = 'invalid_grok_process_lifecycle';
 // D20's bounded owner-handshake polling.
 export const GROK_TREE_POLL_MS = 10;
 export const GROK_TREE_HARD_DEADLINE_MS = 1000;
+export const GROK_OWNER_START_DEADLINE_MS = 5000;
+export const GROK_CONTAINMENT_TOKEN_TTL_MS = 30 * 60 * 1000;
+
+export function scrubGrokEnvironment(parentEnv = process.env) {
+  const out = {};
+  for (const [key, value] of Object.entries(parentEnv)) { if (key.toUpperCase() === 'GROK_SANDBOX') continue; out[key] = value; }
+  return out;
+}
 
 function containmentError(reason, detail) {
   const error = new Error(`ERROR_GROK_CONTAINMENT: ${reason}${detail ? ` — ${detail}` : ''}`);
@@ -224,17 +244,31 @@ export function assertContainmentReadyToken(token) {
 // ---------------------------------------------------------------------------
 
 const liveOwners = new Map();
+const consumedOwners = new Set();
 let ownerSequence = 0;
 
 function defaultOwnerId() {
   ownerSequence += 1;
-  return `grok-containment-owner-${process.pid}-${ownerSequence}`;
+  return `grok-containment-owner-${process.pid}-${ownerSequence}-${randomBytes(4).toString('hex')}`;
 }
 
-export function isGrokContainmentOwnerLive(token) {
-  if (token === null || typeof token !== 'object') return false;
-  const owner = liveOwners.get(token.owner_id);
-  return owner !== undefined && owner.generation === token.generation;
+function defaultHelperSpawner(helperPath, args, { mechanism, env = scrubGrokEnvironment(process.env), pluginRoot = null } = {}) {
+  const run = spawnSync(helperPath, args, { input: '', timeout: GROK_OWNER_START_DEADLINE_MS, killSignal: 'SIGKILL', windowsHide: true, shell: false, cwd: tmpdir(), env });
+  const helperStderr = sanitizeHelperStderr(run.stderr, { pluginRoot });
+  if (run.error?.code === 'ETIMEDOUT') return { ok: false, detail: 'start_deadline', helper_stderr: helperStderr };
+  if (run.error) return { ok: false, detail: 'spawn_error', helper_stderr: helperStderr };
+  if (run.signal) return { ok: false, detail: `helper_signal_${run.signal}`, helper_stderr: helperStderr };
+  if (run.status !== 0) return { ok: false, detail: `helper_exit_${run.status}`, helper_stderr: helperStderr };
+  const control = parseOwnerControlLines(run.stdout);
+  if (!control.ok || control.lines[0].mechanism !== mechanism || control.lines[1].live_members !== 0 || control.lines[1].member_pids.length !== 0) {
+    return { ok: false, detail: 'handshake_lost', helper_stderr: helperStderr };
+  }
+  return { ok: true };
+}
+
+export function isGrokContainmentOwnerLive(token, { tmpRoot = tmpdir(), now, ttlMs } = {}) {
+  const read = readOwnerRecord(token?.owner_id, { tmpRoot, now, ttlMs });
+  return read.ok && validateOwnerRecord(token, read.body).ok;
 }
 
 function refusal({ platform, arch, reason, gate, detail, helperStderr }) {
@@ -261,8 +295,8 @@ export function preflightGrokContainment(options = {}) {
   const {
     platform = process.platform, arch = process.arch, pluginRoot = DEFAULT_PLUGIN_ROOT,
     now = () => Date.now(), ownerIdGenerator = defaultOwnerId, helperExists = null, helperArtifact = null,
-    executableResolver = (helperPath) => helperPath, helperSpawner = () => null,
-    enabledPlatforms,
+    executableResolver = (helperPath) => helperPath, helperSpawner = defaultHelperSpawner,
+    enabledPlatforms, env, tmpRoot = tmpdir(), ttlMs = GROK_CONTAINMENT_TOKEN_TTL_MS,
   } = options;
   const productionMode = !Object.hasOwn(options, 'nativeDirectory');
   const nativeDirectory = productionMode ? join(pluginRoot, 'hooks', 'scripts', 'lib', 'native') : options.nativeDirectory;
@@ -277,30 +311,53 @@ export function preflightGrokContainment(options = {}) {
   if (artifact.integrity !== 'ok') {
     return refusal({ platform, arch, reason: GROK_CONTAINMENT_HELPER_FAILED, gate, detail: `integrity_${artifact.integrity}` });
   }
+  sweepOwnerRecords({ tmpRoot, now, ttlMs });
+  const directory = recordDirectory({ tmpRoot });
+  if (!directory.ok) return refusal({ platform, arch, reason: GROK_CONTAINMENT_HELPER_FAILED, gate, detail: 'record_directory_untrusted' });
   const helperExecutable = executableResolver(gate.helper_path);
   if (typeof helperExecutable !== 'string' || helperExecutable.length === 0) {
     return refusal({ platform, arch, reason: MISSING_GROK_CONTAINMENT_HELPER, gate });
   }
-  const owner = helperSpawner(helperExecutable, ['--own-grok-tree'], { mechanism: gate.mechanism });
-  if (owner === null || typeof owner !== 'object' || owner.ok !== true) {
-    return refusal({ platform, arch, reason: MISSING_GROK_CONTAINMENT_HELPER, gate });
+  const owner = helperSpawner(helperExecutable, ['--own-grok-tree', '--parent-pid', String(process.pid)], {
+    mechanism: gate.mechanism, env: scrubGrokEnvironment(env ?? process.env), pluginRoot,
+  });
+  if (!owner?.ok) {
+    return refusal({
+      platform, arch, reason: GROK_CONTAINMENT_HELPER_FAILED, gate,
+      detail: owner?.detail ?? 'spawn_error', helperStderr: owner?.helper_stderr ?? '',
+    });
   }
   const ownerId = ownerIdGenerator();
   const generation = 1;
   const startedAt = now();
   const token = mintOwnerToken({ platform, arch, ownerId, generation, startedAt, nativeDirectory });
   liveOwners.set(ownerId, { generation, mechanism: gate.mechanism, helper_path: gate.helper_path, started_at: startedAt });
+  try {
+    writeOwnerRecord({
+      record: Object.fromEntries(TOKEN_FIELDS.map((field) => [field, token[field]])),
+      tokenSha256: token.token_sha256,
+      helperSha256: artifact.helper_sha256,
+      createdAt: startedAt,
+    }, { tmpRoot });
+  } catch (error) {
+    liveOwners.delete(ownerId);
+    return refusal({ platform, arch, reason: GROK_CONTAINMENT_HELPER_FAILED, gate, detail: error.reason ?? 'record_write_failed' });
+  }
   return Object.freeze({ ok: true, containment_ready: true, containment_ready_token: token, reason: null, platform: gate.platform, arch: gate.arch, mechanism: gate.mechanism, helper_path: gate.helper_path, owner_id: ownerId });
 }
 
-export function releaseGrokContainment(token, { reason = 'no_launch' } = {}) {
+export function releaseGrokContainment(token, { reason = 'no_launch', tmpRoot = tmpdir() } = {}) {
   if (token === null || typeof token !== 'object' || typeof token.owner_id !== 'string') {
     return Object.freeze({ released: false, reason: 'no_owner', owner_id: null, containment_ready: false });
   }
-  const released = liveOwners.delete(token.owner_id);
+  const directoryTrusted = recordDirectory({ tmpRoot }).ok;
+  const registry = liveOwners.delete(token.owner_id);
+  const record = directoryTrusted ? unlinkOwnerRecord(token.owner_id, { tmpRoot }) : false;
+  const consumed = consumedOwners.has(token.owner_id);
+  const released = consumed || (directoryTrusted && (registry || record));
   return Object.freeze({
     released,
-    reason: released ? reason : 'no_owner',
+    reason: released ? (record || (directoryTrusted && registry) ? reason : 'consumed') : 'no_owner',
     owner_id: token.owner_id,
     containment_ready: false,
   });
@@ -431,4 +488,45 @@ export function runGrokContainedProcessSync(command, args = [], options = {}) {
   throw helperUnavailable(gate);
 }
 
-export const __testing = Object.freeze({ mintOwnerToken, tokenSeal, liveOwners });
+function createContainedRunner(context = {}) {
+  const ctx = {
+    platform: process.platform,
+    arch: process.arch,
+    pluginRoot: DEFAULT_PLUGIN_ROOT,
+    enabledPlatforms: undefined,
+    tmpRoot: tmpdir(),
+    ...context,
+  };
+  ctx.nativeDirectory = Object.hasOwn(context, 'nativeDirectory')
+    ? context.nativeDirectory
+    : join(ctx.pluginRoot, 'hooks', 'scripts', 'lib', 'native');
+  return {
+    async run(_command, _args = [], options = {}) {
+      const token = assertContainmentReadyToken(options?.containmentToken ?? null);
+      const gate = resolveGrokContainmentPlatform({
+        platform: ctx.platform, arch: ctx.arch, nativeDirectory: ctx.nativeDirectory, enabledPlatforms: ctx.enabledPlatforms,
+      });
+      if (!gate.supported) {
+        throw containmentError(UNSUPPORTED_GROK_CONTAINMENT, gate.detail ?? `${gate.key} cannot contain a Grok provider tree`);
+      }
+      if (token.platform !== gate.platform || token.arch !== gate.arch
+          || token.helper_path !== gate.helper_path || token.mechanism !== gate.mechanism) {
+        throw containmentError('foreign_containment_owner', 'the token names another helper path');
+      }
+      throw containmentError(MISSING_GROK_CONTAINMENT_HELPER, 'contained-runner adapter is Task 8');
+    },
+  };
+}
+
+export const __testing = Object.freeze({
+  mintOwnerToken,
+  tokenSeal,
+  liveOwners,
+  consumedOwners,
+  defaultHelperSpawner,
+  createContainedRunner,
+  writeOwnerRecordForTest: (body, tmpRoot) => writeOwnerRecord({
+    record: body.record, tokenSha256: body.token_sha256, helperSha256: body.helper_sha256, createdAt: body.created_at,
+  }, { tmpRoot }),
+  consumeOwnerRecordForTest: (ownerId, tmpRoot) => consumeOwnerRecord(ownerId, { tmpRoot }),
+});

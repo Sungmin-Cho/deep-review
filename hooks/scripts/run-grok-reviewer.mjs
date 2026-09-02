@@ -50,6 +50,7 @@ import {
   assertContainmentReadyToken,
   evaluateTerminationReport,
   runGrokContainedProcess,
+  scrubGrokEnvironment,
 } from './lib/grok-process-supervisor.mjs';
 // D8: the host argument budget lives in one place. The bridge never restates
 // a platform limit, so a Windows ceiling can never drift between the two.
@@ -388,14 +389,10 @@ function freshSessionId(uuidGenerator) {
 }
 
 // `GROK_SANDBOX` would override the explicit `--sandbox read-only` flag, so it
-// is removed from the child environment — case-insensitively, because native
-// Windows environment names are.
+// is removed from the child environment -- case-insensitively, because native
+// Windows environment names are. The supervisor owns the scrub; this delegates.
 function childEnvironment(parentEnv) {
-  const env = { ...parentEnv };
-  for (const key of Object.keys(env)) {
-    if (key.toLowerCase() === 'grok_sandbox') delete env[key];
-  }
-  return env;
+  return scrubGrokEnvironment(parentEnv);
 }
 
 // ---------------------------------------------------------------------------

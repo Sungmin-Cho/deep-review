@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -35,15 +36,18 @@ import {
   GROK_CONTAINMENT_HELPER_FAILED,
   GROK_CONTAINMENT_INVENTORY,
   GROK_CONTAINMENT_PROTOCOL_VERSION,
+  GROK_CONTAINMENT_TOKEN_TTL_MS,
   GROK_ENABLED_PLATFORMS,
   GROK_INVALID_LIFECYCLE,
   GROK_LIFECYCLE_UNCONFIRMED,
+  GROK_OWNER_START_DEADLINE_MS,
   GROK_TREE_HARD_DEADLINE_MS,
   GROK_TREE_POLL_MS,
   UNSUPPORTED_GROK_CONTAINMENT,
   assertContainmentReadyToken,
   evaluateContainedLaunchAdmission,
   evaluateTerminationReport,
+  isGrokContainmentOwnerLive,
   isGrokContainmentPlatformSupported,
   isGrokPlatformEnabled,
   preflightGrokContainment,
@@ -51,8 +55,15 @@ import {
   resolveGrokContainmentPlatform,
   runGrokContainedProcess,
   runGrokContainedProcessSync,
+  scrubGrokEnvironment,
   __testing as supervisorTesting,
 } from '../hooks/scripts/lib/grok-process-supervisor.mjs';
+import {
+  OWNER_ID_PATTERN,
+  readOwnerRecord,
+  recordDirectory,
+  validateOwnerRecord,
+} from '../hooks/scripts/lib/grok-owner-record.mjs';
 import {
   classifyContainmentRelease,
   withGrokContainment,
@@ -1329,5 +1340,154 @@ test('the stub helper compiles and speaks the two-line protocol in preflight and
     assert.equal(bad.status, 64, `${row.name}: ${bad.stderr}`);
     assert.equal(bad.stdout, '', row.name);
     assert.equal(existsSync(marker), false, `${row.name}: the provider must never run`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// E2a / E2b -- durable owner record, production preflight spawner, env scrub.
+// ---------------------------------------------------------------------------
+
+// Preflight always runs with a CLEAN stub environment (no fault, no exit code):
+// faults belong to the launch (Task 8). `spawnFault` is the one exception, for
+// T-OWN-2, where the preflight itself is under test.
+function stubPreflight(label, { spawnFault = '', platform = 'linux', arch = 'x64', now, tmpRoot, spy = null } = {}) {
+  const stub = stubNativeRoot({ platform, arch });
+  if (stub.skipReason) return { skipReason: stub.skipReason };
+  const env = { ...process.env, STUB_FAULT: spawnFault, STUB_MECHANISM: platform === 'linux' ? 'pid-namespace' : 'job-object', GROK_SANDBOX: 'must-not-leak', STUB_EXIT: '' };
+  const root = tmpRoot ?? workspace(`${label}-tmp`);
+  const options = { platform, arch, nativeDirectory: stub.root, pluginRoot: stub.root, env, tmpRoot: root, enabledPlatforms: ALL_INVENTORIED, ...(now ? { now } : {}) };
+  if (spy) options.helperSpawner = (helperPath, args, spawnOptions) => { spy.push({ helperPath, args, env: spawnOptions.env }); return supervisorTesting.defaultHelperSpawner(helperPath, args, spawnOptions); };
+  const result = preflightGrokContainment(options);
+  return { stub, tmpRoot: root, result };
+}
+
+test('T-OWN-1: the production spawner issues a token and a durable record with the leash argv and a scrubbed env', (t) => {
+  const spy = [];
+  const p = stubPreflight('t-own-1', { spy });
+  if (p.skipReason) { t.skip(p.skipReason); return; }
+  assert.equal(p.result.ok, true, JSON.stringify(p.result));
+  const token = p.result.containment_ready_token;
+  assert.match(token.owner_id, OWNER_ID_PATTERN);
+  assert.equal(token.helper_path, p.stub.helperPath);
+  assert.equal(spy.length, 1);
+  assert.deepEqual(spy[0].args, ['--own-grok-tree', '--parent-pid', String(process.pid)]);
+  assert.equal(Object.hasOwn(spy[0].env, 'GROK_SANDBOX'), false);
+  assert.equal(spy[0].env.PATH, process.env.PATH);
+  const record = readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot });
+  assert.equal(record.ok, true, JSON.stringify(record));
+  assert.deepEqual(validateOwnerRecord(token, record.body), { ok: true });
+  assert.equal(record.body.helper_sha256, p.stub.helperSha256);
+  assert.equal(isGrokContainmentOwnerLive(token, { tmpRoot: p.tmpRoot }), true);
+  const recordPath = record.path;
+  const st = lstatSync(recordPath);
+  assert.equal(st.isFile() && !st.isSymbolicLink(), true);
+  if (process.platform !== 'win32') {
+    assert.equal(st.mode & 0o777, 0o600);
+    assert.equal(lstatSync(dirname(recordPath)).mode & 0o777, 0o700);
+  }
+  // O_EXCL: a second write for the same owner id is refused
+  assert.throws(() => supervisorTesting.writeOwnerRecordForTest(record.body, p.tmpRoot), /EEXIST/u);
+  assert.equal(GROK_OWNER_START_DEADLINE_MS, 5000);
+  assert.equal(GROK_CONTAINMENT_TOKEN_TTL_MS, 30 * 60 * 1000);
+});
+
+test('T-OWN-18: scrubGrokEnvironment drops every GROK_SANDBOX spelling and keeps the rest; the bridge delegates', async () => {
+  const scrubbed = scrubGrokEnvironment({ PATH: '/x', SYSTEMROOT: 'C:\\Windows', GROK_SANDBOX: 'a', grok_sandbox: 'b', Grok_Sandbox: 'c', OTHER: 'keep' });
+  assert.deepEqual(scrubbed, { PATH: '/x', SYSTEMROOT: 'C:\\Windows', OTHER: 'keep' });
+  const bridgeSource = readFileSync(join(pluginRoot, 'hooks', 'scripts', 'run-grok-reviewer.mjs'), 'utf8');
+  assert.match(bridgeSource, /scrubGrokEnvironment\(parentEnv\)/u, 'childEnvironment delegates to the supervisor');
+  const supervisorSource = readFileSync(join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs'), 'utf8');
+  assert.doesNotMatch(supervisorSource, /run-grok-reviewer/u, 'the supervisor never imports the bridge');
+});
+
+test('T-OWN-2: every preflight fault is a grok_containment_helper_failed refusal with a named detail', async (t) => {
+  const expectations = [
+    ['no_ready', 'handshake_lost'], ['wrong_mechanism', 'handshake_lost'], ['extra_line', 'handshake_lost'],
+    ['report_not_last', 'handshake_lost'], ['exit_125_no_report', 'helper_exit_125'], ['hang', 'start_deadline'],
+  ];
+  for (const [fault, detail] of expectations) {
+    const p = stubPreflight(`t-own-2-${fault}`, { spawnFault: fault });
+    if (p.skipReason) { t.skip(p.skipReason); return; }
+    assert.equal(p.result.ok, false, fault);
+    assert.equal(p.result.reason, GROK_CONTAINMENT_HELPER_FAILED, fault);
+    assert.equal(p.result.detail, detail, fault);
+    assert.equal(p.result.containment_ready_token, null, fault);
+    assert.equal(typeof p.result.helper_stderr, 'string', fault);
+    assert.doesNotMatch(p.result.helper_stderr, new RegExp('[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]', 'u'), fault);
+  }
+  const { sanitizeHelperStderr } = await import('../hooks/scripts/lib/grok-owner-control.mjs');
+  assert.equal(sanitizeHelperStderr(Buffer.from('a\u0000b\rc\u007fd\u0085e\tf\ng')), 'abcde\tf\ng');
+  assert.equal(sanitizeHelperStderr(Buffer.from('/plugin/root/x'), { pluginRoot: '/plugin/root' }), '{plugin_root}/x');
+  const crlf = stubPreflight('t-own-2-crlf', { spawnFault: 'crlf' });
+  assert.equal(crlf.result.ok, true, 'CRLF control lines are accepted');
+});
+
+test('T-OWN-4: an aged or future-dated record is refused and swept', (t) => {
+  const base = 1_800_000_000_000;
+  const p = stubPreflight('t-own-4', { now: () => base });
+  if (p.skipReason) { t.skip(p.skipReason); return; }
+  const token = p.result.containment_ready_token;
+  assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot, now: () => base + GROK_CONTAINMENT_TOKEN_TTL_MS + 1 }).reason, 'expired');
+  assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot, now: () => base - 1 }).reason, 'future');
+  assert.equal(isGrokContainmentOwnerLive(token, { tmpRoot: p.tmpRoot, now: () => base + GROK_CONTAINMENT_TOKEN_TTL_MS + 1 }), false, 'the registry never substitutes for an expired record');
+  // a future-dated record is refused but NOT swept
+  stubPreflight('t-own-4-earlier', { now: () => base - 1000, tmpRoot: p.tmpRoot });
+  assert.equal(existsSync(join(p.tmpRoot, 'deep-review-grok-containment', `${token.owner_id}.json`)), true, 'future-dated records survive a sweep');
+  stubPreflight('t-own-4-later', { now: () => base + GROK_CONTAINMENT_TOKEN_TTL_MS + 1, tmpRoot: p.tmpRoot });
+  assert.equal(existsSync(join(p.tmpRoot, 'deep-review-grok-containment', `${token.owner_id}.json`)), false, 'expired records are swept');
+});
+
+test('T-OWN-5: symlinked, foreign, tampered, planted or untrusted-directory records are refused', async (t) => {
+  const p = stubPreflight('t-own-5');
+  if (p.skipReason) { t.skip(p.skipReason); return; }
+  const token = p.result.containment_ready_token;
+  const dir = join(p.tmpRoot, 'deep-review-grok-containment');
+  const recordPath = join(dir, `${token.owner_id}.json`);
+  const body = JSON.parse(readFileSync(recordPath, 'utf8'));
+  assert.equal(validateOwnerRecord(token, { ...body, token_sha256: 'f'.repeat(64) }).reason, 'seal');
+  assert.equal(validateOwnerRecord(token, { ...body, record: { ...body.record, generation: 2 } }).reason, 'generation');
+  assert.equal(validateOwnerRecord({ ...token, owner_id: 'grok-containment-owner-1-1-deadbeef' }, body).reason, 'owner');
+  writeFileSync(recordPath, JSON.stringify({ ...body, token_sha256: 'f'.repeat(64) }));
+  assert.equal(isGrokContainmentOwnerLive(token, { tmpRoot: p.tmpRoot }), false, 'a tampered seal is not live');
+  writeFileSync(recordPath, '{not json');
+  assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot }).reason, 'malformed');
+  assert.equal(readOwnerRecord('grok-containment-owner-1-1-deadbeef', { tmpRoot: p.tmpRoot }).reason, 'absent');
+  assert.equal(readOwnerRecord('../etc/passwd', { tmpRoot: p.tmpRoot }).reason, 'absent');
+  if (process.platform !== 'win32') assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot, expectedUid: process.getuid() + 1 }).reason, 'foreign_uid', 'a record owned by another uid is refused (the uid is injected because a test cannot chown)');
+  // a planted record for a token that names a foreign helper path: the record binds but admission (Task 8) refuses on inventory-path equality
+  const planted = { ...token, helper_path: '/elsewhere/helper' };
+  planted.token_sha256 = supervisorTesting.tokenSeal(planted);
+  assert.equal(isGrokContainmentOwnerLive(planted, { tmpRoot: p.tmpRoot }), false, 'the seal binds helper_path, so a planted path never validates against the stored seal');
+  // a fully matching planted record for that foreign-path token: admission (Task 8) refuses on inventory-path equality BEFORE reading it
+  // O_EXCL is the sole create predicate; the malformed file for this owner id must be gone first.
+  rmSync(recordPath);
+  supervisorTesting.writeOwnerRecordForTest({ record: Object.fromEntries(Object.keys(body.record).map((k) => [k, planted[k]])), token_sha256: planted.token_sha256, helper_sha256: body.helper_sha256, created_at: body.created_at }, p.tmpRoot);
+  assert.equal(isGrokContainmentOwnerLive(planted, { tmpRoot: p.tmpRoot }), true, 'the planted record validates as a record');
+  const runner = supervisorTesting.createContainedRunner({ platform: 'linux', arch: 'x64', nativeDirectory: p.stub.root, pluginRoot: p.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: p.tmpRoot });
+  await assert.rejects(() => runner.run(process.execPath, ['-e', '0'], { cwd: p.stub.root, env: process.env, timeoutMs: 5000, containmentToken: planted }), /foreign_containment_owner/u);
+  assert.equal(existsSync(join(dir, `${planted.owner_id}.json`)), true, 'the planted record was not consumed');
+  if (process.platform !== 'win32') {
+    writeFileSync(recordPath, JSON.stringify(body));
+    rmSync(recordPath); writeFileSync(join(p.tmpRoot, 'elsewhere.json'), JSON.stringify(body)); symlinkSync(join(p.tmpRoot, 'elsewhere.json'), recordPath);
+    assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot }).reason, 'symlink');
+    const open = workspace('t-own-5-open');
+    mkdirSync(join(open, 'deep-review-grok-containment'), { mode: 0o777 });
+    chmodSync(join(open, 'deep-review-grok-containment'), 0o777);
+    assert.equal(recordDirectory({ tmpRoot: open }).reason, 'record_directory_untrusted');
+    const refused = stubPreflight('t-own-5-open-preflight', { tmpRoot: open });
+    assert.equal(refused.result.reason, GROK_CONTAINMENT_HELPER_FAILED);
+    assert.equal(refused.result.detail, 'record_directory_untrusted');
+    // a directory that becomes untrusted AFTER the preflight: release and consume both refuse and unlink nothing
+    const later = stubPreflight('t-own-5-later-untrusted');
+    const laterDir = join(later.tmpRoot, 'deep-review-grok-containment');
+    chmodSync(laterDir, 0o777);
+    assert.deepEqual(releaseGrokContainment(later.result.containment_ready_token, { tmpRoot: later.tmpRoot }).released, false);
+    assert.equal(existsSync(join(laterDir, `${later.result.containment_ready_token.owner_id}.json`)), true, 'nothing was unlinked through an untrusted directory');
+    chmodSync(laterDir, 0o700);
+    // a record replaced by a symlink to an outside file: consume refuses and the outside file survives
+    const outside = join(later.tmpRoot, 'outside.json'); writeFileSync(outside, 'keep');
+    const rec = join(laterDir, `${later.result.containment_ready_token.owner_id}.json`); rmSync(rec); symlinkSync(outside, rec);
+    assert.equal(supervisorTesting.consumeOwnerRecordForTest(later.result.containment_ready_token.owner_id, later.tmpRoot).consumed, false);
+    assert.equal(existsSync(outside), true, 'the symlink target was never unlinked');
   }
 });
