@@ -14,8 +14,9 @@ env:
   GROK_CLI_VERSION: '1.0.13'
   # Bootstrap: leave a pin empty on the first run; the probe records the observed
   # digest, fails with pin_bootstrap_required, and the maintainer commits the pin.
-  # Never invent these values.
-  GROK_CLI_INSTALLER_SHA256_LINUX: ''
+  # Never invent these values. Linux installer observed 2026-09-02 from
+  # https://x.ai/cli/install.sh (release run 33626460370 and a local curl).
+  GROK_CLI_INSTALLER_SHA256_LINUX: '7fd6fdc75d9418b2e58356726fcbf1ae849416f773925da07d0ccc7a60d3e791'
   GROK_CLI_LAUNCHER_SHA256_LINUX: ''
   GROK_CLI_INSTALLER_SHA256_WINDOWS: ''
   GROK_CLI_LAUNCHER_SHA256_WINDOWS: ''
