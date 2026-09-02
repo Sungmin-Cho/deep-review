@@ -62,7 +62,12 @@ int main(int argc, char **argv) {
   else {
     const char *output = env_or("STUB_PROVIDER_OUTPUT", "");
     if (*output) { fputs(output, stderr); fputs("\n", stderr); fflush(stderr); }
-    if (strcmp(fault, "overflow") == 0) { for (long i = 0; i < 20000000L; i += 1) fputc('x', stderr); fflush(stderr); }
+    if (strcmp(fault, "overflow") == 0) {
+      char block[4096];
+      memset(block, 'x', sizeof block);
+      for (int i = 0; i < 5120; i += 1) fwrite(block, 1, sizeof block, stderr);
+      fflush(stderr);
+    }
   }
   if (strcmp(fault, "exit_125_no_report") == 0) return 125;
   if (strcmp(fault, "report_not_last") == 0) {

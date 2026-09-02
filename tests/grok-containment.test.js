@@ -105,7 +105,8 @@ function gateFor(nativeDirectory, { platform = 'linux', arch = 'x64', enabledPla
 }
 const ARTIFACT_OK = () => ({ present: true, executable: true, integrity: 'ok', helper_sha256: 'a'.repeat(64), real_path: '/fixture/helper', detail: null });
 const require = createRequire(import.meta.url);
-const { stubNativeRoot, ARGV_MATRIX } = require('./helpers/native-stub.cjs');
+const { stubNativeRoot, ARGV_MATRIX, HOST_STUB_PLATFORM, HOST_STUB_ARCH, INVENTORY } = require('./helpers/native-stub.cjs');
+const HOST_STUB_KEY = `${HOST_STUB_PLATFORM}/${HOST_STUB_ARCH}`;
 
 const READY = '{"protocol_version":"1.0","handshake":"containment_ready","containment_ready":true,"mechanism":"pid-namespace"}';
 const REPORT = '{"protocol_version":"1.0","handshake":"termination_report","live_members":0,"member_pids":[]}';
@@ -1489,7 +1490,7 @@ test('T-OWN-6 (parser): the normative control-line grammar is CRLF tolerant and 
 });
 
 test('the stub helper compiles and speaks the two-line protocol in preflight and launch mode', (t) => {
-  const stub = stubNativeRoot({ platform: 'linux', arch: 'x64' });
+  const stub = stubNativeRoot({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH });
   if (stub.skipReason) { t.skip(stub.skipReason); return; }
   const preflight = spawnSync(stub.helperPath, ['--own-grok-tree', '--parent-pid', String(process.pid)], { input: '', encoding: 'utf8', timeout: 5000 });
   assert.equal(preflight.status, 0, preflight.stderr);
@@ -1520,7 +1521,7 @@ test('the stub helper compiles and speaks the two-line protocol in preflight and
 // Preflight always runs with a CLEAN stub environment (no fault, no exit code):
 // faults belong to the launch (Task 8). `spawnFault` is the one exception, for
 // T-OWN-2, where the preflight itself is under test.
-function stubPreflight(label, { spawnFault = '', platform = 'linux', arch = 'x64', now, tmpRoot, spy = null } = {}) {
+function stubPreflight(label, { spawnFault = '', platform = HOST_STUB_PLATFORM, arch = HOST_STUB_ARCH, now, tmpRoot, spy = null } = {}) {
   const stub = stubNativeRoot({ platform, arch });
   if (stub.skipReason) return { skipReason: stub.skipReason };
   const env = { ...process.env, STUB_FAULT: spawnFault, STUB_MECHANISM: platform === 'linux' ? 'pid-namespace' : 'job-object', GROK_SANDBOX: 'must-not-leak', STUB_EXIT: '' };
@@ -1633,7 +1634,7 @@ test('T-OWN-5: symlinked, foreign, tampered, planted or untrusted-directory reco
   rmSync(recordPath);
   supervisorTesting.writeOwnerRecordForTest({ record: Object.fromEntries(Object.keys(body.record).map((k) => [k, planted[k]])), token_sha256: planted.token_sha256, helper_sha256: body.helper_sha256, created_at: body.created_at }, p.tmpRoot);
   assert.equal(isGrokContainmentOwnerLive(planted, { tmpRoot: p.tmpRoot }), true, 'the planted record validates as a record');
-  const runner = supervisorTesting.createContainedRunner({ platform: 'linux', arch: 'x64', nativeDirectory: p.stub.root, pluginRoot: p.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: p.tmpRoot });
+  const runner = supervisorTesting.createContainedRunner({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: p.stub.root, pluginRoot: p.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: p.tmpRoot });
   await assert.rejects(() => runner.run(process.execPath, ['-e', '0'], { cwd: p.stub.root, env: process.env, timeoutMs: 5000, containmentToken: planted }), /foreign_containment_owner/u);
   assert.equal(existsSync(join(dir, `${planted.owner_id}.json`)), true, 'the planted record was not consumed');
   if (process.platform !== 'win32') {
@@ -1695,7 +1696,7 @@ test('T-OWN-14: --release from a child process removes the record with an empty 
 
 // The preflight runs with a clean stub environment; faults and exit codes are
 // applied to the LAUNCH environment only (sol R1 F7).
-function stubRunner(label, { fault = '', platform = 'linux', arch = 'x64', providerOutput = 'PROVIDER OUTPUT LINE', exit = '0' } = {}) {
+function stubRunner(label, { fault = '', platform = HOST_STUB_PLATFORM, arch = HOST_STUB_ARCH, providerOutput = 'PROVIDER OUTPUT LINE', exit = '0' } = {}) {
   const p = stubPreflight(label, { platform, arch });
   if (p.skipReason) return { skipReason: p.skipReason };
   const launchEnv = { ...scrubGrokEnvironment(process.env), STUB_FAULT: fault, STUB_MECHANISM: platform === 'linux' ? 'pid-namespace' : 'job-object', STUB_PROVIDER_OUTPUT: providerOutput, STUB_EXIT: exit };
@@ -1758,7 +1759,7 @@ test('T-OWN-3: the record is consumed exactly once, only after every pre-spawn c
   assert.equal(existsSync(r.recordPath), true, 'a pre-spawn failure leaves the record');
   // the registry alone never admits: age the record past the TTL while liveOwners still holds the owner
   assert.equal(supervisorTesting.liveOwners.has(r.token.owner_id), true);
-  const aged = supervisorTesting.createContainedRunner({ platform: 'linux', arch: 'x64', nativeDirectory: r.stub.root, pluginRoot: r.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: r.tmpRoot, now: () => Date.now() + GROK_CONTAINMENT_TOKEN_TTL_MS + 1 });
+  const aged = supervisorTesting.createContainedRunner({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: r.stub.root, pluginRoot: r.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: r.tmpRoot, now: () => Date.now() + GROK_CONTAINMENT_TOKEN_TTL_MS + 1 });
   await assert.rejects(() => aged.run(r.provider, ['-e', '0'], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 10000, expectedPreparedSpawnChain: r.chain, containmentToken: r.token }), /containment_owner_not_live/u);
   assert.equal(existsSync(r.recordPath), true);
   // consume then spawn failure: not restored

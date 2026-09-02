@@ -52,7 +52,8 @@ const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const bridgePath = join(pluginRoot, 'hooks', 'scripts', 'run-grok-reviewer.mjs');
 const WINDOWS = process.platform === 'win32';
 const require = createRequire(import.meta.url);
-const { stubNativeRoot } = require('./helpers/native-stub.cjs');
+const { stubNativeRoot, HOST_STUB_PLATFORM, HOST_STUB_ARCH, INVENTORY } = require('./helpers/native-stub.cjs');
+const HOST_STUB_KEY = `${HOST_STUB_PLATFORM}/${HOST_STUB_ARCH}`;
 
 const REQUIRED_HELP_FLAGS = Object.freeze([
   '--cwd',
@@ -215,7 +216,7 @@ function plannedRoute(binary, overrides) {
 
 const CONTAINMENT_OWNER = 'grok-containment-owner-1-6-00000004';
 const CONTAINMENT_TOKEN = supervisorTesting.mintOwnerToken({
-  platform: 'linux', arch: 'x64', ownerId: CONTAINMENT_OWNER, generation: 1, startedAt: 1_700_000_000_000,
+  platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, ownerId: CONTAINMENT_OWNER, generation: 1, startedAt: 1_700_000_000_000,
 });
 test('the harness containment owner id matches the record grammar', () => {
   assert.match(CONTAINMENT_OWNER, OWNER_ID_PATTERN);
@@ -1213,10 +1214,10 @@ async function expectCliRefusal(stub, detail, { pluginRoot: otherPluginRoot = nu
     mkdirSync(dirname(nativeDirectory), { recursive: true });
     renameSync(stub.root, nativeDirectory);
   }
-  const preflight = preflightGrokContainment({ platform: 'linux', arch: 'x64', nativeDirectory, pluginRoot: admissionPluginRoot, tmpRoot, enabledPlatforms: ['linux/x64'] });
+  const preflight = preflightGrokContainment({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory, pluginRoot: admissionPluginRoot, tmpRoot, enabledPlatforms: [HOST_STUB_KEY] });
   assert.equal(preflight.ok, true, `${detail}: the preflight must pass on the healthy tree (got ${JSON.stringify(preflight)})`);
   if (mutateAfterPreflight) mutateAfterPreflight(nativeDirectory);
-  const context = { platform: 'linux', arch: 'x64', pluginRoot: otherPluginRoot ?? admissionPluginRoot, enabledPlatforms: ['linux/x64'], tmpRoot };
+  const context = { platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, pluginRoot: otherPluginRoot ?? admissionPluginRoot, enabledPlatforms: [HOST_STUB_KEY], tmpRoot };
   if (!productionMode) context.nativeDirectory = nativeDirectory;
   const runner = supervisorTesting.createContainedRunner(context);
   const e2e = harness(`grok-admission-cli-${detail}`);
@@ -1274,10 +1275,10 @@ test('T-OWN-16: the bridge CLI serialises a containment admission refusal as std
   const other = { run: async () => { throw new Error('ERROR_GROK_PROMPT_TRANSPORT: boom'); }, stdout: { write: () => assert.fail('no stdout') }, stderr: { write: () => {} } };
   assert.equal(await runBridgeCli(minimalBridgeArgv(), other), 2);
   // a tampered seal through the REAL run path with a live record: typed, exit 3, record untouched
-  const tamperStub = stubNativeRoot({ platform: 'linux', arch: 'x64' });
+  const tamperStub = stubNativeRoot({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH });
   if (!tamperStub.skipReason) {
     const tmpRoot = workspace('grok-cli-tampered-tmp');
-    const preflight = preflightGrokContainment({ platform: 'linux', arch: 'x64', nativeDirectory: tamperStub.root, pluginRoot: tamperStub.root, tmpRoot, enabledPlatforms: ['linux/x64'] });
+    const preflight = preflightGrokContainment({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: tamperStub.root, pluginRoot: tamperStub.root, tmpRoot, enabledPlatforms: [HOST_STUB_KEY] });
     const tampered = { ...preflight.containment_ready_token, token_sha256: 'f'.repeat(64) };
     const e2e = harness('grok-cli-tampered');
     const out = []; const err = [];
@@ -1294,12 +1295,12 @@ test('T-OWN-16: the bridge CLI serialises a containment admission refusal as std
   await assert.rejects(() => runGrokReviewer(fixture.seams), (error) => error.containment_refusal?.stage === 'bridge_admission'
     && ['foreign_containment_owner', 'unsupported_grok_containment'].includes(error.containment_refusal.reason));
   // end to end through a test runner with a real stub root: every integrity_* detail and record_digest_mismatch, record left in place
-  const integrityStub = stubNativeRoot({ platform: 'linux', arch: 'x64' });
+  const integrityStub = stubNativeRoot({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH });
   if (!integrityStub.skipReason) {
     const tmpRoot = workspace('grok-admission-integrity-tmp');
-    const preflight = preflightGrokContainment({ platform: 'linux', arch: 'x64', nativeDirectory: integrityStub.root, pluginRoot: integrityStub.root, tmpRoot, enabledPlatforms: ['linux/x64'] });
+    const preflight = preflightGrokContainment({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: integrityStub.root, pluginRoot: integrityStub.root, tmpRoot, enabledPlatforms: [HOST_STUB_KEY] });
     assert.equal(preflight.ok, true);
-    const runner = supervisorTesting.createContainedRunner({ platform: 'linux', arch: 'x64', nativeDirectory: integrityStub.root, pluginRoot: integrityStub.root, enabledPlatforms: ['linux/x64'], tmpRoot });
+    const runner = supervisorTesting.createContainedRunner({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: integrityStub.root, pluginRoot: integrityStub.root, enabledPlatforms: [HOST_STUB_KEY], tmpRoot });
     const recordPath = join(tmpRoot, 'deep-review-grok-containment', `${preflight.containment_ready_token.owner_id}.json`);
     const sums = join(integrityStub.root, 'SHA256SUMS');
     const original = readFileSync(sums, 'utf8');
@@ -1322,11 +1323,11 @@ test('T-OWN-16: the bridge CLI serialises a containment admission refusal as std
       writeFileSync(sums, original);
     }
     if (process.platform !== 'win32') {
-      await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'integrity_sums_symlink', { mutateAfterPreflight: (native) => { const text = readFileSync(join(native, 'SHA256SUMS'), 'utf8'); rmSync(join(native, 'SHA256SUMS')); writeFileSync(join(native, 'real-sums'), text); symlinkSync(join(native, 'real-sums'), join(native, 'SHA256SUMS')); } });
-      await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'integrity_symlink_component', { mutateAfterPreflight: (native) => { renameSync(join(native, 'linux-x64'), join(native, 'real-linux')); symlinkSync(join(native, 'real-linux'), join(native, 'linux-x64')); } });
+      await expectCliRefusal(stubNativeRoot({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH }), 'integrity_sums_symlink', { mutateAfterPreflight: (native) => { const text = readFileSync(join(native, 'SHA256SUMS'), 'utf8'); rmSync(join(native, 'SHA256SUMS')); writeFileSync(join(native, 'real-sums'), text); symlinkSync(join(native, 'real-sums'), join(native, 'SHA256SUMS')); } });
+      await expectCliRefusal(stubNativeRoot({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH }), 'integrity_symlink_component', { mutateAfterPreflight: (native) => { renameSync(join(native, 'linux-x64'), join(native, 'real-linux')); symlinkSync(join(native, 'real-linux'), join(native, 'linux-x64')); } });
     }
-    await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'integrity_outside_root', { pluginRoot: workspace('grok-admission-other-root') });
-    await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'integrity_not_release', { productionMode: true });
-    await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'record_digest_mismatch', { mutateAfterPreflight: (native) => { const helper = join(native, 'linux-x64', 'grok-linux-pidns-owner'); const before = createHash('sha256').update(readFileSync(helper)).digest('hex'); writeFileSync(helper, Buffer.concat([readFileSync(helper), Buffer.from('\n')])); const after = createHash('sha256').update(readFileSync(helper)).digest('hex'); writeFileSync(join(native, 'SHA256SUMS'), readFileSync(join(native, 'SHA256SUMS'), 'utf8').replace(before, after)); } });
+    await expectCliRefusal(stubNativeRoot({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH }), 'integrity_outside_root', { pluginRoot: workspace('grok-admission-other-root') });
+    await expectCliRefusal(stubNativeRoot({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH }), 'integrity_not_release', { productionMode: true });
+    await expectCliRefusal(stubNativeRoot({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH }), 'record_digest_mismatch', { mutateAfterPreflight: (native) => { const helper = join(native, ...INVENTORY[HOST_STUB_KEY].split('/')); const before = createHash('sha256').update(readFileSync(helper)).digest('hex'); writeFileSync(helper, Buffer.concat([readFileSync(helper), Buffer.from('\n')])); const after = createHash('sha256').update(readFileSync(helper)).digest('hex'); writeFileSync(join(native, 'SHA256SUMS'), readFileSync(join(native, 'SHA256SUMS'), 'utf8').replace(before, after)); } });
   }
 });

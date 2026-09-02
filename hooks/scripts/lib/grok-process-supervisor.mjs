@@ -626,7 +626,8 @@ function createContainedRunner(context = {}) {
       killSignal: 'SIGKILL', maxBuffer: GROK_PROVIDER_CAPTURE_MAX_BYTES + GROK_CONTROL_CAPTURE_MAX_BYTES, windowsHide: true, shell: false,
     });
     const timedOut = run.error?.code === 'ETIMEDOUT';
-    const captureOverflow = run.error?.code === 'ENOBUFS';
+    const captureOverflow = run.error?.code === 'ENOBUFS'
+      || run.error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
     const stdoutBytes = Buffer.from(run.stdout ?? []);
     let detail = run.error && !timedOut && !captureOverflow ? 'spawn_error' : captureOverflow ? 'capture_overflow' : null;
     const parsed = stdoutBytes.length > GROK_CONTROL_CAPTURE_MAX_BYTES ? { ok: false, reason: 'shape', lines: [] } : parseOwnerControlLines(stdoutBytes);

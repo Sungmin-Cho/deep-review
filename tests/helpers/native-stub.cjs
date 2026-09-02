@@ -10,6 +10,8 @@ const GROK_SOURCE = path.join(__dirname, '..', 'fixtures', 'native', 'stub-grok.
 const ARGV_MATRIX = JSON.parse(readFileSync(path.join(__dirname, '..', 'fixtures', 'native', 'argv-matrix.json'), 'utf8'));
 const INVENTORY = { 'linux/x64': 'linux-x64/grok-linux-pidns-owner', 'win32/x64': 'win32-x64/grok-win32-job-owner.exe' };
 const PLACEHOLDER = '0'.repeat(64);
+const HOST_STUB_PLATFORM = process.platform === 'win32' ? 'win32' : 'linux';
+const HOST_STUB_ARCH = 'x64';
 let compiled = null;
 let compiledGrok = null;
 
@@ -45,7 +47,7 @@ function compileGrokOnce() {
 
 function digestOf(file) { return createHash('sha256').update(readFileSync(file)).digest('hex'); }
 
-function stubNativeRoot({ platform = 'linux', arch = 'x64', otherPlatformPresent = false } = {}) {
+function stubNativeRoot({ platform = HOST_STUB_PLATFORM, arch = HOST_STUB_ARCH, otherPlatformPresent = false } = {}) {
   const built = compileOnce();
   if (built.skipReason) return { skipReason: built.skipReason };
   const root = mkdtempSync(path.join(tmpdir(), 'deep-review-stub-native-'));
@@ -85,4 +87,4 @@ function stubGrokLauncher({ version = '1.0.4', build = 'd846eb93d94d', helpFlags
   return { root, bin, launcher, log, env, skipReason: null };
 }
 
-module.exports = { stubNativeRoot, stubGrokLauncher, ARGV_MATRIX, INVENTORY, PLACEHOLDER };
+module.exports = { stubNativeRoot, stubGrokLauncher, ARGV_MATRIX, INVENTORY, PLACEHOLDER, HOST_STUB_PLATFORM, HOST_STUB_ARCH };
