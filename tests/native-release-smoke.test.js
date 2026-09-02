@@ -1915,6 +1915,7 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
   const release = readFileSync(path.join(sourceRoot, '.github', 'workflows', 'release.yml'), 'utf8');
   assert.match(release, /^on:\s*\n\s*workflow_dispatch:/mu);
   assert.match(release, /GROK_CLI_INSTALLER_SHA256_LINUX: '[a-f0-9]{64}'/u, 'linux installer pin is an observed digest, never empty after bootstrap');
+  assert.match(release, /GROK_CLI_INSTALLER_SHA256_WINDOWS: '[a-f0-9]{64}'/u, 'windows installer pin is an observed digest, never empty after bootstrap');
   for (const job of ['verify-source', 'build-helpers', 'smoke-linux', 'smoke-windows', 'gate', 'publish']) workflowJob(release, job);
   assert.match(workflowJob(release, 'build-helpers'), /needs:\s*verify-source/u);
   for (const job of ['smoke-linux', 'smoke-windows']) assert.match(workflowJob(release, job), /needs:\s*\[verify-source, build-helpers\]/u, `${job} lists verify-source directly`);
@@ -1932,6 +1933,8 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
   const probe = workflowStep(workflowJob(release, 'smoke-linux'), 'Probe the pinned Grok CLI inside the helper');
   assertOrdered(probe, 'curl -fsSLo install.sh', 'bash install.sh', 'installer is downloaded before it runs');
   assertOrdered(probe, 'GROK_CLI_INSTALLER_SHA256_LINUX', 'bash install.sh', 'installer digest is checked before it runs');
+  assert.match(probe, /bash install\.sh "\$GROK_CLI_VERSION"/u, 'install.sh takes the version as $1; bash -s is only for curl|bash');
+  assert.doesNotMatch(probe, /bash install\.sh -s/u);
   assertOrdered(probe, 'GROK_CLI_LAUNCHER_SHA256_LINUX', 'scripts/probe-native-helper.mjs', 'launcher digest is checked before the helper probe');
   assert.match(probe, /node --input-type=module -e/u, 'module flags precede -e');
   for (const step of [probe, workflowStep(workflowJob(release, 'smoke-windows'), 'Probe the pinned Grok CLI inside the helper')]) {

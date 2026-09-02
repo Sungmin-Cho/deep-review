@@ -16,9 +16,11 @@ env:
   # digest, fails with pin_bootstrap_required, and the maintainer commits the pin.
   # Never invent these values. Linux installer observed 2026-09-02 from
   # https://x.ai/cli/install.sh (release run 33626460370 and a local curl).
+  # Windows installer observed 2026-09-02 from https://x.ai/cli/install.ps1
+  # (release run 33631141816 and a local curl).
   GROK_CLI_INSTALLER_SHA256_LINUX: '7fd6fdc75d9418b2e58356726fcbf1ae849416f773925da07d0ccc7a60d3e791'
   GROK_CLI_LAUNCHER_SHA256_LINUX: ''
-  GROK_CLI_INSTALLER_SHA256_WINDOWS: ''
+  GROK_CLI_INSTALLER_SHA256_WINDOWS: '3a4ee2b1d744252c00827abbdeb2589f6b3dae80e73d88e0a81e08dc0ee747e7'
   GROK_CLI_LAUNCHER_SHA256_WINDOWS: ''
 
 jobs:
@@ -157,7 +159,7 @@ jobs:
           echo "installer=$installer_sha256" >> "$PROBE_RECORD"
           if [ -z "$GROK_CLI_INSTALLER_SHA256_LINUX" ]; then echo "pin_bootstrap_required installer=$installer_sha256"; exit 1; fi
           test "$installer_sha256" = "$GROK_CLI_INSTALLER_SHA256_LINUX" || { echo "installer digest mismatch: $installer_sha256"; exit 1; }
-          bash install.sh -s "$GROK_CLI_VERSION"
+          bash install.sh "$GROK_CLI_VERSION"
           export PATH="$HOME/.grok/bin:$PATH"
           cd "$GITHUB_WORKSPACE"
           launcher="$(node --input-type=module -e 'const { prepareSpawnChain } = await import("./hooks/scripts/lib/process.mjs"); const p = prepareSpawnChain("grok", ["--version"], { env: process.env }); if (!p.ok || p.prepared_spawn_chain.prepared_kind !== "direct" || p.prepared_spawn_chain.posix_executable_type !== "native-elf" || p.prepared_spawn_chain.shebang !== null) { console.error(JSON.stringify(p)); process.exit(1); } process.stdout.write(p.prepared_spawn_chain.launcher.path)')"
