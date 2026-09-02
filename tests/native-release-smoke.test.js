@@ -2024,17 +2024,17 @@ test('native owner sources implement the inventoried containment mechanisms and 
   const windowsMain = windows.slice(windows.indexOf('int wmain(int argc, wchar_t **argv)'));
   assert.match(
     windowsMain,
-    /LimitFlags\s*=\s*JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;\s*limits\.BasicLimitInformation\.LimitFlags\s*&=\s*~\(\s*JOB_OBJECT_LIMIT_BREAKAWAY_OK\s*\|\s*JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK\s*\);\s*if \(!SetInformationJobObject\(\s*job,\s*JobObjectExtendedLimitInformation,\s*&limits,\s*\(DWORD\)sizeof\(limits\)\s*\)\) \{[\s\S]{0,280}CloseHandle\(job\);\s*return 125;\s*\}/u,
+    /LimitFlags\s*=\s*JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;\s*limits\.BasicLimitInformation\.LimitFlags\s*&=\s*~\(\s*JOB_OBJECT_LIMIT_BREAKAWAY_OK\s*\|\s*JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK\s*\);\s*if \(!SetInformationJobObject\(\s*job,\s*JobObjectExtendedLimitInformation,\s*&limits,\s*\(DWORD\)sizeof\(limits\)\s*\)\) \{[\s\S]{0,280}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;\s*\}/u,
     'the Windows job limits must be passed to a checked SetInformationJobObject call',
   );
   assert.match(
     windowsMain,
-    /const BOOL created\s*=\s*CreateProcessW\(\s*NULL,\s*command_line,\s*NULL,\s*NULL,\s*TRUE,\s*CREATE_SUSPENDED \| CREATE_UNICODE_ENVIRONMENT \| EXTENDED_STARTUPINFO_PRESENT,\s*NULL,\s*NULL,\s*&startup\.StartupInfo,\s*&process\s*\);[\s\S]{0,360}if \(!created\) \{[\s\S]{0,240}CloseHandle\(job\);\s*return 125;\s*\}/u,
+    /const BOOL created\s*=\s*CreateProcessW\(\s*NULL,\s*command_line,\s*NULL,\s*NULL,\s*TRUE,\s*CREATE_SUSPENDED \| CREATE_UNICODE_ENVIRONMENT \| EXTENDED_STARTUPINFO_PRESENT,\s*NULL,\s*NULL,\s*&startup\.StartupInfo,\s*&process\s*\);[\s\S]{0,360}if \(!created\) \{[\s\S]{0,240}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;\s*\}/u,
     'the Windows provider must be created suspended with explicit stdio and creation failure must stop assignment',
   );
   assert.match(
     windowsMain,
-    /if \(ResumeThread\(process\.hThread\) == \(DWORD\)-1\) \{[\s\S]{0,240}TerminateJobObject\(job, 125U\);[\s\S]{0,160}close_process\(&process\);[\s\S]{0,160}return 125;\s*\}/u,
+    /if \(ResumeThread\(process\.hThread\) == \(DWORD\)-1\) \{[\s\S]{0,240}TerminateJobObject\(job, 125U\);[\s\S]{0,160}close_process\(&process\);[\s\S]{0,160}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;\s*\}/u,
     'resume failure must be checked and fail closed before waiting on the provider',
   );
   assertOrdered(windowsMain, 'CreateProcessW(', 'AssignProcessToJobObject(', 'Windows create before assignment');
@@ -2145,7 +2145,7 @@ test('native owners keep control stdout unreachable from provider stdio on both 
   const windowsMain = windows.slice(windows.indexOf('int wmain(int argc, wchar_t **argv)'));
   assert.match(
     windowsMain,
-    /if \(!prepare_provider_stdio\(&startup, &provider_stdio\)\) \{[\s\S]{0,280}free\(command_line\);[\s\S]{0,120}CloseHandle\(job\);[\s\S]{0,120}return 125;\s*\}/u,
+    /if \(!prepare_provider_stdio\(&startup, &provider_stdio\)\) \{[\s\S]{0,280}free\(command_line\);[\s\S]{0,120}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;\s*\}/u,
     'Windows must stop before CreateProcessW when explicit provider stdio setup fails',
   );
   assert.match(
@@ -2240,7 +2240,30 @@ test('Windows assignment failure checks termination and waits before closing pro
   const windowsMain = windows.slice(windows.indexOf('int wmain(int argc, wchar_t **argv)'));
   assert.match(
     windowsMain,
-    /if \(!AssignProcessToJobObject\(job, process\.hProcess\)\) \{[\s\S]{0,320}if \(!terminate_process_and_wait\(&process, 125U\)\) \{[\s\S]{0,240}\}[\s\S]{0,120}close_process\(&process\);/u,
+    /if \(!AssignProcessToJobObject\(job, process\.hProcess\)\) \{[\s\S]{0,320}if \(!terminate_process_and_wait\(&process, 125U\)\) \{[\s\S]{0,240}\}[\s\S]{0,120}close_process\(&process\);[\s\S]{0,160}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;/u,
     'assignment failure must use terminate-and-wait before handle close',
   );
+});
+
+test('T-NATIVE-1: both helpers parse the E2d grammar and arm the parent leash', () => {
+  const linux = readFileSync(path.join(sourceRoot, nativeRelativeRoot, 'grok-linux-pidns-owner.c'), 'utf8');
+  const windows = readFileSync(path.join(sourceRoot, nativeRelativeRoot, 'grok-win32-job-owner.c'), 'utf8');
+  for (const [label, source] of [['linux', linux], ['windows', windows]]) {
+    assert.match(source, /--own-grok-tree \[--parent-pid <pid>\] \[-- command \[args\.\.\.\]\]/u, `${label}: usage string`);
+    assert.match(source, /parse_owner_arguments\(/u, `${label}: one parser function`);
+    assert.doesNotMatch(source, /argc == 2/u, `${label}: preflight is the absence of a command operand`);
+    assert.match(source, /leading zero/u, `${label}: rejects a leading zero`);
+    assert.match(source, /duplicate/u, `${label}: rejects a duplicate --parent-pid`);
+  }
+  const linuxMain = linux.slice(linux.indexOf('int main(int argc, char **argv)'));
+  assert.match(linuxMain, /if \(arguments\.parent_pid > 0\) \{\s*if \(prctl\(PR_SET_PDEATHSIG, SIGKILL\) < 0\)[\s\S]{0,200}if \(getppid\(\) != arguments\.parent_pid\)[\s\S]{0,160}return 125;/u,
+    'Linux arms PDEATHSIG in the helper and re-checks the parent before clone');
+  assert.ok(linuxMain.indexOf('PR_SET_PDEATHSIG') < linuxMain.indexOf('int clone_flags ='), 'leash precedes clone');
+  const windowsMain = windows.slice(windows.indexOf('int wmain(int argc, wchar_t **argv)'));
+  assert.ok(windowsMain.indexOf('OpenProcess(SYNCHRONIZE') < windowsMain.indexOf('CreateJobObjectW('), 'parent handle before the Job');
+  assert.match(windowsMain, /WaitForMultipleObjects\(2, wait_handles, FALSE, INFINITE\)/u, 'wait-any on provider and parent when a parent was given');
+  assert.match(windowsMain, /WaitForSingleObject\(process\.hProcess, INFINITE\)/u, 'the no-parent path keeps the single wait');
+  assert.match(windowsMain, /WAIT_OBJECT_0 \+ 1[\s\S]{0,240}TerminateJobObject\(job, 125U\)[\s\S]{0,240}wait_for_empty_job\(job\)[\s\S]{0,160}return 125;/u,
+    'parent death terminates the Job, proves it empty and exits 125 without a report');
+  assert.match(windowsMain, /CloseHandle\(parent\)/u);
 });
