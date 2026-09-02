@@ -1914,6 +1914,7 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
 
   const release = readFileSync(path.join(sourceRoot, '.github', 'workflows', 'release.yml'), 'utf8');
   assert.match(release, /^on:\s*\n\s*workflow_dispatch:/mu);
+  assert.match(release, /GROK_CLI_INSTALLER_SHA256_LINUX: '[a-f0-9]{64}'/u, 'linux installer pin is an observed digest, never empty after bootstrap');
   for (const job of ['verify-source', 'build-helpers', 'smoke-linux', 'smoke-windows', 'gate', 'publish']) workflowJob(release, job);
   assert.match(workflowJob(release, 'build-helpers'), /needs:\s*verify-source/u);
   for (const job of ['smoke-linux', 'smoke-windows']) assert.match(workflowJob(release, job), /needs:\s*\[verify-source, build-helpers\]/u, `${job} lists verify-source directly`);
@@ -1957,6 +1958,7 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
   assert.match(attributes, /hooks\/scripts\/lib\/native\/linux-x64\/\*\* binary/u);
   assert.match(attributes, /hooks\/scripts\/lib\/native\/win32-x64\/\*\* binary/u);
   assert.match(attributes, /hooks\/scripts\/lib\/native\/SHA256SUMS text eol=lf/u);
+  assert.match(attributes, /hooks\/scripts\/lib\/native\/\*\.c text eol=lf/u, 'Windows checkout must not rewrite helper sources before the source-digest check');
   const verifier = readFileSync(path.join(sourceRoot, 'scripts', 'verify-native-candidate.mjs'), 'utf8');
   for (const token of ['BUILD-MANIFEST.json', 'sources', 'artifacts', 'mode', 'argv', 'SHA256SUMS', "'rev-parse', 'HEAD'"]) assert.ok(verifier.includes(token), `verifier checks ${token}`);
 });

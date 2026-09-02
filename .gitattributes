@@ -1,3 +1,4 @@
 hooks/scripts/lib/native/linux-x64/** binary
 hooks/scripts/lib/native/win32-x64/** binary
 hooks/scripts/lib/native/SHA256SUMS text eol=lf
+hooks/scripts/lib/native/*.c text eol=lf
