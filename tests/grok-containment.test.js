@@ -729,7 +729,12 @@ test('T-LIFE-9: killing the bridge process tears the whole tree down (parent lea
   assert.ok(treePids.length >= minTree, `host tree was too small before the crash (${treePids.join(',')}): ${readFileSync(errFile, 'utf8')}`);
   assert.equal(treePids.every(alive), true, `host tree was not alive before the crash (${treePids.join(',')}): ${readFileSync(errFile, 'utf8')}`);
   bridge.kill('SIGKILL');
-  await new Promise((r) => setTimeout(r, 3000));
+  let allGone = false;
+  for (let i = 0; i < 100; i += 1) {
+    allGone = treePids.every(isGone);
+    if (allGone) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
   for (const pid of treePids) {
     assert.equal(isGone(pid), true, `pid ${pid} is gone`);
   }
