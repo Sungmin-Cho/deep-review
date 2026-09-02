@@ -522,6 +522,8 @@ function trustedDispatch(runtime, plan, attempts, sessions = {}) {
   };
 }
 
+const SMOKE_OWNER_ID = 'grok-containment-owner-1-7-00000005';
+
 function containedResult(stdout) {
   return {
     code: 0,
@@ -530,7 +532,7 @@ function containedResult(stdout) {
     stderr: Buffer.alloc(0),
     termination_confirmed: true,
     termination_report: {
-      owner_id: 'smoke-owner',
+      owner_id: SMOKE_OWNER_ID,
       generation: 1,
       live_members: 0,
       member_pids: [],
@@ -578,7 +580,7 @@ async function runInstalledGrok(runtime, {
   const containmentToken = runtime.supervisor.__testing.mintOwnerToken({
     platform: 'linux',
     arch: 'x64',
-    ownerId: 'smoke-owner',
+    ownerId: SMOKE_OWNER_ID,
     generation: 1,
     startedAt: 1_700_000_000_000,
   });

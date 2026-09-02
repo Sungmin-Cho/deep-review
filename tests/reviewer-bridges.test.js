@@ -1670,6 +1670,7 @@ const coordinatorExecutable = join(pluginRoot, 'hooks', 'scripts', 'grok-carrier
 const classifyExecutable = join(pluginRoot, 'hooks', 'scripts', 'classify-artifacts.mjs');
 const standaloneDetector = join(pluginRoot, 'hooks', 'scripts', 'detect-environment.mjs');
 const grokBridgeExecutable = join(pluginRoot, 'hooks', 'scripts', 'run-grok-reviewer.mjs');
+const preflightCli = join(pluginRoot, 'hooks', 'scripts', 'grok-containment-preflight.mjs');
 const coordinatorLibraryUrl = pathToFileURL(
   join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-carrier-coordinator.mjs'),
 ).href;
@@ -2079,12 +2080,14 @@ test('the Grok bridge child-process entry consumes the transported token instead
     join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs'),
   ).href;
   const { preflightGrokContainment } = await import(supervisorUrl);
+  const root = workspace('grok-token-transport');
   // Host-independent: the containment platform is pinned, never inherited.
   const admission = preflightGrokContainment({
     platform: 'linux',
     arch: 'x64',
     helperArtifact: ARTIFACT_OK,
     helperSpawner: () => ({ ok: true }),
+    tmpRoot: root,
   });
   assert.equal(admission.ok, true);
 
@@ -2093,8 +2096,7 @@ test('the Grok bridge child-process entry consumes the transported token instead
     t.skip(grok.skipReason);
     return;
   }
-  const env = { ...probeEnvironment(grok.bin), ...grok.env };
-  const root = workspace('grok-token-transport');
+  const env = { ...probeEnvironment(grok.bin), ...grok.env, TMPDIR: root, TMP: root, TEMP: root };
   const promptFile = join(root, 'payload.txt');
   const outputFile = join(root, 'output.txt');
   writeFileSync(promptFile, 'PAYLOAD');
@@ -2161,4 +2163,17 @@ test('the Grok bridge child-process entry consumes the transported token instead
   ], { env, encoding: 'utf8', shell: false });
   assert.notEqual(malformed.status, 0);
   assert.match(malformed.stderr, /containment[_-]ready[_-]token/iu);
+
+  // T-OWN-15: the child never reached admission, so the durable record remains;
+  // E10 `--release` from a child process with an empty registry unlinks it.
+  const token = admission.containment_ready_token;
+  const recordPath = join(root, 'deep-review-grok-containment', `${token.owner_id}.json`);
+  assert.equal(existsSync(recordPath), true, 'the child never reached admission so the record remains');
+  const released = spawnSync(process.execPath, [
+    preflightCli, '--release', '--containment-ready-token-json', JSON.stringify(token),
+  ], { encoding: 'utf8', env });
+  assert.equal(released.status, 0, released.stderr);
+  const parsed = JSON.parse(released.stdout.trim());
+  assert.deepEqual([parsed.released, parsed.owner_id], [true, token.owner_id]);
+  assert.equal(existsSync(recordPath), false);
 });

@@ -49,6 +49,7 @@ import {
 } from './grok-native-artifact.mjs';
 import { parseOwnerControlLines, sanitizeHelperStderr } from './grok-owner-control.mjs';
 import {
+  OWNER_ID_PATTERN,
   consumeOwnerRecord,
   readOwnerRecord,
   recordDirectory,
@@ -217,7 +218,7 @@ export function assertContainmentReadyToken(token) {
   if (token.containment_ready !== true) {
     throw containmentError('containment_not_ready', 'the token does not carry containment_ready');
   }
-  if (typeof token.owner_id !== 'string' || token.owner_id.length === 0) {
+  if (typeof token.owner_id !== 'string' || !OWNER_ID_PATTERN.test(token.owner_id)) {
     throw containmentError('invalid_containment_ready_token', 'no owner_id');
   }
   if (!Number.isSafeInteger(token.generation) || token.generation <= 0) {

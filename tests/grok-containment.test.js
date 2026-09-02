@@ -329,6 +329,10 @@ test('releaseGrokContainment on a refused preflight releases nothing and never c
   assert.equal(released.containment_ready, false);
 });
 
+const TOKEN_OWNER_ID = 'grok-containment-owner-1-3-00000001';
+const LIFE_OWNER_ID = 'grok-containment-owner-1-4-00000002';
+const RELEASE_OWNER_ID = 'grok-containment-owner-1-5-00000003';
+
 // ---------------------------------------------------------------------------
 // D21 — the bounded owner-handshake constants and the token contract.
 // ---------------------------------------------------------------------------
@@ -340,9 +344,10 @@ test('the owner handshake uses the D20 bounded polling constants', () => {
 
 test('assertContainmentReadyToken refuses a missing, unready, foreign-sealed or malformed token', () => {
   const valid = supervisorTesting.mintOwnerToken({
-    platform: 'linux', arch: 'x64', ownerId: 'owner-1', generation: 1, startedAt: 1000,
+    platform: 'linux', arch: 'x64', ownerId: TOKEN_OWNER_ID, generation: 1, startedAt: 1000,
   });
-  assert.equal(assertContainmentReadyToken(valid).owner_id, 'owner-1');
+  assert.equal(assertContainmentReadyToken(valid).owner_id, TOKEN_OWNER_ID);
+  assert.match(valid.owner_id, OWNER_ID_PATTERN);
   assert.equal(valid.protocol_version, GROK_CONTAINMENT_PROTOCOL_VERSION);
 
   const refusals = [
@@ -351,11 +356,12 @@ test('assertContainmentReadyToken refuses a missing, unready, foreign-sealed or 
     ['token', 'string'],
     [{ ...valid, protocol_version: '9.9' }, 'wrong protocol'],
     [{ ...valid, containment_ready: false }, 'not ready'],
-    [{ ...valid, owner_id: 'someone-else' }, 'foreign owner breaks the seal'],
+    [{ ...valid, owner_id: 'grok-containment-owner-1-8-ffffffff' }, 'foreign owner breaks the seal'],
     [{ ...valid, mechanism: 'setsid-census' }, 'census is not containment'],
     [{ ...valid, token_sha256: 'f'.repeat(64) }, 'forged seal'],
     [{ ...valid, generation: 0 }, 'non-positive generation'],
     [{ ...valid, helper_path: '' }, 'no helper'],
+    [{ ...valid, owner_id: 'owner-x', token_sha256: supervisorTesting.tokenSeal({ ...valid, owner_id: 'owner-x' }) }, 'bad owner grammar'],
   ];
   for (const [token, label] of refusals) {
     assert.throws(
@@ -372,15 +378,16 @@ test('assertContainmentReadyToken refuses a missing, unready, foreign-sealed or 
 
 function liveToken(overrides = {}) {
   return supervisorTesting.mintOwnerToken({
-    platform: 'linux', arch: 'x64', ownerId: 'owner-life', generation: 2, startedAt: 5000, ...overrides,
+    platform: 'linux', arch: 'x64', ownerId: LIFE_OWNER_ID, generation: 2, startedAt: 5000, ...overrides,
   });
 }
 
 test('termination_confirmed is true only for an owner-bound report of zero live members', () => {
   const token = liveToken();
+  assert.match(token.owner_id, OWNER_ID_PATTERN);
   const confirmed = evaluateTerminationReport({
     token,
-    report: { owner_id: 'owner-life', generation: 2, live_members: 0, member_pids: [], observed_at: 5100 },
+    report: { owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0, member_pids: [], observed_at: 5100 },
   });
   assert.equal(confirmed.termination_confirmed, true);
   assert.equal(confirmed.process_tree_termination.state, 'confirmed');
@@ -396,13 +403,13 @@ test('every missing, foreign, nonzero, contradictory or lost-handshake report is
     [undefined, 'missing_termination_report'],
     [null, 'missing_termination_report'],
     ['report', 'malformed_termination_report'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 0 }, 'malformed_termination_report'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0 }, 'malformed_termination_report'],
     [{ owner_id: 'foreign', generation: 2, live_members: 0, member_pids: [], observed_at: 1 }, 'foreign_owner'],
-    [{ owner_id: 'owner-life', generation: 9, live_members: 0, member_pids: [], observed_at: 1 }, 'foreign_owner'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 3, member_pids: [11, 12, 13], observed_at: 1 }, 'live_members_remain'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 0, member_pids: [7], observed_at: 1 }, 'member_pids_contradict_live_members'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 0, member_pids: [], observed_at: 1, handshake: 'lost' }, 'handshake_lost'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 0, member_pids: [], observed_at: 1, deadline_exceeded: true }, 'hard_deadline_exceeded'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 9, live_members: 0, member_pids: [], observed_at: 1 }, 'foreign_owner'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 3, member_pids: [11, 12, 13], observed_at: 1 }, 'live_members_remain'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0, member_pids: [7], observed_at: 1 }, 'member_pids_contradict_live_members'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0, member_pids: [], observed_at: 1, handshake: 'lost' }, 'handshake_lost'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0, member_pids: [], observed_at: 1, deadline_exceeded: true }, 'hard_deadline_exceeded'],
   ];
   for (const [report, expected] of cases) {
     const outcome = evaluateTerminationReport({ token, report });
@@ -564,7 +571,8 @@ test('classifyContainmentRelease names privacy decline, error and no-launch dist
 });
 
 test('withGrokContainment releases the preflighted owner on privacy decline, on error and on no-launch', async () => {
-  const token = liveToken({ ownerId: 'owner-release' });
+  const token = liveToken({ ownerId: RELEASE_OWNER_ID });
+  assert.match(token.owner_id, OWNER_ID_PATTERN);
   const stubPreflight = () => ({
     ok: true, containment_ready: true, containment_ready_token: token,
     reason: null, platform: 'linux', arch: 'x64', mechanism: 'pid-namespace',
@@ -588,7 +596,7 @@ test('withGrokContainment releases the preflighted owner on privacy decline, on 
     } else {
       await call;
     }
-    assert.deepEqual(releases, [{ owner_id: 'owner-release', reason: expected }], label);
+    assert.deepEqual(releases, [{ owner_id: RELEASE_OWNER_ID, reason: expected }], label);
   }
 });
 
@@ -1490,4 +1498,35 @@ test('T-OWN-5: symlinked, foreign, tampered, planted or untrusted-directory reco
     assert.equal(supervisorTesting.consumeOwnerRecordForTest(later.result.containment_ready_token.owner_id, later.tmpRoot).consumed, false);
     assert.equal(existsSync(outside), true, 'the symlink target was never unlinked');
   }
+});
+
+const preflightCli = join(pluginRoot, 'hooks', 'scripts', 'grok-containment-preflight.mjs');
+function childEnvFor(tmpRoot) { return { ...process.env, TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot }; }
+
+test('T-OWN-14: --release from a child process removes the record with an empty registry and validates the whole token first', (t) => {
+  const p = stubPreflight('t-own-14');
+  if (p.skipReason) { t.skip(p.skipReason); return; }
+  const token = p.result.containment_ready_token;
+  const env = childEnvFor(p.tmpRoot);
+  const recordPath = join(p.tmpRoot, 'deep-review-grok-containment', `${token.owner_id}.json`);
+  for (const [label, bad] of [
+    ['invalid json', '{'],
+    ['owner id only', JSON.stringify({ owner_id: token.owner_id })],
+    ['tampered seal', JSON.stringify({ ...token, token_sha256: 'f'.repeat(64) })],
+    ['tampered helper path', JSON.stringify({ ...token, helper_path: '/elsewhere/helper' })],
+    ['bad owner grammar', JSON.stringify({ ...token, owner_id: 'owner-x', token_sha256: supervisorTesting.tokenSeal({ ...token, owner_id: 'owner-x' }) })],
+  ]) {
+    const run = spawnSync(process.execPath, [preflightCli, '--release', '--containment-ready-token-json', bad], { encoding: 'utf8', env });
+    assert.equal(run.status, 1, `${label}: ${run.stderr}`);
+    assert.equal(run.stdout, '', label);
+    assert.equal(existsSync(recordPath), true, `${label}: the record is untouched`);
+  }
+  const released = spawnSync(process.execPath, [preflightCli, '--release', '--containment-ready-token-json', JSON.stringify(token)], { encoding: 'utf8', env });
+  assert.equal(released.status, 0, released.stderr);
+  const parsed = JSON.parse(released.stdout.trim());
+  assert.deepEqual([parsed.released, parsed.owner_id], [true, token.owner_id]);
+  assert.equal(existsSync(recordPath), false);
+  const again = spawnSync(process.execPath, [preflightCli, '--release', '--containment-ready-token-json', JSON.stringify(token)], { encoding: 'utf8', env });
+  assert.equal(again.status, 3);
+  assert.equal(JSON.parse(again.stdout.trim()).released, false);
 });

@@ -29,6 +29,7 @@ import {
   GROK_INVALID_LIFECYCLE,
   __testing as supervisorTesting,
 } from '../hooks/scripts/lib/grok-process-supervisor.mjs';
+import { OWNER_ID_PATTERN } from '../hooks/scripts/lib/grok-owner-record.mjs';
 import {
   GROK_AUTHORIZED_MODEL,
   GROK_SUPPORTED_EFFORTS,
@@ -202,9 +203,12 @@ function plannedRoute(binary, overrides) {
 // result carries the owner-bound `termination_report` the serial gate needs.
 // ---------------------------------------------------------------------------
 
-const CONTAINMENT_OWNER = 'grok-bridge-test-owner';
+const CONTAINMENT_OWNER = 'grok-containment-owner-1-6-00000004';
 const CONTAINMENT_TOKEN = supervisorTesting.mintOwnerToken({
   platform: 'linux', arch: 'x64', ownerId: CONTAINMENT_OWNER, generation: 1, startedAt: 1_700_000_000_000,
+});
+test('the harness containment owner id matches the record grammar', () => {
+  assert.match(CONTAINMENT_OWNER, OWNER_ID_PATTERN);
 });
 
 function terminationReport(overrides = {}) {
@@ -864,7 +868,7 @@ test('missing or unsupported containment produces zero privacy, fingerprint, UUI
     ['no token at all', undefined, /missing_containment_ready_token/u],
     ['an explicitly absent token', null, /missing_containment_ready_token/u],
     ['a token that is not ready', { ...CONTAINMENT_TOKEN, containment_ready: false }, /containment_not_ready/u],
-    ['a forged owner binding', { ...CONTAINMENT_TOKEN, owner_id: 'someone-else' }, /foreign_containment_owner/u],
+    ['a forged owner binding', { ...CONTAINMENT_TOKEN, owner_id: 'grok-containment-owner-1-8-ffffffff' }, /foreign_containment_owner/u],
     ['an unsupported containment platform', { ...CONTAINMENT_TOKEN, platform: 'darwin', arch: 'arm64' }, /unsupported_grok_containment/u],
     ['a census mechanism that is not containment', { ...CONTAINMENT_TOKEN, mechanism: 'setsid-census' }, /unsupported_grok_containment/u],
   ];
