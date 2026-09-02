@@ -33,5 +33,9 @@ docs/
 # `git add -A` 한 번으로 세션 전사가 공개 저장소에 유출되지 않도록 전체를 제외합니다.
 .claude/
 
+# CI job-level native helper output (GROK_NATIVE_OUTPUT_ROOT). runner.temp is
+# not a legal context in job env, so the workflow uses github.workspace.
+.native-build/
+
 # 운영체제
 .DS_Store

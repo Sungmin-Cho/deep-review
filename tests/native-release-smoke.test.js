@@ -1837,7 +1837,7 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
   const workflow = readFileSync(path.join(sourceRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
   const nativeTests = workflowJob(workflow, 'tests');
   const testsHead = nativeTests.slice(0, nativeTests.indexOf('\n    steps:'));
-  assert.match(testsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ runner\.temp \}\}\/deep-review-native-build/u);
+  assert.match(testsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ github\.workspace \}\}\/\.native-build/u);
   const linuxCompile = workflowStep(nativeTests, 'Compile Linux containment helper');
   assert.match(linuxCompile, /if:\s*runner\.os == 'Linux'/u);
   assert.match(linuxCompile, /run:\s*npm run build:native/u);
@@ -1848,7 +1848,7 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
 
   const windowsShards = workflowJob(workflow, 'windows-test-shards');
   const windowsHead = windowsShards.slice(0, windowsShards.indexOf('\n    steps:'));
-  assert.match(windowsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*'\$\{\{ runner\.temp \}\}\\deep-review-native-build'/u);
+  assert.match(windowsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ github\.workspace \}\}\/\.native-build/u);
   const msvcSetup = workflowStep(windowsShards, 'Set up MSVC');
   assert.match(msvcSetup, /uses:\s*ilammy\/msvc-dev-cmd@v1/u);
   const windowsCompile = workflowStep(windowsShards, 'Compile Windows containment helper');

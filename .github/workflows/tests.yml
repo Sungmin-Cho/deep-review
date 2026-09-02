@@ -36,7 +36,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: native tests (${{ matrix.os }})
     env:
-      GROK_NATIVE_OUTPUT_ROOT: ${{ runner.temp }}/deep-review-native-build
+      GROK_NATIVE_OUTPUT_ROOT: ${{ github.workspace }}/.native-build
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,7 +76,7 @@ jobs:
     timeout-minutes: ${{ (matrix.shard == 'group-07' || matrix.shard == 'r5-c3-c4') && 60 || 30 }}
     name: Windows native shard (${{ matrix.shard }})
     env:
-      GROK_NATIVE_OUTPUT_ROOT: '${{ runner.temp }}\deep-review-native-build'
+      GROK_NATIVE_OUTPUT_ROOT: ${{ github.workspace }}/.native-build
     steps:
       - uses: actions/checkout@v4
         with:
