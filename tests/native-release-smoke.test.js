@@ -1848,7 +1848,7 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
 
   const windowsShards = workflowJob(workflow, 'windows-test-shards');
   const windowsHead = windowsShards.slice(0, windowsShards.indexOf('\n    steps:'));
-  assert.match(windowsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ runner\.temp \}\}\\deep-review-native-build/u);
+  assert.match(windowsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*'\$\{\{ runner\.temp \}\}\\deep-review-native-build'/u);
   const msvcSetup = workflowStep(windowsShards, 'Set up MSVC');
   assert.match(msvcSetup, /uses:\s*ilammy\/msvc-dev-cmd@v1/u);
   const windowsCompile = workflowStep(windowsShards, 'Compile Windows containment helper');
