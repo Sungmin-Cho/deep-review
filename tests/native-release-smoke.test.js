@@ -151,14 +151,11 @@ test('the recursive legacy job fetches the pinned replay history it executes', (
   assert.match(workflowStep(legacy, 'Run recursive legacy oracle'), /run:\s*npm run test:legacy/u);
 });
 
-function readChecksums(nativeRoot) {
-  const sums = new Map();
-  for (const line of readFileSync(path.join(nativeRoot, 'SHA256SUMS'), 'utf8').trim().split(/\r?\n/u)) {
-    const match = line.match(/^([a-f0-9]{64}) [ *](.+)$/u);
-    assert.ok(match, `malformed SHA256SUMS line: ${line}`);
-    sums.set(match[2], match[1]);
-  }
-  return sums;
+async function loadChecksumParser(root) {
+  const artifactModule = await import(pathToFileURL(
+    path.join(root, 'hooks', 'scripts', 'lib', 'grok-native-artifact.mjs'),
+  ).href);
+  return artifactModule.parseSha256Sums;
 }
 
 async function loadInstalledRuntime(installedRoot) {
@@ -1753,8 +1750,10 @@ test('T-SMOKE-3: Phase 6 remains gated by synthesized approval', async () => {
   assert.equal(git(repo, ['rev-parse', 'HEAD']), headBefore);
 });
 
-test('T-PACK-1: a no-compiler packed installation loads its architecture-correct helper and completes a contained stub launch', (t) => {
-  const packedRoot = process.env.DEEP_REVIEW_PACKED_ROOT;
+test('T-PACK-1: a no-compiler packed installation loads its architecture-correct helper and completes a contained stub launch', async (t) => {
+  const artifactModule = await import(pathToFileURL(path.join(sourceRoot, 'hooks', 'scripts', 'lib', 'grok-native-artifact.mjs')).href);
+  const packedRoot = process.env.DEEP_REVIEW_PACKED_ROOT
+    || (artifactModule.nativeTreeState(path.join(sourceRoot, nativeRelativeRoot)) === 'release' ? sourceRoot : undefined);
   if (!packedRoot) {
     t.skip('D21 intentionally withholds built helpers from the source tree; T-PACK-1 runs only against a release-generated packed tree');
     return;
@@ -1767,7 +1766,9 @@ test('T-PACK-1: a no-compiler packed installation loads its architecture-correct
   const helper = path.join(nativeRoot, ...artifact.split('/'));
   assert.equal(existsSync(helper), true, `packed helper missing: ${artifact}`);
 
-  const sums = readChecksums(nativeRoot);
+  const parsedSums = (await loadChecksumParser(packedRoot))(readFileSync(path.join(nativeRoot, 'SHA256SUMS'), 'utf8'));
+  assert.equal(parsedSums.ok, true);
+  const sums = parsedSums.entries;
   assert.deepEqual([...sums.keys()].sort(), Object.values(nativeArtifacts).sort());
   for (const [relativePath, expected] of sums) {
     const actual = createHash('sha256')

@@ -35,6 +35,22 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  GROK_CONTAINMENT_INVENTORY,
+  NATIVE_INVENTORY_PATHS,
+  NATIVE_PLACEHOLDER_DIGEST,
+  isNativeGrokLauncher,
+  nativeTreeState,
+  parseSha256Sums,
+} from './grok-native-artifact.mjs';
+export {
+  GROK_CONTAINMENT_INVENTORY,
+  NATIVE_INVENTORY_PATHS,
+  NATIVE_PLACEHOLDER_DIGEST,
+  isNativeGrokLauncher,
+  nativeTreeState,
+  parseSha256Sums,
+};
 
 export const GROK_CONTAINMENT_PROTOCOL_VERSION = '1.0';
 
@@ -52,39 +68,6 @@ export const GROK_TREE_POLL_MS = 10;
 export const GROK_TREE_HARD_DEADLINE_MS = 1000;
 
 const NATIVE_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), 'native');
-
-export const GROK_CONTAINMENT_INVENTORY = Object.freeze({
-  'linux/x64': Object.freeze({
-    mechanism: 'pid-namespace',
-    source: 'grok-linux-pidns-owner.c',
-    helper: 'linux-x64/grok-linux-pidns-owner',
-    clone_flags: Object.freeze(['CLONE_NEWPID', 'CLONE_NEWUSER']),
-    enumeration: 'namespace-member-set',
-    spawn_plan: Object.freeze([
-      'clone:CLONE_NEWPID',
-      'namespace-init',
-      'exec-grok-inside-namespace',
-    ]),
-  }),
-  'win32/x64': Object.freeze({
-    mechanism: 'job-object',
-    source: 'grok-win32-job-owner.c',
-    helper: 'win32-x64/grok-win32-job-owner.exe',
-    enumeration: 'JobObjectBasicProcessIdList',
-    applied_limits: Object.freeze(['JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE']),
-    denied_limits: Object.freeze([
-      'JOB_OBJECT_LIMIT_BREAKAWAY_OK',
-      'JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK',
-    ]),
-    spawn_plan: Object.freeze([
-      'CreateJobObjectW',
-      'SetInformationJobObject:JOBOBJECT_EXTENDED_LIMIT_INFORMATION',
-      'CreateProcessW:CREATE_SUSPENDED',
-      'AssignProcessToJobObject',
-      'ResumeThread',
-    ]),
-  }),
-});
 
 function containmentError(reason, detail) {
   const error = new Error(`ERROR_GROK_CONTAINMENT: ${reason}${detail ? ` — ${detail}` : ''}`);

@@ -12,7 +12,9 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -54,6 +56,12 @@ import { buildCapabilities } from '../hooks/scripts/lib/capability-registry.mjs'
 import { buildRoutingPlan } from '../hooks/scripts/lib/model-router.mjs';
 import { planReviewerAssignments } from '../hooks/scripts/lib/adaptive-review-routing.mjs';
 import { synthesizeReviewRound } from '../hooks/scripts/review-synthesis.mjs';
+import {
+  NATIVE_INVENTORY_PATHS,
+  NATIVE_PLACEHOLDER_DIGEST,
+  nativeTreeState,
+  parseSha256Sums,
+} from '../hooks/scripts/lib/grok-native-artifact.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const BASELINE_COMMIT = '1c3ef2d';
@@ -124,18 +132,102 @@ test('resolveGrokContainmentPlatform refuses every unsupported platform/arch pai
   }
 });
 
-test('the native source tree contains no built artifact, so D21 still fails closed on every platform', () => {
-  const nativeDirectory = join(pluginRoot, 'hooks', 'scripts', 'lib', 'native');
-  for (const [key, entry] of Object.entries(GROK_CONTAINMENT_INVENTORY)) {
-    const [platform, arch] = key.split('/');
-    const gate = resolveGrokContainmentPlatform({ platform, arch });
-    assert.equal(existsSync(gate.helper_path), false, `${entry.helper} must not be present`);
+function linkFile(target, path) {
+  try {
+    symlinkSync(target, path, process.platform === 'win32' ? 'file' : undefined);
+    return true;
+  } catch (error) {
+    if (error.code === 'EPERM') return false;
+    throw error;
   }
-  const nativeEntries = sourceEntriesBelow(nativeDirectory);
-  assert.equal(nativeEntries.includes('SHA256SUMS'), false,
-    'SHA256SUMS is release-automation output and must not exist in the source tree');
-  assert.deepEqual(nativeEntries.filter((relativePath) => !relativePath.endsWith('.c')), [],
-    'only reproducible C sources may exist under the native source tree');
+}
+function linkDirectory(target, path) {
+  symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
+}
+
+function nativeFixture(label, {
+  linux = true, win = true, sums = 'match', extra = null,
+  symlinkSums = false, symlinkHelper = false, mode = 0o755, hostPlaceholder = false,
+} = {}) {
+  const root = workspace(label);
+  const write = (rel, bytes) => {
+    const p = join(root, ...rel.split('/'));
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, bytes);
+    return p;
+  };
+  const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  if (linux) {
+    const p = write('linux-x64/grok-linux-pidns-owner', 'linux-bytes');
+    if (process.platform !== 'win32') chmodSync(p, mode);
+  }
+  if (win) write('win32-x64/grok-win32-job-owner.exe', 'win-bytes');
+  let skipped = false;
+  if (sums !== 'absent') {
+    const linuxDigest = hostPlaceholder ? NATIVE_PLACEHOLDER_DIGEST
+      : sums === 'wrong' ? 'f'.repeat(64)
+        : linux ? digest('linux-bytes') : NATIVE_PLACEHOLDER_DIGEST;
+    const lines = [
+      `${linuxDigest}  linux-x64/grok-linux-pidns-owner`,
+      `${win ? digest('win-bytes') : NATIVE_PLACEHOLDER_DIGEST}  win32-x64/grok-win32-job-owner.exe`,
+    ];
+    if (extra) lines.push(`${'a'.repeat(64)}  ${extra}`);
+    const text = sums === 'crlf' ? `${lines.join('\r\n')}\r\n`
+      : sums === 'truncated' ? lines[0].slice(0, 40)
+        : `${lines.join('\n')}\n`;
+    if (symlinkSums) {
+      writeFileSync(join(root, 'real-sums'), text);
+      skipped = !linkFile(join(root, 'real-sums'), join(root, 'SHA256SUMS'));
+    } else writeFileSync(join(root, 'SHA256SUMS'), text);
+  }
+  if (symlinkHelper) {
+    rmSync(join(root, 'linux-x64', 'grok-linux-pidns-owner'));
+    writeFileSync(join(root, 'elsewhere'), 'linux-bytes');
+    skipped = skipped || !linkFile(join(root, 'elsewhere'), join(root, 'linux-x64', 'grok-linux-pidns-owner'));
+  }
+  return { root, skipped };
+}
+
+test('T-PACK-3: the plugin native tree is source (or release under DEEP_REVIEW_PACKED_ROOT), and every partial fixture is invalid', (t) => {
+  const packedRoot = process.env.DEEP_REVIEW_PACKED_ROOT;
+  const pluginNative = join(packedRoot ?? pluginRoot, 'hooks', 'scripts', 'lib', 'native');
+  const state = nativeTreeState(pluginNative);
+  if (packedRoot) assert.equal(state, 'release', 'a packed/release tree must be complete');
+  else assert.equal(state, 'source', 'I-E1-1: the source tree carries no built artifact (a tag checkout is tested with DEEP_REVIEW_PACKED_ROOT set)');
+  assert.deepEqual([...NATIVE_INVENTORY_PATHS].sort(), ['linux-x64/grok-linux-pidns-owner', 'win32-x64/grok-win32-job-owner.exe']);
+  assert.equal(nativeTreeState(nativeFixture('t-pack-3-release').root), 'release');
+  assert.equal(nativeTreeState(nativeFixture('t-pack-3-crlf', { sums: 'crlf' }).root), 'release');
+  const invalid = [
+    ['missing sums', { sums: 'absent' }], ['wrong digest', { sums: 'wrong' }], ['truncated sums', { sums: 'truncated' }],
+    ['extra path', { extra: 'linux-x64/other' }], ['one helper with placeholder', { win: false }], ['placeholder for a present helper', { hostPlaceholder: true }],
+    ['symlinked sums', { symlinkSums: true }], ['symlinked helper', { symlinkHelper: true }],
+  ];
+  for (const [label, options] of invalid) {
+    const fixture = nativeFixture(`t-pack-3-${label.replaceAll(' ', '-')}`, options);
+    if (fixture.skipped) { t.diagnostic(`${label}: file symlinks need elevation on this host; skipped`); continue; }
+    assert.equal(nativeTreeState(fixture.root), 'invalid', label);
+  }
+  if (process.platform !== 'win32') {
+    for (const mode of [0o644, 0o777, 0o751, 0o711]) {
+      assert.equal(
+        nativeTreeState(nativeFixture(`t-pack-3-mode-${mode.toString(8)}`, { mode }).root),
+        'invalid',
+        `Linux helper must be exactly 0755, not ${mode.toString(8)}`,
+      );
+    }
+  }
+});
+
+test('parseSha256Sums accepts the inventory in either separator form and refuses everything else', () => {
+  const [linux, win] = ['linux-x64/grok-linux-pidns-owner', 'win32-x64/grok-win32-job-owner.exe'];
+  const ok = parseSha256Sums(`${'a'.repeat(64)}  ${linux}\r\n${'b'.repeat(64)} *${win}\r\n`);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.entries.get(linux), 'a'.repeat(64));
+  assert.equal(parseSha256Sums(`${'a'.repeat(64)}  ${linux}\n`).reason, 'not_inventory');
+  assert.equal(parseSha256Sums(`${'a'.repeat(64)}  ${linux}\n${'b'.repeat(64)}  ${win}\n${'c'.repeat(64)}  other\n`).reason, 'not_inventory');
+  assert.equal(parseSha256Sums(`${'A'.repeat(64)}  ${linux}\n${'b'.repeat(64)}  ${win}\n`).reason, 'malformed');
+  assert.equal(parseSha256Sums(`${'a'.repeat(64)}  ${linux}\n${'a'.repeat(64)}  ${linux}\n`).reason, 'malformed');
+  assert.equal(parseSha256Sums('').reason, 'malformed');
 });
 
 test('preflightGrokContainment on this host refuses before provider spawn and issues no containment_ready_token', () => {
