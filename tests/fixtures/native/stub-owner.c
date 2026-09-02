@@ -47,8 +47,14 @@ int main(int argc, char **argv) {
     }
     return usage();
   }
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
   const char *fault = env_or("STUB_FAULT", "");
+#ifdef _WIN32
+  const char *mechanism = env_or("STUB_MECHANISM", "job-object");
+#else
   const char *mechanism = env_or("STUB_MECHANISM", "pid-namespace");
+#endif
   const char *eol = strcmp(fault, "crlf") == 0 ? "\r\n" : "\n";
   if (strcmp(fault, "hang") == 0) { STUB_SLEEP(30000); return 0; }
   if (strcmp(fault, "no_ready") != 0) {

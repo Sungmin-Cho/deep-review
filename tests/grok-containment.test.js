@@ -19,6 +19,8 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  closeSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -578,6 +580,39 @@ async function launch(ctx, script, { timeoutMs = 20000, onSpawn } = {}) {
 
 const sleepAndMark = (marker, ms) => `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "x"), ${ms})`;
 
+// Host-visible descendants of a Linux PID-namespace owner. process.pid inside
+// the namespace is not a host pid, so T-LIFE-9 parent-leash must walk /proc
+// from the helper rather than trust the in-namespace ready record.
+function linuxDescendantPids(rootPid) {
+  const names = readdirSync('/proc').filter((name) => /^\d+$/u.test(name));
+  const childrenOf = new Map();
+  for (const name of names) {
+    const pid = Number(name);
+    try {
+      const match = readFileSync(`/proc/${pid}/status`, 'utf8').match(/^PPid:\s+(\d+)/mu);
+      if (!match) continue;
+      const ppid = Number(match[1]);
+      if (!childrenOf.has(ppid)) childrenOf.set(ppid, []);
+      childrenOf.get(ppid).push(pid);
+    } catch {
+      // exited between readdir and read
+    }
+  }
+  const out = [];
+  const stack = [rootPid];
+  const seen = new Set([rootPid]);
+  while (stack.length > 0) {
+    const pid = stack.pop();
+    for (const child of childrenOf.get(pid) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      out.push(child);
+      stack.push(child);
+    }
+  }
+  return out;
+}
+
 test('T-LIFE-9: a contained launch waits for (Linux) or kills (Windows) an escaped descendant and reports zero members', async (t) => {
   const ctx = lifeContext(t, 't-life-9-escape'); if (!ctx) return;
   const marker = join(ctx.tmpRoot, 'escapee.marker');
@@ -654,25 +689,49 @@ test('T-LIFE-9: killing the bridge process tears the whole tree down (parent lea
   const chain = prepareSpawnChain(process.execPath, [script], { cwd: ctx.tmpRoot, env }).prepared_spawn_chain;
   const spec = join(ctx.tmpRoot, 'bridge-spec.json');   // by file, never on argv (Windows 32767-char command line)
   writeFileSync(spec, JSON.stringify({ context: { platform: ctx.host.platform, arch: ctx.host.arch, nativeDirectory: ctx.root, pluginRoot: ctx.root, enabledPlatforms: [ctx.host.key], tmpRoot: ctx.tmpRoot }, script, cwd: ctx.tmpRoot, env, chain, token: ctx.token, pidFile }));
+  const errFile = join(ctx.tmpRoot, 'bridge.err');
+  const errFd = openSync(errFile, 'w');
   const bridge = spawn(process.execPath, ['--input-type=module', '-e', `
     import { readFileSync, writeFileSync } from 'node:fs';
     import { __testing } from ${JSON.stringify(pathToFileURL(join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs')).href)};
     const spec = JSON.parse(readFileSync(process.argv[1], 'utf8'));
     const runner = __testing.createContainedRunner(spec.context);
     await runner.run(process.execPath, [spec.script], { cwd: spec.cwd, env: spec.env, timeoutMs: 60000, expectedPreparedSpawnChain: spec.chain, containmentToken: spec.token, onSpawn: (info) => writeFileSync(spec.pidFile, String(info.pid)) });
-  `, spec], { stdio: 'ignore' });
+  `, spec], { stdio: ['ignore', 'ignore', errFd] });
+  closeSync(errFd);
   for (let i = 0; i < 200 && !(existsSync(pidFile) && existsSync(readyFile)); i += 1) await new Promise((r) => setTimeout(r, 100));
-  assert.equal(existsSync(pidFile), true, 'the bridge spawned the helper');
-  assert.equal(existsSync(readyFile), true, 'the provider and its grandchild were running before the crash');
+  assert.equal(existsSync(pidFile), true, `the bridge spawned the helper: ${readFileSync(errFile, 'utf8')}`);
+  assert.equal(existsSync(readyFile), true, `the provider and its grandchild were running before the crash: ${readFileSync(errFile, 'utf8')}`);
   const helperPid = Number(readFileSync(pidFile, 'utf8'));
   const tree = JSON.parse(readFileSync(readyFile, 'utf8'));
   const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-  assert.equal(alive(tree.provider) && alive(tree.grandchild) && alive(helperPid), true, 'all three processes are alive before the crash');
+  const isGone = (pid) => {
+    try { process.kill(pid, 0); } catch { return true; }
+    if (process.platform !== 'linux') return false;
+    try {
+      return /\) Z /u.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    } catch { return true; }
+  };
+  // Linux: in-namespace process.pid is not a host pid. Walk /proc from the
+  // helper until the host tree has helper + namespace init + provider + grandchild.
+  let treePids = [];
+  // Linux: helper + namespace init + provider + grandchild. Windows: helper + provider + grandchild.
+  const minTree = process.platform === 'linux' ? 4 : 3;
+  for (let i = 0; i < 30; i += 1) {
+    if (process.platform === 'linux') {
+      treePids = [helperPid, ...linuxDescendantPids(helperPid)];
+    } else {
+      treePids = [helperPid, tree.provider, tree.grandchild];
+    }
+    if (treePids.length >= minTree && treePids.every(alive)) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(treePids.length >= minTree, `host tree was too small before the crash (${treePids.join(',')}): ${readFileSync(errFile, 'utf8')}`);
+  assert.equal(treePids.every(alive), true, `host tree was not alive before the crash (${treePids.join(',')}): ${readFileSync(errFile, 'utf8')}`);
   bridge.kill('SIGKILL');
   await new Promise((r) => setTimeout(r, 3000));
-  for (const [label, pid] of [['helper', helperPid], ['provider', tree.provider], ['grandchild', tree.grandchild]]) {
-    if (process.platform === 'linux') assert.equal(existsSync(`/proc/${pid}`), false, `${label} is gone`);
-    else assert.equal(alive(pid), false, `${label} is gone`);
+  for (const pid of treePids) {
+    assert.equal(isGone(pid), true, `pid ${pid} is gone`);
   }
   await new Promise((r) => setTimeout(r, 5000));
   assert.equal(existsSync(marker), false, 'no descendant survived the bridge');
@@ -1502,7 +1561,9 @@ test('the stub helper compiles and speaks the two-line protocol in preflight and
   if (stub.skipReason) { t.skip(stub.skipReason); return; }
   const preflight = spawnSync(stub.helperPath, ['--own-grok-tree', '--parent-pid', String(process.pid)], { input: '', encoding: 'utf8', timeout: 5000 });
   assert.equal(preflight.status, 0, preflight.stderr);
-  assert.equal(parseOwnerControlLines(Buffer.from(preflight.stdout)).ok, true);
+  const preflightLines = parseOwnerControlLines(Buffer.from(preflight.stdout));
+  assert.equal(preflightLines.ok, true);
+  assert.equal(preflightLines.lines[0].mechanism, HOST_STUB_PLATFORM === 'win32' ? 'job-object' : 'pid-namespace');
   const launch = spawnSync(stub.helperPath, ['--own-grok-tree', '--parent-pid', String(process.pid), '--', 'provider', 'arg'], {
     input: '', encoding: 'utf8', timeout: 5000, env: { ...process.env, STUB_PROVIDER_OUTPUT: 'hello from provider', STUB_EXIT: '3' },
   });
@@ -1551,8 +1612,9 @@ test('T-OWN-1: the production spawner issues a token and a durable record with t
   assert.equal(spy.length, 1);
   assert.deepEqual(spy[0].args, ['--own-grok-tree', '--parent-pid', String(process.pid)]);
   assert.equal(Object.hasOwn(spy[0].env, 'GROK_SANDBOX'), false);
-  assert.equal(typeof spy[0].env.PATH, 'string');
-  assert.ok(spy[0].env.PATH.length > 0);
+  const pathVar = spy[0].env.PATH ?? spy[0].env.Path;
+  assert.equal(typeof pathVar, 'string');
+  assert.ok(pathVar.length > 0);
   const record = readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot });
   assert.equal(record.ok, true, JSON.stringify(record));
   assert.deepEqual(validateOwnerRecord(token, record.body), { ok: true });
