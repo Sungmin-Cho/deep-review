@@ -70,6 +70,10 @@ segment or through a symlink still leaves the plugin.
   persisted mutation ownership, and the Phase 6 snapshot/verify/commit gates.
 - `hooks/scripts/test/test-*.sh` are Unix parity oracles only, never a supported path.
 - Keep README and CHANGELOG pairs structurally bilingual and evergreen.
+- The shipped tree is the tagged release commit produced by
+  `{plugin_root}/.github/workflows/release.yml`; `main` never carries
+  `hooks/scripts/lib/native/{linux-x64,win32-x64,SHA256SUMS}`. The deep-suite
+  pin is the tag commit, not `main`.
 
 ## Verification
 

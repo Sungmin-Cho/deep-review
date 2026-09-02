@@ -46,3 +46,15 @@ and `macos-latest`.
 ## Reporting issues
 
 Open a GitHub issue. For security reports, see [`SECURITY.md`](SECURITY.md).
+
+## Releasing
+
+- Create the GitHub release environment named `release` with a required reviewer.
+- Dispatch `release.yml` (`workflow_dispatch`); the first run bootstraps CLI digest pins.
+- Run the Linux x64 real-turn gate on the candidate tree before approving the environment.
+- After approval, `publish` tags the release commit and creates the GitHub Release.
+- Pin deep-suite with `release-bump.js` to the tag commit, not `main`.
+- Run the post-pin smoke on a marketplace install of each enabled platform.
+- Close #66 and #65 by hand after the smoke succeeds.
+- Never delete a published tag. Roll back by re-pinning deep-suite to v2.9.0 and cutting a patch release (`v2.10.1`).
+- Reopen the issues if a gate fails after merge.

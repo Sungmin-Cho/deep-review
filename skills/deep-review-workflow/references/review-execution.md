@@ -323,6 +323,14 @@ owner on privacy decline, on error, and when no launch happened.
 the post-exit proof; never substitute one for the other. An unsupported
 containment platform fails the **entire review** through `operational_failure`
 with reason `unsupported_grok_containment`, not a four-voice degradation.
+The preflight writes one single-use, TTL-bounded owner record under the OS
+temp directory; the bridge consumes it at admission. Release it whenever no
+launch follows -- on privacy decline, on error, and when no launch happened --
+with:
+
+```text
+node {plugin_root}/hooks/scripts/grok-containment-preflight.mjs --release --containment-ready-token-json CONTAINMENT_READY_TOKEN_JSON
+```
 
 ## 4. Dispatch independent reviewers
 
@@ -455,9 +463,11 @@ node {plugin_root}/hooks/scripts/run-grok-reviewer.mjs --project-root PROJECT_RO
 
 `CONTAINMENT_READY_TOKEN_JSON` is the compact `JSON.stringify` of the token §3.3
 issued, passed as one argv value — the same inline shape
-`--execution-route-json` uses, so the admission is bound to this single
-invocation and leaves no on-disk artifact a later round could replay. The bridge
-consumes that token and never establishes readiness itself. It also consumes the
+`--execution-route-json` uses, so the token travels inline; the preflight's
+single-use owner record is consumed at admission, so a later round cannot replay
+it. A bridge admission refusal is one stdout JSON line with `stage: "bridge_admission"`
+and exit 3: fail the review closed and release the record with the Section 3.3
+command. The bridge consumes that token and never establishes readiness itself. It also consumes the
 sealed compatibility evidence carried on the route, acquiring a fresh endpoint
 from the §0 coordinator rather than re-probing. Never pass `--routing-plan`
 here: the route travels inline.

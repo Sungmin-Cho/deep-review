@@ -513,3 +513,35 @@ test('no shipped instruction file hardcodes an absolute home directory', () => {
   }
   assert.deepEqual(offenders, [], 'absolute home paths must not ship in instruction files');
 });
+
+test('T-DOC-1: reasons, enabled-platform rule, release channel and release procedure are documented in both languages', () => {
+  const english = read('README.md');
+  const korean = read('README.ko.md');
+  const integration = read('skills/deep-review-workflow/references/grok-integration.md');
+  const execution = read('skills/deep-review-workflow/references/review-execution.md');
+  const contributing = read('CONTRIBUTING.md');
+  const reasons = ['unsupported_grok_containment', 'missing_grok_containment_helper', 'grok_containment_helper_failed', 'unsupported_grok_cli_version', 'incompatible_grok_cli'];
+  for (const reason of reasons) {
+    assert.ok(integration.includes(`\`${reason}\``), `grok-integration.md documents ${reason}`);
+    assert.ok(english.includes(`\`${reason}\``), `README.md names ${reason}`);
+    assert.ok(korean.includes(`\`${reason}\``), `README.ko.md names ${reason}`);
+  }
+  assert.match(english, /tagged release commit/u);
+  assert.match(korean, /태그된 릴리스 커밋/u);
+  for (const source of [english, korean]) {
+    assert.match(source, /`1\.0\.4`[^\n]*`1\.0\.13`/u);
+    assert.match(source, /platform_verification_pending/u);
+    assert.match(source, /build:native/u);
+  }
+  assert.match(execution, /grok-containment-preflight\.mjs --release --containment-ready-token-json CONTAINMENT_READY_TOKEN_JSON/u);
+  assert.doesNotMatch(execution, /leaves no on-disk artifact/u);
+  assert.match(execution, /single-use/u);
+  assert.match(execution, /stage: "bridge_admission"|bridge_admission/u);
+  assert.match(integration, /GROK_ENABLED_PLATFORMS/u);
+  assert.match(integration, /apparmor_restrict_unprivileged_userns/u);
+  assert.match(read('SECURITY.md'), /SHA256SUMS/u);
+  assert.match(read('AGENTS.md'), /tagged release commit/u);
+  for (const rule of ['release environment', 'real-turn', 'release-bump.js', 'never delete', 'v2\\.10\\.1|patch release', 'close #66 and #65 by hand|closed by hand', 'reopen']) {
+    assert.match(contributing, new RegExp(rule, 'iu'), `CONTRIBUTING documents: ${rule}`);
+  }
+});
