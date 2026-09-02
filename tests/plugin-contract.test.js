@@ -170,7 +170,7 @@ test('both workflows cover every release-relevant path class', () => {
 });
 
 const PUBLISHED_RELEASE_BASELINE = '2.6.0';
-const PLANNED_RELEASE = '2.9.0';
+const PLANNED_RELEASE = '2.10.0';
 
 function semverParts(version) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(version);
@@ -272,13 +272,13 @@ test('planned release is strictly greater than the published 2.6.0 baseline, abs
   }
 });
 
-test('release version is exactly 2.9.0 on all three package surfaces', () => {
+test('release version is exactly 2.10.0 on all three package surfaces', () => {
   const versions = [
     JSON.parse(read('.claude-plugin/plugin.json')).version,
     JSON.parse(read('.codex-plugin/plugin.json')).version,
     JSON.parse(read('package.json')).version,
   ];
-  assert.deepEqual(versions, ['2.9.0', '2.9.0', '2.9.0']);
+  assert.deepEqual(versions, ['2.10.0', '2.10.0', '2.10.0']);
 });
 
 test('evergreen bilingual READMEs advertise both native hosts and portable runtime', () => {
@@ -512,4 +512,36 @@ test('no shipped instruction file hardcodes an absolute home directory', () => {
     if (/(?:^|\s)\/(?:Users|home)\/[A-Za-z0-9._-]+\//u.test(read(f))) offenders.push(f);
   }
   assert.deepEqual(offenders, [], 'absolute home paths must not ship in instruction files');
+});
+
+test('T-DOC-1: reasons, enabled-platform rule, release channel and release procedure are documented in both languages', () => {
+  const english = read('README.md');
+  const korean = read('README.ko.md');
+  const integration = read('skills/deep-review-workflow/references/grok-integration.md');
+  const execution = read('skills/deep-review-workflow/references/review-execution.md');
+  const contributing = read('CONTRIBUTING.md');
+  const reasons = ['unsupported_grok_containment', 'missing_grok_containment_helper', 'grok_containment_helper_failed', 'unsupported_grok_cli_version', 'incompatible_grok_cli'];
+  for (const reason of reasons) {
+    assert.ok(integration.includes(`\`${reason}\``), `grok-integration.md documents ${reason}`);
+    assert.ok(english.includes(`\`${reason}\``), `README.md names ${reason}`);
+    assert.ok(korean.includes(`\`${reason}\``), `README.ko.md names ${reason}`);
+  }
+  assert.match(english, /tagged release commit/u);
+  assert.match(korean, /태그된 릴리스 커밋/u);
+  for (const source of [english, korean]) {
+    assert.match(source, /`1\.0\.4`[^\n]*`1\.0\.13`/u);
+    assert.match(source, /platform_verification_pending/u);
+    assert.match(source, /build:native/u);
+  }
+  assert.match(execution, /grok-containment-preflight\.mjs --release --containment-ready-token-json CONTAINMENT_READY_TOKEN_JSON/u);
+  assert.doesNotMatch(execution, /leaves no on-disk artifact/u);
+  assert.match(execution, /single-use/u);
+  assert.match(execution, /stage: "bridge_admission"|bridge_admission/u);
+  assert.match(integration, /GROK_ENABLED_PLATFORMS/u);
+  assert.match(integration, /apparmor_restrict_unprivileged_userns/u);
+  assert.match(read('SECURITY.md'), /SHA256SUMS/u);
+  assert.match(read('AGENTS.md'), /tagged release commit/u);
+  for (const rule of ['release environment', 'real-turn', 'release-bump.js', 'never delete', 'v2\\.10\\.1|patch release', 'close #66 and #65 by hand|closed by hand', 'reopen']) {
+    assert.match(contributing, new RegExp(rule, 'iu'), `CONTRIBUTING documents: ${rule}`);
+  }
 });

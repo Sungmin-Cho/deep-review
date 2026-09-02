@@ -44,6 +44,15 @@ backstop for every possible mutation.
   Grok CLI v1.0.3 **not** to prevent a workspace write and is **not** a write barrier.
   Post-dispatch mutation detection is limited to the
   [bounded hybrid fingerprint surface in §2.15](#215-bounded-hybrid-fingerprint-surface).
+  Containment helpers are integrity-bound: the shipped `linux-x64` and
+  `win32-x64` helpers are verified against `SHA256SUMS` at the coordinator, the
+  preflight and launch admission, and must resolve inside the plugin root
+  through no symlink or junction; this is an installation-integrity control,
+  not a defence against a same-user process rewriting the plugin tree. The
+  helper contains the provider's process tree; it is not a sandbox for the
+  provider's file access, which stays governed by the permission mode and tool
+  surface. Compatibility probes (`--version`, `--help`) remain uncontained by
+  design (D20).
 - **Codex auto-exposure of gitignored files.** In a git repo with Codex installed,
   deep-review can temporarily expose gitignored files you have been editing so they can
   be reviewed. It always prompts before doing so, previews the exact `git` commands,

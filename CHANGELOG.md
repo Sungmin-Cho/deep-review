@@ -4,6 +4,61 @@
 
 All notable changes to deep-review are documented here. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0] — 2026-09-02
+
+### Added
+- A `workflow_dispatch` release workflow that builds both containment helpers,
+  smokes them on Linux and Windows, waits for a protected `release`
+  environment approval, and publishes a tagged release commit carrying the
+  helpers and `SHA256SUMS`; `main` stays binary-free
+  (Sungmin-Cho/deep-review#66).
+- A real runtime owner: the preflight launches the shipped helper, writes a
+  single-use owner record, and the bridge launches the provider through the
+  helper and grades the owner's `termination_report`.
+- A parent leash in both native helpers (`--parent-pid`): the provider tree
+  is torn down when the reviewing bridge process dies.
+- `grok_containment_helper_failed`, the fifth refusal reason, with a closed
+  `detail` vocabulary and a sanitised `helper_stderr`; bridge admission
+  refusals are typed stdout JSON (`stage: "bridge_admission"`, exit 3).
+- Grok CLI `1.0.13` in the allowlist, through version-scoped help-flag
+  profiles.
+- `grok-containment-preflight.mjs --release --containment-ready-token-json JSON`.
+
+### Changed
+- `SUPPORTED_GROK_CLI_VERSIONS` is `{1.0.4, 1.0.13}`; `grok_supported_versions`
+  lists both.
+- The coordinator, the preflight and launch admission verify the helper
+  against `SHA256SUMS`, refuse symlinked or junctioned components, and
+  require the release polarity of the native tree in production.
+- Non-native Grok launchers (`.cmd`/`.bat`, PowerShell shims, `#!` scripts)
+  are refused as `incompatible_grok_cli` before privacy.
+- The Grok bridge reads the merged provider channel from `stdout`.
+- `npm run build:native` is `scripts/build-native.mjs` and writes
+  `SHA256SUMS`; CI passes `GROK_NATIVE_OUTPUT_ROOT` at job level so the
+  real-helper lifecycle tests run.
+- T-PACK-1 runs against the plugin root when it is a release tree.
+
+### Fixed
+- `--grok` can select a reviewer on `linux/x64` from a marketplace install of
+  the tagged release (Sungmin-Cho/deep-review#66; addresses
+  Sungmin-Cho/deep-review#65).
+
+### Security
+- Helper integrity binding at every gate, stated as an installation-integrity
+  control with its threat model.
+- One token admits at most one launch; the owner record is consumed at
+  admission and expires after 30 minutes; the in-process registry never
+  substitutes for it.
+- Parent-leash teardown; finite capture limits with kill-on-overflow;
+  `win32/x64` stays refused (`platform_verification_pending`) until its
+  real-turn gate passes.
+
+### Notes
+- Coupled rollback units: release workflow <-> integrity binding <-> tree
+  polarity; preflight launch <-> owner record <-> adapter <-> leash;
+  allowlist <-> release channel. Reverting the allowlist alone is a
+  fail-closed no-op.
+
 ## [2.9.0] — 2026-09-01
 
 ### Added

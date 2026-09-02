@@ -133,7 +133,7 @@ async function detectGrokCompatibility(cwd, env, processRunner) {
     const versionOutput = probeStdout(versionResult);
     const helpOutput = probeStdout(helpResult);
     const parsedVersion = parseGrokCompatibilityStdout(versionOutput.text, 'version');
-    const parsedHelp = parseGrokCompatibilityStdout(helpOutput.text, 'help');
+    const parsedHelp = parseGrokCompatibilityStdout(helpOutput.text, 'help', { version: parsedVersion.version });
     const launcher = versionChain.launcher;
     const evidenceBody = {
       schema_version: '1.0',

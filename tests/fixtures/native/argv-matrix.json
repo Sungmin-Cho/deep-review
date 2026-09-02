@@ -1,0 +1,14 @@
+[
+  { "name": "missing own flag", "argv": ["--parent-pid", "1"], "withCommandMarker": true },
+  { "name": "wrong first flag", "argv": ["--own-tree"], "withCommandMarker": true },
+  { "name": "parent-pid without value", "argv": ["--own-grok-tree", "--parent-pid"], "withCommandMarker": false },
+  { "name": "parent-pid non-decimal", "argv": ["--own-grok-tree", "--parent-pid", "abc"], "withCommandMarker": true },
+  { "name": "parent-pid zero", "argv": ["--own-grok-tree", "--parent-pid", "0"], "withCommandMarker": true },
+  { "name": "parent-pid leading zero", "argv": ["--own-grok-tree", "--parent-pid", "01"], "withCommandMarker": true },
+  { "name": "parent-pid signed", "argv": ["--own-grok-tree", "--parent-pid", "+5"], "withCommandMarker": true },
+  { "name": "parent-pid overflow", "argv": ["--own-grok-tree", "--parent-pid", "99999999999999999999"], "withCommandMarker": true },
+  { "name": "parent-pid duplicate", "argv": ["--own-grok-tree", "--parent-pid", "1", "--parent-pid", "1"], "withCommandMarker": true },
+  { "name": "unknown option", "argv": ["--own-grok-tree", "--verbose"], "withCommandMarker": true },
+  { "name": "bare separator", "argv": ["--own-grok-tree", "--"], "withCommandMarker": false },
+  { "name": "bare separator after parent", "argv": ["--own-grok-tree", "--parent-pid", "1", "--"], "withCommandMarker": false }
+]

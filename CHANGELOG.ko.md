@@ -4,6 +4,57 @@
 
 deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)와 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)을 따릅니다.
 
+## [2.10.0] — 2026-09-02
+
+### 추가
+- 두 봉쇄 헬퍼를 빌드하고 Linux와 Windows에서 smoke하며, 보호된
+  `release` environment 승인을 기다린 뒤 헬퍼와 `SHA256SUMS`를 담은
+  태그된 릴리스 커밋을 게시하는 `workflow_dispatch` 릴리스 워크플로.
+  `main`은 바이너리 없이 유지된다 (Sungmin-Cho/deep-review#66).
+- 실제 런타임 owner: preflight가 출하된 헬퍼를 기동하고 일회용 owner
+  record를 쓰며, 브리지는 헬퍼를 통해 provider를 기동하고 owner의
+  `termination_report`를 채점한다.
+- 두 네이티브 헬퍼의 parent leash (`--parent-pid`): 리뷰 브리지
+  프로세스가 죽으면 provider 트리가 철거된다.
+- 다섯 번째 거부 사유 `grok_containment_helper_failed`와 닫힌 `detail`
+  어휘, 살균된 `helper_stderr`. 브리지 입학 거부는 typed stdout JSON
+  (`stage: "bridge_admission"`, exit 3).
+- 버전-범위 help-flag 프로파일을 통해 Grok CLI `1.0.13`을 allowlist에
+  추가.
+- `grok-containment-preflight.mjs --release --containment-ready-token-json JSON`.
+
+### 변경
+- `SUPPORTED_GROK_CLI_VERSIONS`는 `{1.0.4, 1.0.13}`이며
+  `grok_supported_versions`는 둘을 나열한다.
+- coordinator, preflight, launch admission이 헬퍼를 `SHA256SUMS`에 대해
+  검증하고, 심볼릭 링크·junction 구성 요소를 거부하며, 프로덕션에서
+  native tree의 release polarity를 요구한다.
+- 비네이티브 Grok 런처(`.cmd`/`.bat`, PowerShell shim, `#!` 스크립트)는
+  privacy 전에 `incompatible_grok_cli`로 거부된다.
+- Grok 브리지는 병합된 provider 채널을 `stdout`에서 읽는다.
+- `npm run build:native`는 `scripts/build-native.mjs`이며 `SHA256SUMS`를
+  쓴다. CI는 실제 헬퍼 수명주기 테스트가 돌아가도록 잡 수준에서
+  `GROK_NATIVE_OUTPUT_ROOT`를 전달한다.
+- T-PACK-1은 플러그인 루트가 릴리스 트리일 때 그 루트에 대해 실행된다.
+
+### 수정
+- `--grok`는 태그된 릴리스의 marketplace 설치에서 `linux/x64` 리뷰어를
+  선택할 수 있다 (Sungmin-Cho/deep-review#66; Sungmin-Cho/deep-review#65
+  대응).
+
+### 보안
+- 모든 게이트의 헬퍼 무결성 바인딩. 위협 모델과 함께
+  installation-integrity 제어로 명시한다.
+- 한 토큰은 최대 한 번의 launch만 허가한다. owner record는 admission에서
+  소비되고 30분 후 만료되며, 프로세스 내 registry는 이를 대체하지 않는다.
+- parent-leash 철거; overflow 시 kill하는 유한 capture 한도; `win32/x64`는
+  실측 턴 게이트를 통과할 때까지 (`platform_verification_pending`) 거부된다.
+
+### 참고
+- 결합 롤백 단위: 릴리스 워크플로 <-> 무결성 바인딩 <-> tree polarity;
+  preflight launch <-> owner record <-> adapter <-> leash; allowlist <->
+  릴리스 채널. allowlist만 되돌리면 fail-closed no-op이다.
+
 ## [2.9.0] — 2026-09-01
 
 ### 추가

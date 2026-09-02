@@ -22,6 +22,7 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 
 import {
+  assertContainmentReadyToken,
   preflightGrokContainment,
   releaseGrokContainment,
 } from './lib/grok-process-supervisor.mjs';
@@ -92,7 +93,28 @@ export async function withGrokContainment(launch, options = {}) {
   };
 }
 
+export function parseArguments(argv) {
+  if (argv.length === 0) return { mode: 'preflight' };
+  if (argv[0] !== '--release') throw new Error(`unknown argument: ${argv[0]}`);
+  if (argv[1] !== '--containment-ready-token-json' || typeof argv[2] !== 'string' || argv.length !== 3) {
+    throw new Error('--release requires --containment-ready-token-json JSON');
+  }
+  let token;
+  try { token = JSON.parse(argv[2]); } catch (error) { throw new Error(`invalid_containment_ready_token: ${error.message}`); }
+  try { assertContainmentReadyToken(token); } catch (error) { throw new Error(`invalid_containment_ready_token: ${error.message}`); }
+  return { mode: 'release', token };
+}
+
 async function main() {
+  let options;
+  try { options = parseArguments(process.argv.slice(2)); }
+  catch (error) { process.stderr.write(`grok-containment-preflight.mjs: ${error.message}\n`); process.exitCode = 1; return; }
+  if (options.mode === 'release') {
+    const released = releaseGrokContainment(options.token, { reason: 'released_by_cli' });
+    process.stdout.write(`${JSON.stringify({ released: released.released, reason: released.reason, owner_id: released.owner_id })}\n`);
+    if (!released.released) process.exitCode = 3;
+    return;
+  }
   const preflight = preflightGrokContainment();
   process.stdout.write(`${JSON.stringify(preflight)}\n`);
   if (!preflight.ok) process.exitCode = 3;

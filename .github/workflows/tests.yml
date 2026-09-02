@@ -35,6 +35,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     name: native tests (${{ matrix.os }})
+    env:
+      GROK_NATIVE_OUTPUT_ROOT: ${{ github.workspace }}/.native-build
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,8 +49,6 @@ jobs:
 
       - name: Compile Linux containment helper
         if: runner.os == 'Linux'
-        env:
-          GROK_NATIVE_OUTPUT_ROOT: ${{ runner.temp }}/deep-review-native-build
         run: npm run build:native
 
       - name: Run native tests
@@ -75,6 +75,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: ${{ (matrix.shard == 'group-07' || matrix.shard == 'r5-c3-c4') && 60 || 30 }}
     name: Windows native shard (${{ matrix.shard }})
+    env:
+      GROK_NATIVE_OUTPUT_ROOT: ${{ github.workspace }}/.native-build
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,8 +91,6 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Compile Windows containment helper
-        env:
-          GROK_NATIVE_OUTPUT_ROOT: ${{ runner.temp }}\deep-review-native-build
         run: npm run build:native
 
       - name: Run native test shard
@@ -131,6 +131,7 @@ jobs:
       - name: Integrity-bind native helpers
         working-directory: hooks/scripts/lib/native
         run: |
+          rm -f build-receipt.linux-x64.json build-receipt.win32-x64.json
           sha256sum linux-x64/grok-linux-pidns-owner win32-x64/grok-win32-job-owner.exe > SHA256SUMS
           sha256sum --check SHA256SUMS
 
@@ -150,6 +151,11 @@ jobs:
           test -f win32-x64/grok-win32-job-owner.exe
           test -f SHA256SUMS
           sha256sum --check SHA256SUMS
+
+      - name: Run packed-tree T-PACK-3 on Linux x86_64
+        env:
+          DEEP_REVIEW_PACKED_ROOT: ${{ runner.temp }}/packed-tree/package
+        run: node --test --test-name-pattern='T-PACK-3' "$DEEP_REVIEW_PACKED_ROOT/tests/grok-containment.test.js"
 
       - name: Run packed-tree T-PACK-1 on Linux x86_64
         env:
@@ -186,6 +192,11 @@ jobs:
           if ($null -eq $archive) { throw "release bundle missing" }
           New-Item -ItemType Directory -Force "${{ runner.temp }}\packed-tree" | Out-Null
           tar -xzf $archive.FullName -C "${{ runner.temp }}\packed-tree"
+
+      - name: Run packed-tree T-PACK-3 on native Windows x86_64
+        env:
+          DEEP_REVIEW_PACKED_ROOT: ${{ runner.temp }}\packed-tree\package
+        run: node --test --test-name-pattern='T-PACK-3' "$env:DEEP_REVIEW_PACKED_ROOT\tests\grok-containment.test.js"
 
       - name: Run packed-tree T-PACK-1 on native Windows x86_64
         env:

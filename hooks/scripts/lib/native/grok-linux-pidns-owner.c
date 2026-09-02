@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -236,11 +237,65 @@ static int wait_for_init(pid_t init_pid) {
   return exit_code_from_status(status);
 }
 
+struct owner_arguments {
+  pid_t parent_pid;      /* 0 when --parent-pid was not given */
+  int command_argc;
+  char **command_argv;   /* NULL in preflight mode */
+};
+
+/* Grammar: --own-grok-tree [--parent-pid <pid>] [-- command [args...]].
+ * Preflight mode is the absence of a "--" command operand. Every violation
+ * is usage (64): missing value, non-decimal, zero, leading zero, sign,
+ * overflow, duplicate flag, unknown option, a bare "--" with no command. */
+static int parse_parent_pid(const char *text, pid_t *out) {
+  if (text == NULL || *text == '\0' || *text == '0' /* leading zero or zero */ || *text == '+' || *text == '-') return -1;
+  for (const char *p = text; *p != '\0'; p += 1) if (*p < '0' || *p > '9') return -1;
+  errno = 0;
+  char *end = NULL;
+  const long value = strtol(text, &end, 10);
+  if (errno == ERANGE || end == NULL || *end != '\0' || value <= 0 || value > INT32_MAX) return -1;
+  *out = (pid_t)value;
+  return 0;
+}
+
+static int parse_owner_arguments(int argc, char **argv, struct owner_arguments *out) {
+  memset(out, 0, sizeof(*out));
+  if (argc < 2 || strcmp(argv[1], "--own-grok-tree") != 0) return -1;
+  int have_parent = 0;
+  for (int index = 2; index < argc; index += 1) {
+    if (strcmp(argv[index], "--") == 0) {
+      if (index + 1 >= argc) return -1;             /* bare separator */
+      out->command_argc = argc - index - 1;
+      out->command_argv = &argv[index + 1];
+      return 0;
+    }
+    if (strcmp(argv[index], "--parent-pid") == 0) {
+      if (have_parent) return -1;                   /* duplicate flag */
+      if (index + 1 >= argc || parse_parent_pid(argv[index + 1], &out->parent_pid) < 0) return -1;
+      have_parent = 1;
+      index += 1;
+      continue;
+    }
+    return -1;                                      /* unknown option before "--" */
+  }
+  return 0;                                         /* preflight: no command operand */
+}
+
 int main(int argc, char **argv) {
-  if (argc < 2 || strcmp(argv[1], "--own-grok-tree") != 0
-      || (argc > 2 && strcmp(argv[2], "--") != 0)) {
-    fputs("usage: grok-linux-pidns-owner --own-grok-tree [-- command [args...]]\n", stderr);
+  struct owner_arguments arguments;
+  if (parse_owner_arguments(argc, argv, &arguments) < 0) {
+    fputs("usage: grok-linux-pidns-owner --own-grok-tree [--parent-pid <pid>] [-- command [args...]]\n", stderr);
     return 64;
+  }
+  if (arguments.parent_pid > 0) {
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0) {
+      perror("grok-linux-pidns-owner: PR_SET_PDEATHSIG (leash)");
+      return 125;
+    }
+    if (getppid() != arguments.parent_pid) {
+      fputs("grok-linux-pidns-owner: leash parent is already gone\n", stderr);
+      return 125;
+    }
   }
 
   int gate[2];
@@ -271,8 +326,8 @@ int main(int argc, char **argv) {
     .gate_write_fd = gate[1],
     .armed_fd = armed[1],
     .armed_read_fd = armed[0],
-    .command_argc = argc > 3 ? argc - 3 : 0,
-    .command_argv = argc > 3 ? &argv[3] : NULL,
+    .command_argc = arguments.command_argc,
+    .command_argv = arguments.command_argv,
   };
   int clone_flags = CLONE_NEWPID | SIGCHLD;
   const int unprivileged = geteuid() != 0;

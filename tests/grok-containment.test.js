@@ -11,41 +11,61 @@
 // itself marked an explicit platform skip — a simulated branch is not proof.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  closeSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import {
+  GROK_CONTAINMENT_HELPER_FAILED,
   GROK_CONTAINMENT_INVENTORY,
   GROK_CONTAINMENT_PROTOCOL_VERSION,
+  GROK_CONTAINMENT_TOKEN_TTL_MS,
+  GROK_ENABLED_PLATFORMS,
   GROK_INVALID_LIFECYCLE,
   GROK_LIFECYCLE_UNCONFIRMED,
+  GROK_OWNER_START_DEADLINE_MS,
   GROK_TREE_HARD_DEADLINE_MS,
   GROK_TREE_POLL_MS,
   UNSUPPORTED_GROK_CONTAINMENT,
   assertContainmentReadyToken,
   evaluateContainedLaunchAdmission,
   evaluateTerminationReport,
+  isGrokContainmentOwnerLive,
   isGrokContainmentPlatformSupported,
+  isGrokPlatformEnabled,
   preflightGrokContainment,
   releaseGrokContainment,
   resolveGrokContainmentPlatform,
   runGrokContainedProcess,
   runGrokContainedProcessSync,
+  scrubGrokEnvironment,
   __testing as supervisorTesting,
 } from '../hooks/scripts/lib/grok-process-supervisor.mjs';
+import {
+  OWNER_ID_PATTERN,
+  readOwnerRecord,
+  recordDirectory,
+  validateOwnerRecord,
+} from '../hooks/scripts/lib/grok-owner-record.mjs';
 import {
   classifyContainmentRelease,
   withGrokContainment,
@@ -54,13 +74,44 @@ import { buildCapabilities } from '../hooks/scripts/lib/capability-registry.mjs'
 import { buildRoutingPlan } from '../hooks/scripts/lib/model-router.mjs';
 import { planReviewerAssignments } from '../hooks/scripts/lib/adaptive-review-routing.mjs';
 import { synthesizeReviewRound } from '../hooks/scripts/review-synthesis.mjs';
+import {
+  NATIVE_INVENTORY_PATHS,
+  NATIVE_PLACEHOLDER_DIGEST,
+  evaluateHelperArtifact,
+  nativeTreeState,
+  parseSha256Sums,
+} from '../hooks/scripts/lib/grok-native-artifact.mjs';
+import {
+  createGrokCarrierCoordinator,
+  evaluateCoordinatorContainment,
+} from '../hooks/scripts/lib/grok-carrier-coordinator.mjs';
+import { parseOwnerControlLines } from '../hooks/scripts/lib/grok-owner-control.mjs';
+import {
+  comparePreparedSpawnChains,
+  closedPreparedChainResult,
+  signalPosixProcessGroup,
+  isPosixProcessGroupGone,
+  POSIX_TERMINATION_GRACE_MS,
+  prepareSpawnChain,
+} from '../hooks/scripts/lib/process.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const BASELINE_COMMIT = '1c3ef2d';
 const HOST_CONTAINMENT_GATE = resolveGrokContainmentPlatform();
 const SUPPORTED_HERE = HOST_CONTAINMENT_GATE.supported;
 const PLATFORM_SKIP = `${HOST_CONTAINMENT_GATE.key} is not a Grok containment platform`;
-const HELPER_SKIP = 'the inventoried native containment helpers are not present in this tree';
+const LINUX = { platform: 'linux', arch: 'x64' };
+const ALL_INVENTORIED = ['linux/x64', 'win32/x64'];
+function gateFor(nativeDirectory, { platform = 'linux', arch = 'x64', enabledPlatforms = ALL_INVENTORIED } = {}) {
+  return resolveGrokContainmentPlatform({ platform, arch, nativeDirectory, enabledPlatforms });
+}
+const ARTIFACT_OK = () => ({ present: true, executable: true, integrity: 'ok', helper_sha256: 'a'.repeat(64), real_path: '/fixture/helper', detail: null });
+const require = createRequire(import.meta.url);
+const { stubNativeRoot, ARGV_MATRIX, HOST_STUB_PLATFORM, HOST_STUB_ARCH, INVENTORY } = require('./helpers/native-stub.cjs');
+const HOST_STUB_KEY = `${HOST_STUB_PLATFORM}/${HOST_STUB_ARCH}`;
+
+const READY = '{"protocol_version":"1.0","handshake":"containment_ready","containment_ready":true,"mechanism":"pid-namespace"}';
+const REPORT = '{"protocol_version":"1.0","handshake":"termination_report","live_members":0,"member_pids":[]}';
 
 function workspace(label) {
   return mkdtempSync(join(tmpdir(), `deep-review-${label}-`));
@@ -108,34 +159,134 @@ test('resolveGrokContainmentPlatform refuses every unsupported platform/arch pai
   for (const [platform, arch] of unsupported) {
     const gate = resolveGrokContainmentPlatform({ platform, arch });
     assert.equal(gate.supported, false, `${platform}/${arch} must not be a containment platform`);
+    assert.equal(gate.inventoried, false, `${platform}/${arch} is not inventoried`);
     assert.equal(gate.reason, UNSUPPORTED_GROK_CONTAINMENT, `${platform}/${arch}`);
+    assert.equal(gate.detail, null, `${platform}/${arch}`);
     assert.equal(gate.mechanism, null);
     assert.equal(gate.helper_path, null);
   }
-  for (const [platform, arch, mechanism] of [
-    ['linux', 'x64', 'pid-namespace'],
-    ['win32', 'x64', 'job-object'],
-  ]) {
-    const gate = resolveGrokContainmentPlatform({ platform, arch });
-    assert.equal(gate.supported, true, `${platform}/${arch} is a declared containment platform`);
-    assert.equal(gate.reason, null);
-    assert.equal(gate.mechanism, mechanism);
-    assert.equal(typeof gate.helper_path, 'string');
-  }
+  const linux = resolveGrokContainmentPlatform({ platform: 'linux', arch: 'x64' });
+  assert.equal(linux.supported, true, 'linux/x64 is enabled');
+  assert.equal(linux.inventoried, true);
+  assert.equal(linux.reason, null);
+  assert.equal(linux.detail, null);
+  assert.equal(linux.mechanism, 'pid-namespace');
+  assert.equal(typeof linux.helper_path, 'string');
+  const winPending = resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64' });
+  assert.equal(winPending.supported, false, 'win32/x64 is inventoried but not enabled');
+  assert.equal(winPending.inventoried, true);
+  assert.equal(winPending.reason, UNSUPPORTED_GROK_CONTAINMENT);
+  assert.equal(winPending.detail, 'platform_verification_pending');
+  assert.equal(winPending.mechanism, 'job-object');
+  const winEnabled = resolveGrokContainmentPlatform({
+    platform: 'win32', arch: 'x64', enabledPlatforms: ALL_INVENTORIED,
+  });
+  assert.equal(winEnabled.supported, true, 'win32/x64 is supported only when enabledPlatforms admits it');
+  assert.equal(winEnabled.inventoried, true);
+  assert.equal(winEnabled.reason, null);
+  assert.equal(winEnabled.detail, null);
+  assert.equal(winEnabled.mechanism, 'job-object');
 });
 
-test('the native source tree contains no built artifact, so D21 still fails closed on every platform', () => {
-  const nativeDirectory = join(pluginRoot, 'hooks', 'scripts', 'lib', 'native');
-  for (const [key, entry] of Object.entries(GROK_CONTAINMENT_INVENTORY)) {
-    const [platform, arch] = key.split('/');
-    const gate = resolveGrokContainmentPlatform({ platform, arch });
-    assert.equal(existsSync(gate.helper_path), false, `${entry.helper} must not be present`);
+function linkFile(target, path) {
+  try {
+    symlinkSync(target, path, process.platform === 'win32' ? 'file' : undefined);
+    return true;
+  } catch (error) {
+    if (error.code === 'EPERM') return false;
+    throw error;
   }
-  const nativeEntries = sourceEntriesBelow(nativeDirectory);
-  assert.equal(nativeEntries.includes('SHA256SUMS'), false,
-    'SHA256SUMS is release-automation output and must not exist in the source tree');
-  assert.deepEqual(nativeEntries.filter((relativePath) => !relativePath.endsWith('.c')), [],
-    'only reproducible C sources may exist under the native source tree');
+}
+function linkDirectory(target, path) {
+  symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
+}
+
+function nativeFixture(label, {
+  linux = true, win = true, sums = 'match', extra = null,
+  symlinkSums = false, symlinkHelper = false, mode = 0o755, hostPlaceholder = false,
+} = {}) {
+  const root = workspace(label);
+  const write = (rel, bytes) => {
+    const p = join(root, ...rel.split('/'));
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, bytes);
+    return p;
+  };
+  const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  if (linux) {
+    const p = write('linux-x64/grok-linux-pidns-owner', 'linux-bytes');
+    if (process.platform !== 'win32') chmodSync(p, mode);
+  }
+  if (win) write('win32-x64/grok-win32-job-owner.exe', 'win-bytes');
+  let skipped = false;
+  if (sums !== 'absent') {
+    const linuxDigest = hostPlaceholder ? NATIVE_PLACEHOLDER_DIGEST
+      : sums === 'wrong' ? 'f'.repeat(64)
+        : linux ? digest('linux-bytes') : NATIVE_PLACEHOLDER_DIGEST;
+    const lines = [
+      `${linuxDigest}  linux-x64/grok-linux-pidns-owner`,
+      `${win ? digest('win-bytes') : NATIVE_PLACEHOLDER_DIGEST}  win32-x64/grok-win32-job-owner.exe`,
+    ];
+    if (extra) lines.push(`${'a'.repeat(64)}  ${extra}`);
+    const text = sums === 'crlf' ? `${lines.join('\r\n')}\r\n`
+      : sums === 'truncated' ? lines[0].slice(0, 40)
+        : `${lines.join('\n')}\n`;
+    if (symlinkSums) {
+      writeFileSync(join(root, 'real-sums'), text);
+      skipped = !linkFile(join(root, 'real-sums'), join(root, 'SHA256SUMS'));
+    } else writeFileSync(join(root, 'SHA256SUMS'), text);
+  }
+  if (symlinkHelper) {
+    rmSync(join(root, 'linux-x64', 'grok-linux-pidns-owner'));
+    writeFileSync(join(root, 'elsewhere'), 'linux-bytes');
+    skipped = skipped || !linkFile(join(root, 'elsewhere'), join(root, 'linux-x64', 'grok-linux-pidns-owner'));
+  }
+  return { root, skipped };
+}
+
+test('T-PACK-3: the plugin native tree is source (or release under DEEP_REVIEW_PACKED_ROOT), and every partial fixture is invalid', (t) => {
+  const packedRoot = process.env.DEEP_REVIEW_PACKED_ROOT;
+  const pluginNative = join(packedRoot ?? pluginRoot, 'hooks', 'scripts', 'lib', 'native');
+  const state = nativeTreeState(pluginNative);
+  if (packedRoot) assert.equal(state, 'release', 'a packed/release tree must be complete');
+  else assert.equal(state, 'source', 'I-E1-1: the source tree carries no built artifact (a tag checkout is tested with DEEP_REVIEW_PACKED_ROOT set)');
+  assert.deepEqual([...NATIVE_INVENTORY_PATHS].sort(), ['linux-x64/grok-linux-pidns-owner', 'win32-x64/grok-win32-job-owner.exe']);
+  assert.equal(nativeTreeState(nativeFixture('t-pack-3-release').root), 'release');
+  assert.equal(nativeTreeState(nativeFixture('t-pack-3-crlf', { sums: 'crlf' }).root), 'release');
+  const invalid = [
+    ['missing sums', { sums: 'absent' }], ['wrong digest', { sums: 'wrong' }], ['truncated sums', { sums: 'truncated' }],
+    ['extra path', { extra: 'linux-x64/other' }], ['one helper with placeholder', { win: false }], ['placeholder for a present helper', { hostPlaceholder: true }],
+    ['symlinked sums', { symlinkSums: true }], ['symlinked helper', { symlinkHelper: true }],
+  ];
+  for (const [label, options] of invalid) {
+    const fixture = nativeFixture(`t-pack-3-${label.replaceAll(' ', '-')}`, options);
+    if (fixture.skipped) { t.diagnostic(`${label}: file symlinks need elevation on this host; skipped`); continue; }
+    assert.equal(nativeTreeState(fixture.root), 'invalid', label);
+  }
+  if (process.platform !== 'win32') {
+    for (const mode of [0o644, 0o777, 0o751, 0o711]) {
+      assert.equal(
+        nativeTreeState(nativeFixture(`t-pack-3-mode-${mode.toString(8)}`, { mode }).root),
+        'invalid',
+        `Linux helper must be exactly 0755, not ${mode.toString(8)}`,
+      );
+    }
+  }
+  const buildNativeSource = readFileSync(join(pluginRoot, 'scripts', 'build-native.mjs'), 'utf8');
+  assert.match(buildNativeSource, /export const NATIVE_PLACEHOLDER_DIGEST = '0'\.repeat\(64\)/u);
+  assert.equal(NATIVE_PLACEHOLDER_DIGEST, '0'.repeat(64));
+});
+
+test('parseSha256Sums accepts the inventory in either separator form and refuses everything else', () => {
+  const [linux, win] = ['linux-x64/grok-linux-pidns-owner', 'win32-x64/grok-win32-job-owner.exe'];
+  const ok = parseSha256Sums(`${'a'.repeat(64)}  ${linux}\r\n${'b'.repeat(64)} *${win}\r\n`);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.entries.get(linux), 'a'.repeat(64));
+  assert.equal(parseSha256Sums(`${'a'.repeat(64)}  ${linux}\n`).reason, 'not_inventory');
+  assert.equal(parseSha256Sums(`${'a'.repeat(64)}  ${linux}\n${'b'.repeat(64)}  ${win}\n${'c'.repeat(64)}  other\n`).reason, 'not_inventory');
+  assert.equal(parseSha256Sums(`${'A'.repeat(64)}  ${linux}\n${'b'.repeat(64)}  ${win}\n`).reason, 'malformed');
+  assert.equal(parseSha256Sums(`${'a'.repeat(64)}  ${linux}\n${'a'.repeat(64)}  ${linux}\n`).reason, 'malformed');
+  assert.equal(parseSha256Sums('').reason, 'malformed');
 });
 
 test('preflightGrokContainment on this host refuses before provider spawn and issues no containment_ready_token', () => {
@@ -159,7 +310,7 @@ test('an unsupported platform and a supported platform with no loadable artifact
   assert.equal(macos.mechanism, null);
 
   for (const [platform, arch] of [['linux', 'x64'], ['win32', 'x64']]) {
-    const supported = preflightGrokContainment({ platform, arch });
+    const supported = preflightGrokContainment({ platform, arch, enabledPlatforms: ALL_INVENTORIED });
     assert.equal(supported.ok, false, 'the inventoried helper is not in this tree');
     assert.equal(supported.reason, 'missing_grok_containment_helper');
     assert.equal(supported.containment_ready_token, null);
@@ -178,7 +329,7 @@ test('an unsupported-platform preflight observes zero executable lookup and zero
     // executable lookup touches none of them.
     executableResolver: (name) => { events.push(`lookup ${name}`); return null; },
     helperSpawner: (...args) => { events.push(`child ${JSON.stringify(args)}`); return null; },
-    ownerIdGenerator: () => { events.push('owner'); return 'owner-x'; },
+    ownerIdGenerator: () => { events.push('owner'); return 'grok-containment-owner-1-1-0000000a'; },
   });
   assert.equal(preflight.ok, false);
   assert.deepEqual(events, []);
@@ -191,6 +342,10 @@ test('releaseGrokContainment on a refused preflight releases nothing and never c
   assert.equal(released.containment_ready, false);
 });
 
+const TOKEN_OWNER_ID = 'grok-containment-owner-1-3-00000001';
+const LIFE_OWNER_ID = 'grok-containment-owner-1-4-00000002';
+const RELEASE_OWNER_ID = 'grok-containment-owner-1-5-00000003';
+
 // ---------------------------------------------------------------------------
 // D21 — the bounded owner-handshake constants and the token contract.
 // ---------------------------------------------------------------------------
@@ -202,9 +357,10 @@ test('the owner handshake uses the D20 bounded polling constants', () => {
 
 test('assertContainmentReadyToken refuses a missing, unready, foreign-sealed or malformed token', () => {
   const valid = supervisorTesting.mintOwnerToken({
-    platform: 'linux', arch: 'x64', ownerId: 'owner-1', generation: 1, startedAt: 1000,
+    platform: 'linux', arch: 'x64', ownerId: TOKEN_OWNER_ID, generation: 1, startedAt: 1000,
   });
-  assert.equal(assertContainmentReadyToken(valid).owner_id, 'owner-1');
+  assert.equal(assertContainmentReadyToken(valid).owner_id, TOKEN_OWNER_ID);
+  assert.match(valid.owner_id, OWNER_ID_PATTERN);
   assert.equal(valid.protocol_version, GROK_CONTAINMENT_PROTOCOL_VERSION);
 
   const refusals = [
@@ -213,11 +369,12 @@ test('assertContainmentReadyToken refuses a missing, unready, foreign-sealed or 
     ['token', 'string'],
     [{ ...valid, protocol_version: '9.9' }, 'wrong protocol'],
     [{ ...valid, containment_ready: false }, 'not ready'],
-    [{ ...valid, owner_id: 'someone-else' }, 'foreign owner breaks the seal'],
+    [{ ...valid, owner_id: 'grok-containment-owner-1-8-ffffffff' }, 'foreign owner breaks the seal'],
     [{ ...valid, mechanism: 'setsid-census' }, 'census is not containment'],
     [{ ...valid, token_sha256: 'f'.repeat(64) }, 'forged seal'],
     [{ ...valid, generation: 0 }, 'non-positive generation'],
     [{ ...valid, helper_path: '' }, 'no helper'],
+    [{ ...valid, owner_id: 'owner-x', token_sha256: supervisorTesting.tokenSeal({ ...valid, owner_id: 'owner-x' }) }, 'bad owner grammar'],
   ];
   for (const [token, label] of refusals) {
     assert.throws(
@@ -234,15 +391,16 @@ test('assertContainmentReadyToken refuses a missing, unready, foreign-sealed or 
 
 function liveToken(overrides = {}) {
   return supervisorTesting.mintOwnerToken({
-    platform: 'linux', arch: 'x64', ownerId: 'owner-life', generation: 2, startedAt: 5000, ...overrides,
+    platform: 'linux', arch: 'x64', ownerId: LIFE_OWNER_ID, generation: 2, startedAt: 5000, ...overrides,
   });
 }
 
 test('termination_confirmed is true only for an owner-bound report of zero live members', () => {
   const token = liveToken();
+  assert.match(token.owner_id, OWNER_ID_PATTERN);
   const confirmed = evaluateTerminationReport({
     token,
-    report: { owner_id: 'owner-life', generation: 2, live_members: 0, member_pids: [], observed_at: 5100 },
+    report: { owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0, member_pids: [], observed_at: 5100 },
   });
   assert.equal(confirmed.termination_confirmed, true);
   assert.equal(confirmed.process_tree_termination.state, 'confirmed');
@@ -258,13 +416,13 @@ test('every missing, foreign, nonzero, contradictory or lost-handshake report is
     [undefined, 'missing_termination_report'],
     [null, 'missing_termination_report'],
     ['report', 'malformed_termination_report'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 0 }, 'malformed_termination_report'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0 }, 'malformed_termination_report'],
     [{ owner_id: 'foreign', generation: 2, live_members: 0, member_pids: [], observed_at: 1 }, 'foreign_owner'],
-    [{ owner_id: 'owner-life', generation: 9, live_members: 0, member_pids: [], observed_at: 1 }, 'foreign_owner'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 3, member_pids: [11, 12, 13], observed_at: 1 }, 'live_members_remain'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 0, member_pids: [7], observed_at: 1 }, 'member_pids_contradict_live_members'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 0, member_pids: [], observed_at: 1, handshake: 'lost' }, 'handshake_lost'],
-    [{ owner_id: 'owner-life', generation: 2, live_members: 0, member_pids: [], observed_at: 1, deadline_exceeded: true }, 'hard_deadline_exceeded'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 9, live_members: 0, member_pids: [], observed_at: 1 }, 'foreign_owner'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 3, member_pids: [11, 12, 13], observed_at: 1 }, 'live_members_remain'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0, member_pids: [7], observed_at: 1 }, 'member_pids_contradict_live_members'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0, member_pids: [], observed_at: 1, handshake: 'lost' }, 'handshake_lost'],
+    [{ owner_id: LIFE_OWNER_ID, generation: 2, live_members: 0, member_pids: [], observed_at: 1, deadline_exceeded: true }, 'hard_deadline_exceeded'],
   ];
   for (const [report, expected] of cases) {
     const outcome = evaluateTerminationReport({ token, report });
@@ -298,7 +456,7 @@ test('runGrokContainedProcess and runGrokContainedProcessSync refuse on this hos
     spawner: (...args) => { spawned.push(args); throw new Error('a refused containment must never spawn'); },
   };
   const expected = SUPPORTED_HERE
-    ? /containment_owner_not_live/u
+    ? /missing_grok_containment_helper/u
     : new RegExp(UNSUPPORTED_GROK_CONTAINMENT, 'u');
   await assert.rejects(() => runGrokContainedProcess('/opt/grok', ['--version'], options), expected);
   assert.throws(() => runGrokContainedProcessSync('/opt/grok', ['--version'], options), expected);
@@ -314,10 +472,10 @@ test('a live retained owner still cannot launch on a host that cannot contain th
   const preflight = preflightGrokContainment({
     platform: 'linux',
     arch: 'x64',
-    helperExists: () => true,
+    helperArtifact: ARTIFACT_OK,
     executableResolver: (helperPath) => helperPath,
     helperSpawner: () => ({ ok: true }),
-    ownerIdGenerator: () => 'owner-live-on-foreign-host',
+    ownerIdGenerator: () => 'grok-containment-owner-1-2-0000000b',
     now: () => 4242,
   });
   assert.equal(preflight.ok, true, 'the owner registry accepted a real supported-platform owner');
@@ -340,7 +498,7 @@ test('the contained-launch admission refuses an uncontainable host, a foreign to
   assert.equal(evaluateContainedLaunchAdmission({ ...all, hostGate: macosGate }).reason, UNSUPPORTED_GROK_CONTAINMENT);
   assert.equal(evaluateContainedLaunchAdmission({
     ...all,
-    hostGate: resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64' }),
+    hostGate: resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64', enabledPlatforms: ALL_INVENTORIED }),
   }).reason, 'foreign_containment_owner');
   assert.equal(evaluateContainedLaunchAdmission({ ...all, ownerLive: false }).reason, 'containment_owner_not_live');
   assert.equal(evaluateContainedLaunchAdmission({ ...all, helperPresent: false }).reason, 'missing_grok_containment_helper');
@@ -387,16 +545,233 @@ test('D21 native Windows containment assigns the Job Object before the suspended
   assert.ok(win32.applied_limits.includes('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE'));
 });
 
-test('a contained Grok provider launch inside a Linux PID namespace leaves zero surviving namespace members', {
-  skip: process.platform === 'linux' && process.arch === 'x64' ? HELPER_SKIP : PLATFORM_SKIP,
-}, () => {
-  assert.fail('unreachable: this polarity requires the inventoried Linux helper');
+function builtNativeRoot() {
+  const host = resolveGrokContainmentPlatform({ enabledPlatforms: ALL_INVENTORIED });
+  if (!host.inventoried) return { skip: PLATFORM_SKIP };
+  const root = process.env.GROK_NATIVE_OUTPUT_ROOT;
+  if (!root) return { skip: 'GROK_NATIVE_OUTPUT_ROOT is unset: no CI-built helper on this host' };
+  const helper = join(root, ...GROK_CONTAINMENT_INVENTORY[host.key].helper.split('/'));
+  if (!existsSync(helper) || !existsSync(join(root, 'SHA256SUMS'))) return { fail: `GROK_NATIVE_OUTPUT_ROOT is set but ${helper} or SHA256SUMS is missing` };
+  return { root, host: resolveGrokContainmentPlatform({ nativeDirectory: root, enabledPlatforms: ALL_INVENTORIED }) };
+}
+
+function lifeContext(t, label) {
+  const built = builtNativeRoot();
+  if (built.skip) { t.skip(built.skip); return null; }
+  if (built.fail) assert.fail(built.fail);
+  const tmpRoot = workspace(`${label}-tmp`);
+  const preflight = preflightGrokContainment({ platform: built.host.platform, arch: built.host.arch, nativeDirectory: built.root, pluginRoot: built.root, tmpRoot, enabledPlatforms: [built.host.key] });
+  assert.equal(preflight.ok, true, JSON.stringify(preflight));
+  const runner = supervisorTesting.createContainedRunner({ platform: built.host.platform, arch: built.host.arch, nativeDirectory: built.root, pluginRoot: built.root, enabledPlatforms: [built.host.key], tmpRoot });
+  return { ...built, tmpRoot, preflight, runner, token: preflight.containment_ready_token, recordPath: join(tmpRoot, 'deep-review-grok-containment', `${preflight.containment_ready_token.owner_id}.json`) };
+}
+
+function providerScript(dir, body) {
+  const file = join(dir, `provider-${Math.random().toString(16).slice(2, 8)}.cjs`);
+  writeFileSync(file, body);
+  return file;
+}
+
+async function launch(ctx, script, { timeoutMs = 20000, onSpawn } = {}) {
+  const env = scrubGrokEnvironment(process.env);
+  const chain = prepareSpawnChain(process.execPath, [script], { cwd: ctx.tmpRoot, env }).prepared_spawn_chain;
+  return ctx.runner.run(process.execPath, [script], { cwd: ctx.tmpRoot, env, timeoutMs, expectedPreparedSpawnChain: chain, containmentToken: ctx.token, onSpawn });
+}
+
+const sleepAndMark = (marker, ms) => `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "x"), ${ms})`;
+
+// Host-visible descendants of a Linux PID-namespace owner. process.pid inside
+// the namespace is not a host pid, so T-LIFE-9 parent-leash must walk /proc
+// from the helper rather than trust the in-namespace ready record.
+function linuxDescendantPids(rootPid) {
+  const names = readdirSync('/proc').filter((name) => /^\d+$/u.test(name));
+  const childrenOf = new Map();
+  for (const name of names) {
+    const pid = Number(name);
+    try {
+      const match = readFileSync(`/proc/${pid}/status`, 'utf8').match(/^PPid:\s+(\d+)/mu);
+      if (!match) continue;
+      const ppid = Number(match[1]);
+      if (!childrenOf.has(ppid)) childrenOf.set(ppid, []);
+      childrenOf.get(ppid).push(pid);
+    } catch {
+      // exited between readdir and read
+    }
+  }
+  const out = [];
+  const stack = [rootPid];
+  const seen = new Set([rootPid]);
+  while (stack.length > 0) {
+    const pid = stack.pop();
+    for (const child of childrenOf.get(pid) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      out.push(child);
+      stack.push(child);
+    }
+  }
+  return out;
+}
+
+test('T-LIFE-9: a contained launch waits for (Linux) or kills (Windows) an escaped descendant and reports zero members', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-escape'); if (!ctx) return;
+  const marker = join(ctx.tmpRoot, 'escapee.marker');
+  const script = providerScript(ctx.tmpRoot, `
+    const { spawn } = require('node:child_process');
+    spawn(process.execPath, ['-e', ${JSON.stringify(sleepAndMark(marker, 1000))}], { detached: true, stdio: 'ignore' }).unref();
+    process.stdout.write('PROVIDER-RAN\\n');
+    process.exit(0);
+  `);
+  const started = Date.now();
+  const result = await launch(ctx, script);
+  assert.match(result.stdout.toString('utf8'), /PROVIDER-RAN/u);
+  assert.equal(result.termination_confirmed, true, JSON.stringify({ detail: result.detail, lines: result.control_lines }));
+  assert.equal(result.termination_report.live_members, 0);
+  if (process.platform === 'linux') { assert.ok(Date.now() - started >= 1000, 'namespace init waited for the escapee'); assert.equal(existsSync(marker), true); }
+  else { await new Promise((r) => setTimeout(r, 3000)); assert.equal(existsSync(marker), false, 'the Job killed the escapee before it wrote'); }
+  assert.equal(existsSync(ctx.recordPath), false, 'consumed at admission');
 });
 
-test('a contained Grok provider launch inside a native Windows Job Object reports zero live members', {
-  skip: process.platform === 'win32' && process.arch === 'x64' ? HELPER_SKIP : PLATFORM_SKIP,
-}, () => {
-  assert.fail('unreachable: this polarity requires the inventoried native Windows helper');
+test('T-LIFE-9: a second admission after consume is refused (real helper)', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-second'); if (!ctx) return;
+  const script = providerScript(ctx.tmpRoot, 'process.exit(0)');
+  assert.equal((await launch(ctx, script)).termination_confirmed, true);
+  await assert.rejects(() => launch(ctx, script), /containment_owner_not_live/u, 'second admission after consume');
+});
+
+test('T-LIFE-9: timeout leaves no survivor', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-timeout'); if (!ctx) return;
+  const marker = join(ctx.tmpRoot, 'late.marker');
+  const pidFile = join(ctx.tmpRoot, 'tree.pids');
+  const script = providerScript(ctx.tmpRoot, `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', ${JSON.stringify(sleepAndMark(marker, 3000))}], { detached: true, stdio: 'ignore' });
+    child.unref();
+    require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ provider: process.pid, grandchild: child.pid }));
+    setTimeout(() => {}, 30000);
+  `);
+  const pids = [];
+  const result = await launch(ctx, script, { timeoutMs: 1000, onSpawn: (info) => pids.push(info.pid) });
+  assert.deepEqual([result.timedOut, result.code, result.termination_confirmed], [true, 124, false]);
+  await new Promise((r) => setTimeout(r, 5000));
+  assert.equal(existsSync(marker), false, 'the grandchild never wrote after the tree was killed');
+  const tree = JSON.parse(readFileSync(pidFile, 'utf8'));
+  const isGone = (pid) => {
+    try { process.kill(pid, 0); } catch { return true; }
+    if (process.platform !== 'linux') return false;
+    try {
+      return /\) Z /.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    } catch { return true; }
+  };
+  for (const [label, pid] of [['helper', pids[0]], ['provider', tree.provider], ['grandchild', tree.grandchild]]) {
+    assert.equal(isGone(pid), true, `${label} is gone`);
+  }
+  if (process.platform === 'linux') assert.equal(result.group_gone, true);
+});
+
+test('T-LIFE-9: killing the bridge process tears the whole tree down (parent leash)', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-crash'); if (!ctx) return;
+  const marker = join(ctx.tmpRoot, 'orphan.marker');
+  const pidFile = join(ctx.tmpRoot, 'helper.pid');
+  const readyFile = join(ctx.tmpRoot, 'tree.ready');
+  const script = providerScript(ctx.tmpRoot, `
+    const fs = require('node:fs');
+    const { spawn } = require('node:child_process');
+    // double-fork/setsid-style escapee: detached, unref'd, writes a marker after 5 s
+    const grandchild = spawn(process.execPath, ['-e', ${JSON.stringify(sleepAndMark(marker, 5000))}], { detached: true, stdio: 'ignore' });
+    grandchild.unref();
+    // atomic ready record: provider and grandchild pids, written only once the grandchild exists
+    fs.writeFileSync(${JSON.stringify(readyFile + '.tmp')}, JSON.stringify({ provider: process.pid, grandchild: grandchild.pid }));
+    fs.renameSync(${JSON.stringify(readyFile + '.tmp')}, ${JSON.stringify(readyFile)});
+    setTimeout(() => {}, 30000);
+  `);
+  const env = scrubGrokEnvironment(process.env);
+  const chain = prepareSpawnChain(process.execPath, [script], { cwd: ctx.tmpRoot, env }).prepared_spawn_chain;
+  const spec = join(ctx.tmpRoot, 'bridge-spec.json');   // by file, never on argv (Windows 32767-char command line)
+  writeFileSync(spec, JSON.stringify({ context: { platform: ctx.host.platform, arch: ctx.host.arch, nativeDirectory: ctx.root, pluginRoot: ctx.root, enabledPlatforms: [ctx.host.key], tmpRoot: ctx.tmpRoot }, script, cwd: ctx.tmpRoot, env, chain, token: ctx.token, pidFile }));
+  const errFile = join(ctx.tmpRoot, 'bridge.err');
+  const errFd = openSync(errFile, 'w');
+  const bridge = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { __testing } from ${JSON.stringify(pathToFileURL(join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs')).href)};
+    const spec = JSON.parse(readFileSync(process.argv[1], 'utf8'));
+    const runner = __testing.createContainedRunner(spec.context);
+    await runner.run(process.execPath, [spec.script], { cwd: spec.cwd, env: spec.env, timeoutMs: 60000, expectedPreparedSpawnChain: spec.chain, containmentToken: spec.token, onSpawn: (info) => writeFileSync(spec.pidFile, String(info.pid)) });
+  `, spec], { stdio: ['ignore', 'ignore', errFd] });
+  closeSync(errFd);
+  for (let i = 0; i < 200 && !(existsSync(pidFile) && existsSync(readyFile)); i += 1) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(existsSync(pidFile), true, `the bridge spawned the helper: ${readFileSync(errFile, 'utf8')}`);
+  assert.equal(existsSync(readyFile), true, `the provider and its grandchild were running before the crash: ${readFileSync(errFile, 'utf8')}`);
+  const helperPid = Number(readFileSync(pidFile, 'utf8'));
+  const tree = JSON.parse(readFileSync(readyFile, 'utf8'));
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const isGone = (pid) => {
+    try { process.kill(pid, 0); } catch { return true; }
+    if (process.platform !== 'linux') return false;
+    try {
+      return /\) Z /u.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    } catch { return true; }
+  };
+  // Linux: in-namespace process.pid is not a host pid. Walk /proc from the
+  // helper until the host tree has helper + namespace init + provider + grandchild.
+  let treePids = [];
+  // Linux: helper + namespace init + provider + grandchild. Windows: helper + provider + grandchild.
+  const minTree = process.platform === 'linux' ? 4 : 3;
+  for (let i = 0; i < 30; i += 1) {
+    if (process.platform === 'linux') {
+      treePids = [helperPid, ...linuxDescendantPids(helperPid)];
+    } else {
+      treePids = [helperPid, tree.provider, tree.grandchild];
+    }
+    if (treePids.length >= minTree && treePids.every(alive)) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(treePids.length >= minTree, `host tree was too small before the crash (${treePids.join(',')}): ${readFileSync(errFile, 'utf8')}`);
+  assert.equal(treePids.every(alive), true, `host tree was not alive before the crash (${treePids.join(',')}): ${readFileSync(errFile, 'utf8')}`);
+  bridge.kill('SIGKILL');
+  await new Promise((r) => setTimeout(r, 3000));
+  for (const pid of treePids) {
+    assert.equal(isGone(pid), true, `pid ${pid} is gone`);
+  }
+  await new Promise((r) => setTimeout(r, 5000));
+  assert.equal(existsSync(marker), false, 'no descendant survived the bridge');
+});
+
+test('T-LIFE-9: the argv matrix is refused by the real helper with exit 64, empty control stdout and no provider spawn', (t) => {
+  const built = builtNativeRoot();
+  if (built.skip) { t.skip(built.skip); return; }
+  if (built.fail) assert.fail(built.fail);
+  const helper = join(built.root, ...GROK_CONTAINMENT_INVENTORY[built.host.key].helper.split('/'));
+  const dir = workspace('t-life-9-matrix');
+  for (const row of ARGV_MATRIX) {
+    const marker = join(dir, `${row.name.replaceAll(/\W+/gu, '-')}.marker`);
+    const argv = row.withCommandMarker ? [...row.argv, '--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] : row.argv;
+    const run = spawnSync(helper, argv, { input: '', encoding: 'utf8', timeout: 5000 });
+    assert.equal(run.status, 64, `${row.name}: ${run.stderr}`);
+    assert.equal(run.stdout, '', row.name);
+    assert.equal(existsSync(marker), false, `${row.name}: the provider never ran`);
+  }
+});
+
+test('T-LIFE-9: --parent-pid after -- is a command operand for the real helper', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-operand'); if (!ctx) return;
+  const built = builtNativeRoot();
+  const helper = join(built.root, ...GROK_CONTAINMENT_INVENTORY[built.host.key].helper.split('/'));
+  const marker = join(ctx.tmpRoot, 'operand.argv');
+  const probe = providerScript(ctx.tmpRoot, 'require("node:fs").writeFileSync(process.argv[2], process.argv.slice(2).join(" "))');
+  const run = spawnSync(helper, ['--own-grok-tree', '--parent-pid', String(process.pid), '--', process.execPath, probe, marker, '--parent-pid', 'x'], { input: '', encoding: 'utf8', timeout: 10000 });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(readFileSync(marker, 'utf8'), /--parent-pid x/u, 'the operand reached the provider argv');
+  assert.equal(parseOwnerControlLines(Buffer.from(run.stdout)).ok, true);
+});
+
+test('T-LIFE-9: provider exit 125 and 127 propagate with a confirmed report', async (t) => {
+  for (const code of [125, 127]) {
+    const ctx = lifeContext(t, `t-life-9-exit-${code}`); if (!ctx) return;
+    const result = await launch(ctx, providerScript(ctx.tmpRoot, `process.exit(${code})`));
+    assert.equal(result.code, code);
+    assert.equal(result.termination_confirmed, true, JSON.stringify(result.control_lines));
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -426,7 +801,8 @@ test('classifyContainmentRelease names privacy decline, error and no-launch dist
 });
 
 test('withGrokContainment releases the preflighted owner on privacy decline, on error and on no-launch', async () => {
-  const token = liveToken({ ownerId: 'owner-release' });
+  const token = liveToken({ ownerId: RELEASE_OWNER_ID });
+  assert.match(token.owner_id, OWNER_ID_PATTERN);
   const stubPreflight = () => ({
     ok: true, containment_ready: true, containment_ready_token: token,
     reason: null, platform: 'linux', arch: 'x64', mechanism: 'pid-namespace',
@@ -450,7 +826,7 @@ test('withGrokContainment releases the preflighted owner on privacy decline, on 
     } else {
       await call;
     }
-    assert.deepEqual(releases, [{ owner_id: 'owner-release', reason: expected }], label);
+    assert.deepEqual(releases, [{ owner_id: RELEASE_OWNER_ID, reason: expected }], label);
   }
 });
 
@@ -1059,4 +1435,523 @@ test('the replay harness observes a mutation planted in the pinned baseline', as
   const mutated = runMatrix(await loadCarriers(mutatedRoot));
   const observed = baseline.filter((row, index) => row !== mutated[index]);
   assert.ok(observed.length > 0, 'the positive control must be visible to the diff');
+});
+
+test('T-OWN-17: an inventoried platform outside GROK_ENABLED_PLATFORMS is refused before helper lookup', () => {
+  assert.deepEqual([...GROK_ENABLED_PLATFORMS], ['linux/x64']);
+  assert.equal(Object.isFrozen(GROK_ENABLED_PLATFORMS), true);
+  assert.equal(typeof GROK_ENABLED_PLATFORMS.add, 'undefined', 'the public value is an array, not a mutable Set');
+  assert.throws(() => { GROK_ENABLED_PLATFORMS.push('win32/x64'); }, TypeError);
+  assert.equal(isGrokPlatformEnabled('win32/x64'), false);
+  assert.equal(isGrokPlatformEnabled('linux/x64'), true);
+  for (const key of GROK_ENABLED_PLATFORMS) assert.ok(Object.hasOwn(GROK_CONTAINMENT_INVENTORY, key));
+  const lookups = [];
+  const win = preflightGrokContainment({ platform: 'win32', arch: 'x64', executableResolver: (p) => { lookups.push(p); return p; }, helperSpawner: () => ({ ok: true }) });
+  assert.equal(win.ok, false);
+  assert.equal(win.reason, UNSUPPORTED_GROK_CONTAINMENT);
+  assert.equal(win.detail, 'platform_verification_pending');
+  assert.deepEqual(lookups, []);
+  const artifactCalls = [];
+  assert.throws(() => evaluateCoordinatorContainment({ platform: 'win32', arch: 'x64', helperArtifact: (...a) => { artifactCalls.push(a); return ARTIFACT_OK(); } }),
+    (error) => error.containment_refusal?.reason === UNSUPPORTED_GROK_CONTAINMENT && error.containment_refusal?.detail === 'platform_verification_pending');
+  assert.deepEqual(artifactCalls, [], 'zero helper lookup at the coordinator for a pending platform');
+  const gate = resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64' });
+  assert.deepEqual([gate.supported, gate.inventoried, gate.detail, gate.mechanism], [false, true, 'platform_verification_pending', 'job-object']);
+  // a token can be minted and asserted for an inventoried-but-not-enabled pair (inventory-bound), yet the preflight refuses it
+  const winToken = supervisorTesting.mintOwnerToken({ platform: 'win32', arch: 'x64', ownerId: 'grok-containment-owner-1-1-0000000c', generation: 1, startedAt: 1 });
+  assert.equal(assertContainmentReadyToken(winToken).mechanism, 'job-object');
+  const enabled = resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64', enabledPlatforms: ALL_INVENTORIED });
+  assert.equal(enabled.supported, true);
+  assert.deepEqual(resolveGrokContainmentPlatform({ platform: 'darwin', arch: 'arm64' }).inventoried, false);
+});
+
+test('T-OWN-9: evaluateHelperArtifact names every integrity state and never follows a symlink', (t) => {
+  const good = nativeFixture('t-own-9-ok').root;
+  const ok = evaluateHelperArtifact(gateFor(good), { nativeDirectory: good, pluginRoot: good });
+  assert.deepEqual([ok.present, ok.executable, ok.integrity], [true, true, 'ok']);
+  assert.match(ok.helper_sha256, /^[a-f0-9]{64}$/u);
+  const cases = [
+    ['mismatch', { sums: 'wrong' }], ['sums_missing', { sums: 'absent' }], ['sums_malformed', { sums: 'truncated' }],
+    ['sums_malformed', { extra: 'linux-x64/other' }], ['not_listed', { hostPlaceholder: true }], ['sums_symlink', { symlinkSums: true }],
+  ];
+  for (const [expected, options] of cases) {
+    const fixture = nativeFixture(`t-own-9-${expected}-${Math.random().toString(16).slice(2, 6)}`, options);
+    if (fixture.skipped) { t.diagnostic(`${expected}: file symlinks need elevation; skipped`); continue; }
+    assert.equal(evaluateHelperArtifact(gateFor(fixture.root), { nativeDirectory: fixture.root, pluginRoot: fixture.root }).integrity, expected, expected);
+  }
+  const sym = nativeFixture('t-own-9-symlink-helper', { symlinkHelper: true });
+  if (!sym.skipped) assert.equal(evaluateHelperArtifact(gateFor(sym.root), { nativeDirectory: sym.root, pluginRoot: sym.root }).present, false);
+  // a symlinked/junctioned platform directory component under a real native dir
+  const comp = nativeFixture('t-own-9-symlink-dir').root;
+  renameSync(join(comp, 'linux-x64'), join(comp, 'real-linux'));
+  linkDirectory(join(comp, 'real-linux'), join(comp, 'linux-x64'));
+  assert.equal(evaluateHelperArtifact(gateFor(comp), { nativeDirectory: comp, pluginRoot: comp }).integrity, 'symlink_component');
+  // the native directory itself is a link: the component walk from the plugin root sees it before any realpath
+  const plugin = workspace('t-own-9-plugin');
+  const realNative = nativeFixture('t-own-9-real-native').root;
+  linkDirectory(realNative, join(plugin, 'native'));
+  assert.equal(evaluateHelperArtifact(gateFor(join(plugin, 'native')), { nativeDirectory: join(plugin, 'native'), pluginRoot: plugin }).integrity, 'symlink_component');
+  // a native directory that is not under the plugin root at all
+  const elsewhere = nativeFixture('t-own-9-elsewhere').root;
+  assert.equal(evaluateHelperArtifact(gateFor(elsewhere), { nativeDirectory: elsewhere, pluginRoot: workspace('t-own-9-other-root') }).integrity, 'outside_root');
+  // production mode requires the release polarity; the same one-helper root is fine for a test locator
+  const oneHelper = nativeFixture('t-own-9-one-helper', { win: false }).root;
+  assert.equal(evaluateHelperArtifact(gateFor(oneHelper), { nativeDirectory: oneHelper, pluginRoot: oneHelper, productionMode: true }).integrity, 'not_release');
+  assert.equal(evaluateHelperArtifact(gateFor(oneHelper), { nativeDirectory: oneHelper, pluginRoot: oneHelper }).integrity, 'ok');
+});
+
+test('T-OWN-9: the coordinator and the preflight refuse integrity failures, and production mode refuses a one-helper root', () => {
+  const bad = nativeFixture('t-own-9-coord', { sums: 'wrong' }).root;
+  assert.throws(
+    () => evaluateCoordinatorContainment({ ...LINUX, nativeDirectory: bad, pluginRoot: bad }),
+    (error) => error.containment_refusal?.reason === GROK_CONTAINMENT_HELPER_FAILED && error.containment_refusal?.detail === 'integrity_mismatch',
+  );
+  const preflight = preflightGrokContainment({ ...LINUX, nativeDirectory: bad, pluginRoot: bad });
+  assert.deepEqual([preflight.ok, preflight.reason, preflight.detail, preflight.containment_ready_token], [false, GROK_CONTAINMENT_HELPER_FAILED, 'integrity_mismatch', null]);
+  const absent = workspace('t-own-9-absent');
+  assert.equal(preflightGrokContainment({ ...LINUX, nativeDirectory: absent, pluginRoot: absent }).reason, 'missing_grok_containment_helper');
+  // production mode: no nativeDirectory supplied, but the plugin root is pointed at a fixture whose native tree is a one-helper root
+  const fixturePlugin = workspace('t-own-9-prod-plugin');
+  mkdirSync(join(fixturePlugin, 'hooks', 'scripts', 'lib'), { recursive: true });
+  renameSync(nativeFixture('t-own-9-prod-native', { win: false }).root, join(fixturePlugin, 'hooks', 'scripts', 'lib', 'native'));
+  const prod = preflightGrokContainment({ ...LINUX, pluginRoot: fixturePlugin, helperSpawner: () => ({ ok: true }) });
+  assert.equal(prod.reason, GROK_CONTAINMENT_HELPER_FAILED);
+  assert.equal(prod.detail, 'integrity_not_release');
+  assert.throws(() => evaluateCoordinatorContainment({ ...LINUX, pluginRoot: fixturePlugin }), (error) => error.containment_refusal?.detail === 'integrity_not_release');
+  // the same tree accepted through the test locator
+  const native = join(fixturePlugin, 'hooks', 'scripts', 'lib', 'native');
+  assert.equal(preflightGrokContainment({ ...LINUX, nativeDirectory: native, pluginRoot: fixturePlugin, helperSpawner: () => ({ ok: true }) }).ok, true);
+});
+
+test('T-OWN-12: integrity runs on the production default path; only helperArtifact bypasses it', async () => {
+  const production = preflightGrokContainment();
+  assert.equal(production.ok, false);
+  assert.ok([UNSUPPORTED_GROK_CONTAINMENT, 'missing_grok_containment_helper'].includes(production.reason), production.reason);
+  const bad = nativeFixture('t-own-12', { sums: 'wrong' }).root;
+  assert.throws(
+    () => evaluateCoordinatorContainment({ ...LINUX, nativeDirectory: bad, pluginRoot: bad, helperExists: () => true }),
+    (error) => error.containment_refusal?.detail === 'integrity_mismatch',
+    'an injected helperExists alone does not skip integrity',
+  );
+  assert.equal(evaluateCoordinatorContainment({ ...LINUX, nativeDirectory: bad, pluginRoot: bad, helperArtifact: ARTIFACT_OK }).supported, true);
+  // createGrokCarrierCoordinator with neither seam consults SHA256SUMS before spawning the detector
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({ cwd: workspace('t-own-12-cwd'), mode: 'review', ...LINUX, nativeDirectory: bad, pluginRoot: bad, detectorPath: join(bad, 'never-run.mjs') }),
+    (error) => error.containment_refusal?.detail === 'integrity_mismatch',
+  );
+});
+
+test('T-OWN-6 (parser): the normative control-line grammar is CRLF tolerant and admits exactly ready-then-report', () => {
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n${REPORT}\n`)).ok, true);
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\r\n${REPORT}\r\n`)).ok, true);
+  assert.equal(parseOwnerControlLines(Buffer.from(`  ${READY}\n${REPORT}  \n\n`)).ok, true);
+  assert.deepEqual(parseOwnerControlLines(Buffer.alloc(0)), { ok: false, reason: 'empty', lines: [] });
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\nnot json\n${REPORT}\n`)).reason, 'malformed');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n`)).reason, 'shape');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${REPORT}\n${READY}\n`)).reason, 'shape');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n${READY}\n${REPORT}\n`)).reason, 'shape');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n${REPORT}\n{"handshake":"extra"}\n`)).reason, 'shape');
+  const withOwner = REPORT.replace('"live_members"', '"owner_id":"x","generation":1,"observed_at":5,"live_members"');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n${withOwner}\n`)).reason, 'shape');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY.replace('"1.0"', '"2.0"')}\n${REPORT}\n`)).reason, 'shape');
+});
+
+test('the stub helper compiles and speaks the two-line protocol in preflight and launch mode', (t) => {
+  const stub = stubNativeRoot({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH });
+  if (stub.skipReason) { t.skip(stub.skipReason); return; }
+  const preflight = spawnSync(stub.helperPath, ['--own-grok-tree', '--parent-pid', String(process.pid)], { input: '', encoding: 'utf8', timeout: 5000 });
+  assert.equal(preflight.status, 0, preflight.stderr);
+  const preflightLines = parseOwnerControlLines(Buffer.from(preflight.stdout));
+  assert.equal(preflightLines.ok, true);
+  assert.equal(preflightLines.lines[0].mechanism, HOST_STUB_PLATFORM === 'win32' ? 'job-object' : 'pid-namespace');
+  const launch = spawnSync(stub.helperPath, ['--own-grok-tree', '--parent-pid', String(process.pid), '--', 'provider', 'arg'], {
+    input: '', encoding: 'utf8', timeout: 5000, env: { ...process.env, STUB_PROVIDER_OUTPUT: 'hello from provider', STUB_EXIT: '3' },
+  });
+  assert.equal(launch.status, 3);
+  assert.match(launch.stderr, /hello from provider/u);
+  assert.equal(parseOwnerControlLines(Buffer.from(launch.stdout)).ok, true);
+  // `--parent-pid` after `--` is a command operand, not an option
+  const operand = spawnSync(stub.helperPath, ['--own-grok-tree', '--', '--parent-pid', 'x'], { input: '', encoding: 'utf8', timeout: 5000 });
+  assert.equal(operand.status, 0, operand.stderr);
+  for (const row of ARGV_MATRIX) {
+    const marker = join(stub.root, `${row.name.replaceAll(/\W+/gu, '-')}.marker`);
+    const argv = row.withCommandMarker ? [...row.argv, '--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] : row.argv;
+    const bad = spawnSync(stub.helperPath, argv, { input: '', encoding: 'utf8', timeout: 5000 });
+    assert.equal(bad.status, 64, `${row.name}: ${bad.stderr}`);
+    assert.equal(bad.stdout, '', row.name);
+    assert.equal(existsSync(marker), false, `${row.name}: the provider must never run`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// E2a / E2b -- durable owner record, production preflight spawner, env scrub.
+// ---------------------------------------------------------------------------
+
+// Preflight always runs with a CLEAN stub environment (no fault, no exit code):
+// faults belong to the launch (Task 8). `spawnFault` is the one exception, for
+// T-OWN-2, where the preflight itself is under test.
+function stubPreflight(label, { spawnFault = '', platform = HOST_STUB_PLATFORM, arch = HOST_STUB_ARCH, now, tmpRoot, spy = null } = {}) {
+  const stub = stubNativeRoot({ platform, arch });
+  if (stub.skipReason) return { skipReason: stub.skipReason };
+  const env = { ...process.env, STUB_FAULT: spawnFault, STUB_MECHANISM: platform === 'linux' ? 'pid-namespace' : 'job-object', GROK_SANDBOX: 'must-not-leak', STUB_EXIT: '' };
+  const root = tmpRoot ?? workspace(`${label}-tmp`);
+  const options = { platform, arch, nativeDirectory: stub.root, pluginRoot: stub.root, env, tmpRoot: root, enabledPlatforms: ALL_INVENTORIED, ...(now ? { now } : {}) };
+  if (spy) options.helperSpawner = (helperPath, args, spawnOptions) => { spy.push({ helperPath, args, env: spawnOptions.env }); return supervisorTesting.defaultHelperSpawner(helperPath, args, spawnOptions); };
+  const result = preflightGrokContainment(options);
+  return { stub, tmpRoot: root, result };
+}
+
+test('T-OWN-1: the production spawner issues a token and a durable record with the leash argv and a scrubbed env', (t) => {
+  const spy = [];
+  const p = stubPreflight('t-own-1', { spy });
+  if (p.skipReason) { t.skip(p.skipReason); return; }
+  assert.equal(p.result.ok, true, JSON.stringify(p.result));
+  const token = p.result.containment_ready_token;
+  assert.match(token.owner_id, OWNER_ID_PATTERN);
+  assert.equal(token.helper_path, p.stub.helperPath);
+  assert.equal(spy.length, 1);
+  assert.deepEqual(spy[0].args, ['--own-grok-tree', '--parent-pid', String(process.pid)]);
+  assert.equal(Object.hasOwn(spy[0].env, 'GROK_SANDBOX'), false);
+  const pathVar = spy[0].env.PATH ?? spy[0].env.Path;
+  assert.equal(typeof pathVar, 'string');
+  assert.ok(pathVar.length > 0);
+  const record = readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot });
+  assert.equal(record.ok, true, JSON.stringify(record));
+  assert.deepEqual(validateOwnerRecord(token, record.body), { ok: true });
+  assert.equal(record.body.helper_sha256, p.stub.helperSha256);
+  assert.equal(isGrokContainmentOwnerLive(token, { tmpRoot: p.tmpRoot }), true);
+  const recordPath = record.path;
+  const st = lstatSync(recordPath);
+  assert.equal(st.isFile() && !st.isSymbolicLink(), true);
+  if (process.platform !== 'win32') {
+    assert.equal(st.mode & 0o777, 0o600);
+    assert.equal(lstatSync(dirname(recordPath)).mode & 0o777, 0o700);
+  }
+  // O_EXCL: a second write for the same owner id is refused
+  assert.throws(() => supervisorTesting.writeOwnerRecordForTest(record.body, p.tmpRoot), /EEXIST/u);
+  assert.equal(GROK_OWNER_START_DEADLINE_MS, 5000);
+  assert.equal(GROK_CONTAINMENT_TOKEN_TTL_MS, 30 * 60 * 1000);
+});
+
+test('T-OWN-18: scrubGrokEnvironment drops every GROK_SANDBOX spelling and keeps the rest; the bridge delegates', async () => {
+  const scrubbed = scrubGrokEnvironment({ PATH: '/x', SYSTEMROOT: 'C:\\Windows', GROK_SANDBOX: 'a', grok_sandbox: 'b', Grok_Sandbox: 'c', OTHER: 'keep' });
+  assert.deepEqual(scrubbed, { PATH: '/x', SYSTEMROOT: 'C:\\Windows', OTHER: 'keep' });
+  const bridgeSource = readFileSync(join(pluginRoot, 'hooks', 'scripts', 'run-grok-reviewer.mjs'), 'utf8');
+  assert.match(bridgeSource, /scrubGrokEnvironment\(parentEnv\)/u, 'childEnvironment delegates to the supervisor');
+  const supervisorSource = readFileSync(join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs'), 'utf8');
+  assert.doesNotMatch(supervisorSource, /run-grok-reviewer/u, 'the supervisor never imports the bridge');
+});
+
+test('T-OWN-2: every preflight fault is a grok_containment_helper_failed refusal with a named detail', async (t) => {
+  const expectations = [
+    ['no_ready', 'handshake_lost'], ['wrong_mechanism', 'handshake_lost'], ['extra_line', 'handshake_lost'],
+    ['report_not_last', 'handshake_lost'], ['exit_125_no_report', 'helper_exit_125'], ['hang', 'start_deadline'],
+  ];
+  for (const [fault, detail] of expectations) {
+    const p = stubPreflight(`t-own-2-${fault}`, { spawnFault: fault });
+    if (p.skipReason) { t.skip(p.skipReason); return; }
+    assert.equal(p.result.ok, false, fault);
+    assert.equal(p.result.reason, GROK_CONTAINMENT_HELPER_FAILED, fault);
+    assert.equal(p.result.detail, detail, fault);
+    assert.equal(p.result.containment_ready_token, null, fault);
+    assert.equal(typeof p.result.helper_stderr, 'string', fault);
+    assert.doesNotMatch(p.result.helper_stderr, new RegExp('[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]', 'u'), fault);
+  }
+  const { sanitizeHelperStderr } = await import('../hooks/scripts/lib/grok-owner-control.mjs');
+  assert.equal(sanitizeHelperStderr(Buffer.from('a\u0000b\rc\u007fd\u0085e\tf\ng')), 'abcde\tf\ng');
+  assert.equal(sanitizeHelperStderr(Buffer.from('/plugin/root/x'), { pluginRoot: '/plugin/root' }), '{plugin_root}/x');
+  const crlf = stubPreflight('t-own-2-crlf', { spawnFault: 'crlf' });
+  assert.equal(crlf.result.ok, true, 'CRLF control lines are accepted');
+});
+
+test('T-OWN-4: an aged or future-dated record is refused and swept', (t) => {
+  const base = 1_800_000_000_000;
+  const p = stubPreflight('t-own-4', { now: () => base });
+  if (p.skipReason) { t.skip(p.skipReason); return; }
+  const token = p.result.containment_ready_token;
+  assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot, now: () => base + GROK_CONTAINMENT_TOKEN_TTL_MS + 1 }).reason, 'expired');
+  assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot, now: () => base - 1 }).reason, 'future');
+  assert.equal(isGrokContainmentOwnerLive(token, { tmpRoot: p.tmpRoot, now: () => base + GROK_CONTAINMENT_TOKEN_TTL_MS + 1 }), false, 'the registry never substitutes for an expired record');
+  // a future-dated record is refused but NOT swept
+  stubPreflight('t-own-4-earlier', { now: () => base - 1000, tmpRoot: p.tmpRoot });
+  assert.equal(existsSync(join(p.tmpRoot, 'deep-review-grok-containment', `${token.owner_id}.json`)), true, 'future-dated records survive a sweep');
+  stubPreflight('t-own-4-later', { now: () => base + GROK_CONTAINMENT_TOKEN_TTL_MS + 1, tmpRoot: p.tmpRoot });
+  assert.equal(existsSync(join(p.tmpRoot, 'deep-review-grok-containment', `${token.owner_id}.json`)), false, 'expired records are swept');
+});
+
+test('T-OWN-5: symlinked, foreign, tampered, planted or untrusted-directory records are refused', async (t) => {
+  const p = stubPreflight('t-own-5');
+  if (p.skipReason) { t.skip(p.skipReason); return; }
+  const token = p.result.containment_ready_token;
+  const dir = join(p.tmpRoot, 'deep-review-grok-containment');
+  const recordPath = join(dir, `${token.owner_id}.json`);
+  const body = JSON.parse(readFileSync(recordPath, 'utf8'));
+  assert.equal(validateOwnerRecord(token, { ...body, token_sha256: 'f'.repeat(64) }).reason, 'seal');
+  assert.equal(validateOwnerRecord(token, { ...body, record: { ...body.record, generation: 2 } }).reason, 'generation');
+  assert.equal(validateOwnerRecord({ ...token, owner_id: 'grok-containment-owner-1-1-deadbeef' }, body).reason, 'owner');
+  writeFileSync(recordPath, JSON.stringify({ ...body, token_sha256: 'f'.repeat(64) }));
+  assert.equal(isGrokContainmentOwnerLive(token, { tmpRoot: p.tmpRoot }), false, 'a tampered seal is not live');
+  writeFileSync(recordPath, '{not json');
+  assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot }).reason, 'malformed');
+  assert.equal(readOwnerRecord('grok-containment-owner-1-1-deadbeef', { tmpRoot: p.tmpRoot }).reason, 'absent');
+  assert.equal(readOwnerRecord('../etc/passwd', { tmpRoot: p.tmpRoot }).reason, 'absent');
+  if (process.platform !== 'win32') assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot, expectedUid: process.getuid() + 1 }).reason, 'foreign_uid', 'a record owned by another uid is refused (the uid is injected because a test cannot chown)');
+  // a planted record for a token that names a foreign helper path: the record binds but admission (Task 8) refuses on inventory-path equality
+  const planted = { ...token, helper_path: '/elsewhere/helper' };
+  planted.token_sha256 = supervisorTesting.tokenSeal(planted);
+  assert.equal(isGrokContainmentOwnerLive(planted, { tmpRoot: p.tmpRoot }), false, 'the seal binds helper_path, so a planted path never validates against the stored seal');
+  // a fully matching planted record for that foreign-path token: admission (Task 8) refuses on inventory-path equality BEFORE reading it
+  // O_EXCL is the sole create predicate; the malformed file for this owner id must be gone first.
+  rmSync(recordPath);
+  supervisorTesting.writeOwnerRecordForTest({ record: Object.fromEntries(Object.keys(body.record).map((k) => [k, planted[k]])), token_sha256: planted.token_sha256, helper_sha256: body.helper_sha256, created_at: body.created_at }, p.tmpRoot);
+  assert.equal(isGrokContainmentOwnerLive(planted, { tmpRoot: p.tmpRoot }), true, 'the planted record validates as a record');
+  const runner = supervisorTesting.createContainedRunner({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: p.stub.root, pluginRoot: p.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: p.tmpRoot });
+  await assert.rejects(() => runner.run(process.execPath, ['-e', '0'], { cwd: p.stub.root, env: process.env, timeoutMs: 5000, containmentToken: planted }), /foreign_containment_owner/u);
+  assert.equal(existsSync(join(dir, `${planted.owner_id}.json`)), true, 'the planted record was not consumed');
+  if (process.platform !== 'win32') {
+    writeFileSync(recordPath, JSON.stringify(body));
+    rmSync(recordPath); writeFileSync(join(p.tmpRoot, 'elsewhere.json'), JSON.stringify(body)); symlinkSync(join(p.tmpRoot, 'elsewhere.json'), recordPath);
+    assert.equal(readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot }).reason, 'symlink');
+    const open = workspace('t-own-5-open');
+    mkdirSync(join(open, 'deep-review-grok-containment'), { mode: 0o777 });
+    chmodSync(join(open, 'deep-review-grok-containment'), 0o777);
+    assert.equal(recordDirectory({ tmpRoot: open }).reason, 'record_directory_untrusted');
+    const refused = stubPreflight('t-own-5-open-preflight', { tmpRoot: open });
+    assert.equal(refused.result.reason, GROK_CONTAINMENT_HELPER_FAILED);
+    assert.equal(refused.result.detail, 'record_directory_untrusted');
+    // a directory that becomes untrusted AFTER the preflight: release and consume both refuse and unlink nothing
+    const later = stubPreflight('t-own-5-later-untrusted');
+    const laterDir = join(later.tmpRoot, 'deep-review-grok-containment');
+    chmodSync(laterDir, 0o777);
+    assert.deepEqual(releaseGrokContainment(later.result.containment_ready_token, { tmpRoot: later.tmpRoot }).released, false);
+    assert.equal(existsSync(join(laterDir, `${later.result.containment_ready_token.owner_id}.json`)), true, 'nothing was unlinked through an untrusted directory');
+    chmodSync(laterDir, 0o700);
+    // a record replaced by a symlink to an outside file: consume refuses and the outside file survives
+    const outside = join(later.tmpRoot, 'outside.json'); writeFileSync(outside, 'keep');
+    const rec = join(laterDir, `${later.result.containment_ready_token.owner_id}.json`); rmSync(rec); symlinkSync(outside, rec);
+    assert.equal(supervisorTesting.consumeOwnerRecordForTest(later.result.containment_ready_token.owner_id, later.tmpRoot).consumed, false);
+    assert.equal(existsSync(outside), true, 'the symlink target was never unlinked');
+  }
+});
+
+const preflightCli = join(pluginRoot, 'hooks', 'scripts', 'grok-containment-preflight.mjs');
+function childEnvFor(tmpRoot) { return { ...process.env, TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot }; }
+
+test('T-OWN-14: --release from a child process removes the record with an empty registry and validates the whole token first', (t) => {
+  const p = stubPreflight('t-own-14');
+  if (p.skipReason) { t.skip(p.skipReason); return; }
+  const token = p.result.containment_ready_token;
+  const env = childEnvFor(p.tmpRoot);
+  const recordPath = join(p.tmpRoot, 'deep-review-grok-containment', `${token.owner_id}.json`);
+  for (const [label, bad] of [
+    ['invalid json', '{'],
+    ['owner id only', JSON.stringify({ owner_id: token.owner_id })],
+    ['tampered seal', JSON.stringify({ ...token, token_sha256: 'f'.repeat(64) })],
+    ['tampered helper path', JSON.stringify({ ...token, helper_path: '/elsewhere/helper' })],
+    ['bad owner grammar', JSON.stringify({ ...token, owner_id: 'owner-x', token_sha256: supervisorTesting.tokenSeal({ ...token, owner_id: 'owner-x' }) })],
+  ]) {
+    const run = spawnSync(process.execPath, [preflightCli, '--release', '--containment-ready-token-json', bad], { encoding: 'utf8', env });
+    assert.equal(run.status, 1, `${label}: ${run.stderr}`);
+    assert.equal(run.stdout, '', label);
+    assert.equal(existsSync(recordPath), true, `${label}: the record is untouched`);
+  }
+  const released = spawnSync(process.execPath, [preflightCli, '--release', '--containment-ready-token-json', JSON.stringify(token)], { encoding: 'utf8', env });
+  assert.equal(released.status, 0, released.stderr);
+  const parsed = JSON.parse(released.stdout.trim());
+  assert.deepEqual([parsed.released, parsed.owner_id], [true, token.owner_id]);
+  assert.equal(existsSync(recordPath), false);
+  const again = spawnSync(process.execPath, [preflightCli, '--release', '--containment-ready-token-json', JSON.stringify(token)], { encoding: 'utf8', env });
+  assert.equal(again.status, 3);
+  assert.equal(JSON.parse(again.stdout.trim()).released, false);
+});
+
+// The preflight runs with a clean stub environment; faults and exit codes are
+// applied to the LAUNCH environment only (sol R1 F7).
+function stubRunner(label, { fault = '', platform = HOST_STUB_PLATFORM, arch = HOST_STUB_ARCH, providerOutput = 'PROVIDER OUTPUT LINE', exit = '0' } = {}) {
+  const p = stubPreflight(label, { platform, arch });
+  if (p.skipReason) return { skipReason: p.skipReason };
+  const launchEnv = { ...scrubGrokEnvironment(process.env), STUB_FAULT: fault, STUB_MECHANISM: platform === 'linux' ? 'pid-namespace' : 'job-object', STUB_PROVIDER_OUTPUT: providerOutput, STUB_EXIT: exit };
+  const runner = supervisorTesting.createContainedRunner({ platform, arch, nativeDirectory: p.stub.root, pluginRoot: p.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: p.tmpRoot });
+  const provider = process.execPath;   // sealed as native-elf on Linux, native-macho on macOS, PE on Windows -- all native
+  const chain = prepareSpawnChain(provider, ['-e', '0'], { cwd: p.stub.root, env: launchEnv }).prepared_spawn_chain;
+  const launch = (extra = {}) => runner.run(provider, ['-e', '0'], { cwd: p.stub.root, env: launchEnv, timeoutMs: 10000, expectedPreparedSpawnChain: chain, containmentToken: p.result.containment_ready_token, ...extra });
+  return { ...p, launchEnv, runner, provider, chain, launch, token: p.result.containment_ready_token, recordPath: join(p.tmpRoot, 'deep-review-grok-containment', `${p.result.containment_ready_token.owner_id}.json`) };
+}
+
+test('T-OWN-6: the adapter maps the provider channel, binds the report, spawns the inventoried path and propagates exit status', async (t) => {
+  const r = stubRunner('t-own-6');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const spawns = [];
+  const result = await r.launch({ onSpawn: (info) => spawns.push(info) });
+  assert.equal(result.code, 0);
+  assert.equal(result.provider_channel, 'merged-owner-stderr');
+  assert.match(result.stdout.toString('utf8'), /PROVIDER OUTPUT LINE/u);
+  assert.equal(result.stderr.length, 0);
+  assert.equal(result.termination_confirmed, true, JSON.stringify(result.detail));
+  assert.deepEqual([result.termination_report.owner_id, result.termination_report.generation, result.termination_report.live_members, result.termination_report.handshake], [r.token.owner_id, 1, 0, 'ok']);
+  assert.ok(Number.isFinite(result.termination_report.observed_at));
+  assert.equal(result.control_lines.length, 2);
+  assert.deepEqual([result.helper.path, result.helper.sha256], [r.stub.helperPath, r.stub.helperSha256]);
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].helperPath, r.stub.helperPath, 'the adapter spawns gate.helper_path');
+  assert.deepEqual(spawns[0].argv.slice(0, 4), ['--own-grok-tree', '--parent-pid', String(process.pid), '--']);
+  assert.equal(Object.hasOwn(spawns[0].env, 'GROK_SANDBOX'), false);
+  assert.equal(evaluateTerminationReport({ token: r.token, report: result.control_lines[1] }).termination_confirmed, false, 'a raw helper line never confirms on its own');
+  for (const exit of ['64', '125', '127']) {
+    const rr = stubRunner(`t-own-6-exit-${exit}`, { exit });
+    const res = await rr.launch();
+    assert.equal(res.code, Number(exit));
+    assert.equal(res.termination_confirmed, true, `exit ${exit} with a report is still a confirmed tree`);
+  }
+  const crlf = stubRunner('t-own-6-crlf', { fault: 'crlf' });
+  assert.equal((await crlf.launch()).termination_confirmed, true);
+});
+
+test('T-OWN-7: handshake-lost variants are unconfirmed whatever the exit status', async (t) => {
+  for (const [fault, expectedCode] of [['no_ready', 0], ['wrong_mechanism', 0], ['extra_line', 0], ['report_not_last', 0], ['exit_125_no_report', 125]]) {
+    const r = stubRunner(`t-own-7-${fault}`, { fault });
+    if (r.skipReason) { t.skip(r.skipReason); return; }
+    const res = await r.launch();
+    assert.equal(res.code, expectedCode, fault);
+    assert.equal(res.termination_confirmed, false, fault);
+    assert.equal(res.termination_report, null, fault);
+    assert.equal(res.detail, 'handshake_lost', `${fault}: the stub exits at once, so this is a lost handshake, never the start deadline (T-OWN-8 covers the hang)`);
+  }
+  const usage = stubRunner('t-own-7-usage');
+  const res = await usage.launch({ __argvOverride: ['--own-grok-tree', '--parent-pid', 'abc'] });
+  assert.deepEqual([res.code, res.termination_confirmed, res.detail], [64, false, 'handshake_lost']);
+});
+
+test('T-OWN-3: the record is consumed exactly once, only after every pre-spawn check, and never restored', async (t) => {
+  const r = stubRunner('t-own-3');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const mismatch = await r.launch({ expectedPreparedSpawnChain: { ...r.chain, chain_sha256: 'f'.repeat(64) } });
+  assert.equal(mismatch.preparedChainMismatch, true);
+  assert.equal(existsSync(r.recordPath), true, 'a pre-spawn failure leaves the record');
+  // the registry alone never admits: age the record past the TTL while liveOwners still holds the owner
+  assert.equal(supervisorTesting.liveOwners.has(r.token.owner_id), true);
+  const aged = supervisorTesting.createContainedRunner({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: r.stub.root, pluginRoot: r.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: r.tmpRoot, now: () => Date.now() + GROK_CONTAINMENT_TOKEN_TTL_MS + 1 });
+  await assert.rejects(() => aged.run(r.provider, ['-e', '0'], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 10000, expectedPreparedSpawnChain: r.chain, containmentToken: r.token }), /containment_owner_not_live/u);
+  assert.equal(existsSync(r.recordPath), true);
+  // consume then spawn failure: not restored
+  const r2 = stubRunner('t-own-3-spawnfail');
+  await assert.rejects(() => r2.launch({ __spawnFailure: true }), /spawn_error/u);
+  assert.equal(existsSync(r2.recordPath), false, 'consumed before the failed spawn, never restored');
+  await assert.rejects(() => r2.launch(), /containment_owner_not_live/u);
+  // the happy path consumes; a second in-process launch is refused; --release reports consumed
+  const first = await r.launch();
+  assert.equal(first.termination_confirmed, true);
+  assert.equal(existsSync(r.recordPath), false);
+  await assert.rejects(() => r.launch(), /containment_owner_not_live/u);
+  assert.deepEqual(releaseGrokContainment(r.token, { tmpRoot: r.tmpRoot }), { released: true, reason: 'consumed', owner_id: r.token.owner_id, containment_ready: false });
+  // cross-process: a child consumes, the parent is then refused. Everything the
+  // child needs travels by FILE, never on argv: a Windows command line is capped
+  // at 32767 characters and the launch env alone can exceed it.
+  const r3 = stubRunner('t-own-3-child');
+  const spec = join(r3.tmpRoot, 'child-spec.json');
+  writeFileSync(spec, JSON.stringify({ context: { platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: r3.stub.root, pluginRoot: r3.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: r3.tmpRoot }, provider: r3.provider, cwd: r3.stub.root, env: r3.launchEnv, chain: r3.chain, token: r3.token }));
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { readFileSync } from 'node:fs';
+    import { __testing } from ${JSON.stringify(pathToFileURL(join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs')).href)};
+    const spec = JSON.parse(readFileSync(process.argv[1], 'utf8'));
+    const runner = __testing.createContainedRunner(spec.context);
+    const result = await runner.run(spec.provider, ['-e', '0'], { cwd: spec.cwd, env: spec.env, timeoutMs: 10000, expectedPreparedSpawnChain: spec.chain, containmentToken: spec.token });
+    process.stdout.write(JSON.stringify({ confirmed: result.termination_confirmed }));
+  `, spec], { encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(JSON.parse(child.stdout).confirmed, true);
+  await assert.rejects(() => r3.launch(), /containment_owner_not_live/u);
+});
+
+test('T-OWN-6 (sync): runSync mirrors run for a clean launch, a timeout and an overflow, and reports onSpawn after the fact', (t) => {
+  const r = stubRunner('t-own-6-sync');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const spawns = [];
+  const res = r.runner.runSync(r.provider, ['-e', '0'], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 10000, expectedPreparedSpawnChain: r.chain, containmentToken: r.token, onSpawn: (i) => spawns.push(i) });
+  assert.deepEqual([res.code, res.termination_confirmed, res.termination_ladder, res.provider_channel], [0, true, 'sync-kill', 'merged-owner-stderr']);
+  assert.equal(spawns.length, 1);
+  assert.match(res.stdout.toString('utf8'), /PROVIDER OUTPUT LINE/u);
+  const hang = stubRunner('t-own-6-sync-timeout', { fault: 'hang_after_ready' });
+  const late = hang.runner.runSync(hang.provider, ['-e', '0'], { cwd: hang.stub.root, env: hang.launchEnv, timeoutMs: 1000, expectedPreparedSpawnChain: hang.chain, containmentToken: hang.token });
+  assert.deepEqual([late.timedOut, late.code, late.termination_confirmed], [true, 124, false]);
+  const overflow = stubRunner('t-own-6-sync-overflow', { fault: 'overflow' });
+  const big = overflow.runner.runSync(overflow.provider, ['-e', '0'], { cwd: overflow.stub.root, env: overflow.launchEnv, timeoutMs: 20000, expectedPreparedSpawnChain: overflow.chain, containmentToken: overflow.token });
+  assert.deepEqual([big.captureOverflow, big.detail, big.termination_confirmed], [true, 'capture_overflow', false]);
+});
+
+test('T-OWN-8: timeout, start deadline and overflow are unconfirmed and the group is proven gone', async (t) => {
+  const hang = stubRunner('t-own-8-hang', { fault: 'hang' });
+  if (hang.skipReason) { t.skip(hang.skipReason); return; }
+  const started = Date.now();
+  const res = await hang.launch({ timeoutMs: 20000 });
+  assert.ok(Date.now() - started < 15000, 'the 5 s start deadline fires before the 20 s timeout');
+  assert.deepEqual([res.detail, res.termination_confirmed, res.group_gone], ['start_deadline', false, process.platform === 'win32' ? null : true]);
+  const slow = stubRunner('t-own-8-timeout', { fault: 'hang_after_ready' });
+  const late = await slow.launch({ timeoutMs: 1000 });
+  assert.deepEqual([late.timedOut, late.code, late.termination_confirmed], [true, 124, false]);
+  if (process.platform !== 'win32') assert.equal(late.group_gone, true, 'isPosixProcessGroupGone proved the group empty before resolving');
+  const overflow = stubRunner('t-own-8-overflow', { fault: 'overflow' });
+  const big = await overflow.launch({ timeoutMs: 20000 });
+  assert.deepEqual([big.captureOverflow, big.detail, big.termination_confirmed], [true, 'capture_overflow', false]);
+});
+
+test('T-OWN-10/11: a non-native launcher and a sealed-chain mismatch never spawn the helper and leave the record', async (t) => {
+  const r = stubRunner('t-own-10');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const spawns = [];
+  if (process.platform !== 'win32') {
+    const shebang = join(r.stub.root, 'grok-wrapper');
+    writeFileSync(shebang, '#!/usr/bin/env node\nprocess.exit(0)\n'); chmodSync(shebang, 0o755);
+    const shebangChain = prepareSpawnChain(shebang, [], { cwd: r.stub.root, env: r.launchEnv }).prepared_spawn_chain;
+    await assert.rejects(() => r.runner.run(shebang, [], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 5000, expectedPreparedSpawnChain: shebangChain, containmentToken: r.token, onSpawn: (i) => spawns.push(i) }), (error) => error.reason === 'unsupported_prepared_chain' && error.containment_refusal?.stage === 'bridge_admission');
+  }
+  if (process.platform === 'win32') {
+    const cmd = join(r.stub.root, 'grok.cmd');
+    writeFileSync(cmd, '@echo off\r\nexit /b 0\r\n');
+    const cmdChain = prepareSpawnChain(cmd, [], { cwd: r.stub.root, env: r.launchEnv }).prepared_spawn_chain;
+    assert.notEqual(cmdChain.prepared_kind, 'direct');
+    await assert.rejects(() => r.runner.run(cmd, [], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 5000, expectedPreparedSpawnChain: cmdChain, containmentToken: r.token, onSpawn: (i) => spawns.push(i) }), (error) => error.reason === 'unsupported_prepared_chain');
+  }
+  const mismatch = await r.launch({ expectedPreparedSpawnChain: { ...r.chain, chain_sha256: 'e'.repeat(64) }, onSpawn: (i) => spawns.push(i) });
+  assert.deepEqual([mismatch.preparedChainMismatch, mismatch.code], [true, 2]);
+  assert.deepEqual(spawns, []);
+  assert.equal(existsSync(r.recordPath), true);
+});
+
+test('T-OWN-17 (adapter): a token for an inventoried-but-not-enabled platform is refused before any helper lookup', async (t) => {
+  const r = stubRunner('t-own-17-adapter', { platform: 'win32', arch: 'x64' });
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const lookups = [];
+  const production = supervisorTesting.createContainedRunner({ platform: 'win32', arch: 'x64', nativeDirectory: r.stub.root, pluginRoot: r.stub.root, tmpRoot: r.tmpRoot });   // default enabled set
+  const stat = lstatSync(r.stub.helperPath);
+  rmSync(r.stub.helperPath);   // if admission looked the helper up it would now be missing_grok_containment_helper; the pending gate must fire first
+  await assert.rejects(() => production.run(r.provider, ['-e', '0'], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 5000, expectedPreparedSpawnChain: r.chain, containmentToken: r.token, onSpawn: (i) => lookups.push(i) }),
+    (error) => error.reason === UNSUPPORTED_GROK_CONTAINMENT && error.detail === 'platform_verification_pending' && error.containment_refusal?.stage === 'bridge_admission');
+  assert.deepEqual(lookups, []);
+  assert.equal(existsSync(r.recordPath), true);
+  assert.ok(stat.isFile());
+});
+
+test('T-OWN-12 (admission): the runner accepts no helper seam', async (t) => {
+  const r = stubRunner('t-own-12-admission');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  writeFileSync(join(r.stub.root, 'SHA256SUMS'), readFileSync(join(r.stub.root, 'SHA256SUMS'), 'utf8').replace(r.stub.helperSha256, 'f'.repeat(64)));
+  for (const seams of [{ helperExists: () => true }, { helperArtifact: ARTIFACT_OK }, { helperExists: () => true, helperArtifact: ARTIFACT_OK }]) {
+    await assert.rejects(() => r.launch(seams), (error) => error.reason === GROK_CONTAINMENT_HELPER_FAILED && error.detail === 'integrity_mismatch', JSON.stringify(Object.keys(seams)));
+    assert.throws(() => r.runner.runSync(r.provider, ['-e', '0'], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 5000, expectedPreparedSpawnChain: r.chain, containmentToken: r.token, ...seams }), /integrity_mismatch/u);
+  }
+  assert.equal(existsSync(r.recordPath), true);
+});
+
+test('T-OWN-9 (admission): a helper replaced between preflight and launch is record_digest_mismatch', async (t) => {
+  const r = stubRunner('t-own-9-admit');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const bytes = readFileSync(r.stub.helperPath);
+  writeFileSync(r.stub.helperPath, Buffer.concat([bytes, Buffer.from('\n')]));
+  // re-sign the sums so SHA256SUMS matches the new bytes: only the record disagrees now
+  const digest = createHash('sha256').update(readFileSync(r.stub.helperPath)).digest('hex');
+  const sums = readFileSync(join(r.stub.root, 'SHA256SUMS'), 'utf8').replace(r.stub.helperSha256, digest);
+  writeFileSync(join(r.stub.root, 'SHA256SUMS'), sums);
+  await assert.rejects(() => r.launch(), (error) => error.reason === GROK_CONTAINMENT_HELPER_FAILED && error.detail === 'record_digest_mismatch');
+  assert.equal(existsSync(r.recordPath), true);
 });

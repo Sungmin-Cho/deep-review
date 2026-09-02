@@ -151,14 +151,11 @@ test('the recursive legacy job fetches the pinned replay history it executes', (
   assert.match(workflowStep(legacy, 'Run recursive legacy oracle'), /run:\s*npm run test:legacy/u);
 });
 
-function readChecksums(nativeRoot) {
-  const sums = new Map();
-  for (const line of readFileSync(path.join(nativeRoot, 'SHA256SUMS'), 'utf8').trim().split(/\r?\n/u)) {
-    const match = line.match(/^([a-f0-9]{64}) [ *](.+)$/u);
-    assert.ok(match, `malformed SHA256SUMS line: ${line}`);
-    sums.set(match[2], match[1]);
-  }
-  return sums;
+async function loadChecksumParser(root) {
+  const artifactModule = await import(pathToFileURL(
+    path.join(root, 'hooks', 'scripts', 'lib', 'grok-native-artifact.mjs'),
+  ).href);
+  return artifactModule.parseSha256Sums;
 }
 
 async function loadInstalledRuntime(installedRoot) {
@@ -525,6 +522,8 @@ function trustedDispatch(runtime, plan, attempts, sessions = {}) {
   };
 }
 
+const SMOKE_OWNER_ID = 'grok-containment-owner-1-7-00000005';
+
 function containedResult(stdout) {
   return {
     code: 0,
@@ -533,7 +532,7 @@ function containedResult(stdout) {
     stderr: Buffer.alloc(0),
     termination_confirmed: true,
     termination_report: {
-      owner_id: 'smoke-owner',
+      owner_id: SMOKE_OWNER_ID,
       generation: 1,
       live_members: 0,
       member_pids: [],
@@ -581,7 +580,7 @@ async function runInstalledGrok(runtime, {
   const containmentToken = runtime.supervisor.__testing.mintOwnerToken({
     platform: 'linux',
     arch: 'x64',
-    ownerId: 'smoke-owner',
+    ownerId: SMOKE_OWNER_ID,
     generation: 1,
     startedAt: 1_700_000_000_000,
   });
@@ -1753,8 +1752,10 @@ test('T-SMOKE-3: Phase 6 remains gated by synthesized approval', async () => {
   assert.equal(git(repo, ['rev-parse', 'HEAD']), headBefore);
 });
 
-test('T-PACK-1: a no-compiler packed installation loads its architecture-correct helper and completes a contained stub launch', (t) => {
-  const packedRoot = process.env.DEEP_REVIEW_PACKED_ROOT;
+test('T-PACK-1: a no-compiler packed installation loads its architecture-correct helper and completes a contained stub launch', async (t) => {
+  const artifactModule = await import(pathToFileURL(path.join(sourceRoot, 'hooks', 'scripts', 'lib', 'grok-native-artifact.mjs')).href);
+  const packedRoot = process.env.DEEP_REVIEW_PACKED_ROOT
+    || (artifactModule.nativeTreeState(path.join(sourceRoot, nativeRelativeRoot)) === 'release' ? sourceRoot : undefined);
   if (!packedRoot) {
     t.skip('D21 intentionally withholds built helpers from the source tree; T-PACK-1 runs only against a release-generated packed tree');
     return;
@@ -1767,7 +1768,9 @@ test('T-PACK-1: a no-compiler packed installation loads its architecture-correct
   const helper = path.join(nativeRoot, ...artifact.split('/'));
   assert.equal(existsSync(helper), true, `packed helper missing: ${artifact}`);
 
-  const sums = readChecksums(nativeRoot);
+  const parsedSums = (await loadChecksumParser(packedRoot))(readFileSync(path.join(nativeRoot, 'SHA256SUMS'), 'utf8'));
+  assert.equal(parsedSums.ok, true);
+  const sums = parsedSums.entries;
   assert.deepEqual([...sums.keys()].sort(), Object.values(nativeArtifacts).sort());
   for (const [relativePath, expected] of sums) {
     const actual = createHash('sha256')
@@ -1816,8 +1819,8 @@ test('T-PACK-1 provider stub emits the ran proof required by the packed helper s
 
 test('T-PACK-2: release automation builds, packs, verifies and integrity-binds both native helpers', () => {
   const manifest = JSON.parse(readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'));
-  const buildNative = manifest.scripts?.['build:native'];
-  assert.equal(typeof buildNative, 'string', 'package.json must define build:native');
+  assert.equal(manifest.scripts?.['build:native'], 'node scripts/build-native.mjs');
+  const buildNativeSource = readFileSync(path.join(sourceRoot, 'scripts', 'build-native.mjs'), 'utf8');
   for (const required of [
     'GROK_NATIVE_TARGET',
     'GROK_NATIVE_OUTPUT_ROOT',
@@ -1825,24 +1828,34 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
     'linux-x64/grok-linux-pidns-owner',
     'grok-win32-job-owner.c',
     'win32-x64/grok-win32-job-owner.exe',
+    'SHA256SUMS',
+    'NATIVE_PLACEHOLDER_DIGEST',
   ]) {
-    assert.match(buildNative, new RegExp(required.replaceAll('.', '\\.'), 'u'), `build:native misses ${required}`);
+    assert.match(buildNativeSource, new RegExp(required.replaceAll('.', '\\.'), 'u'), `build:native misses ${required}`);
   }
 
   const workflow = readFileSync(path.join(sourceRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
   const nativeTests = workflowJob(workflow, 'tests');
+  const testsHead = nativeTests.slice(0, nativeTests.indexOf('\n    steps:'));
+  assert.match(testsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ github\.workspace \}\}\/\.native-build/u);
   const linuxCompile = workflowStep(nativeTests, 'Compile Linux containment helper');
   assert.match(linuxCompile, /if:\s*runner\.os == 'Linux'/u);
-  assert.match(linuxCompile, /GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ runner\.temp \}\}\/deep-review-native-build/u);
   assert.match(linuxCompile, /run:\s*npm run build:native/u);
+  assert.doesNotMatch(linuxCompile, /^\s+env:/mu);
+  const linuxNativeTests = workflowStep(nativeTests, 'Run native tests');
+  assert.doesNotMatch(linuxNativeTests, /^\s+env:/mu);
   assertOrdered(nativeTests, 'name: Compile Linux containment helper', 'name: Run native tests', 'ubuntu compile-before-test');
 
   const windowsShards = workflowJob(workflow, 'windows-test-shards');
+  const windowsHead = windowsShards.slice(0, windowsShards.indexOf('\n    steps:'));
+  assert.match(windowsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ github\.workspace \}\}\/\.native-build/u);
   const msvcSetup = workflowStep(windowsShards, 'Set up MSVC');
   assert.match(msvcSetup, /uses:\s*ilammy\/msvc-dev-cmd@v1/u);
   const windowsCompile = workflowStep(windowsShards, 'Compile Windows containment helper');
-  assert.match(windowsCompile, /GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ runner\.temp \}\}\\deep-review-native-build/u);
   assert.match(windowsCompile, /run:\s*npm run build:native/u);
+  assert.doesNotMatch(windowsCompile, /^\s+env:/mu);
+  const windowsNativeShard = workflowStep(windowsShards, 'Run native test shard');
+  assert.doesNotMatch(windowsNativeShard, /^\s+env:/mu);
   assertOrdered(windowsShards, 'name: Set up MSVC', 'name: Compile Windows containment helper', 'MSVC setup before Windows compile');
   assertOrdered(windowsShards, 'name: Compile Windows containment helper', 'name: Run native test shard', 'Windows compile-before-test');
 
@@ -1868,23 +1881,114 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
   assert.match(verifyPacked, /sha256sum --check SHA256SUMS/u);
   assert.doesNotMatch(verifyPacked, /github\.workspace|GITHUB_WORKSPACE/iu);
 
+  const linuxPack3 = workflowStep(releaseBundle, 'Run packed-tree T-PACK-3 on Linux x86_64');
+  assert.match(linuxPack3, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\/packed-tree\/package/u);
+  assert.match(linuxPack3, /--test-name-pattern=['"]T-PACK-3['"]/u);
+  assert.match(linuxPack3, /grok-containment\.test\.js/u);
+  assert.doesNotMatch(linuxPack3, /github\.workspace|GITHUB_WORKSPACE/iu);
   const linuxSmoke = workflowStep(releaseBundle, 'Run packed-tree T-PACK-1 on Linux x86_64');
   assert.match(linuxSmoke, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\/packed-tree\/package/u);
   assert.match(linuxSmoke, /--test-name-pattern=['"]T-PACK-1['"]/u);
   assert.doesNotMatch(linuxSmoke, /github\.workspace|GITHUB_WORKSPACE/iu);
   assertOrdered(releaseBundle, 'name: Integrity-bind native helpers', 'name: Pack into an isolated release tree', 'integrity before pack');
   assertOrdered(releaseBundle, 'name: Pack into an isolated release tree', 'name: Verify packed native inventory', 'pack before packed-tree verification');
-  assertOrdered(releaseBundle, 'name: Verify packed native inventory', 'name: Run packed-tree T-PACK-1 on Linux x86_64', 'packed-tree verification before Linux smoke');
+  assertOrdered(releaseBundle, 'name: Verify packed native inventory', 'name: Run packed-tree T-PACK-3 on Linux x86_64', 'packed-tree verification before Linux T-PACK-3');
+  assertOrdered(releaseBundle, 'name: Run packed-tree T-PACK-3 on Linux x86_64', 'name: Run packed-tree T-PACK-1 on Linux x86_64', 'Linux T-PACK-3 before T-PACK-1');
 
   const windowsSmoke = workflowJob(workflow, 'release-bundle-windows-smoke');
   assert.match(windowsSmoke, /runs-on:\s*windows-latest/u);
   assert.match(windowsSmoke, /needs:\s*release-bundle/u);
   assert.match(windowsSmoke, /actions\/download-artifact@v4/u);
   assert.doesNotMatch(windowsSmoke, /actions\/checkout|npm run build:native|\bcl(?:\.exe)?\b|\bgcc\b/iu);
+  const windowsPack3 = workflowStep(windowsSmoke, 'Run packed-tree T-PACK-3 on native Windows x86_64');
+  assert.match(windowsPack3, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\\packed-tree\\package/u);
+  assert.match(windowsPack3, /--test-name-pattern=['"]T-PACK-3['"]/u);
+  assert.match(windowsPack3, /grok-containment\.test\.js/u);
+  assert.doesNotMatch(windowsPack3, /github\.workspace|GITHUB_WORKSPACE/iu);
   const nativeWindowsSmoke = workflowStep(windowsSmoke, 'Run packed-tree T-PACK-1 on native Windows x86_64');
   assert.match(nativeWindowsSmoke, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\\packed-tree\\package/u);
   assert.match(nativeWindowsSmoke, /--test-name-pattern=['"]T-PACK-1['"]/u);
   assert.doesNotMatch(nativeWindowsSmoke, /github\.workspace|GITHUB_WORKSPACE/iu);
+  assertOrdered(windowsSmoke, 'name: Extract isolated release bundle', 'name: Run packed-tree T-PACK-3 on native Windows x86_64', 'extract before Windows T-PACK-3');
+  assertOrdered(windowsSmoke, 'name: Run packed-tree T-PACK-3 on native Windows x86_64', 'name: Run packed-tree T-PACK-1 on native Windows x86_64', 'Windows T-PACK-3 before T-PACK-1');
+
+  const release = readFileSync(path.join(sourceRoot, '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.match(release, /^on:\s*\n\s*workflow_dispatch:/mu);
+  for (const job of ['verify-source', 'build-helpers', 'smoke-linux', 'smoke-windows', 'gate', 'publish']) workflowJob(release, job);
+  assert.match(workflowJob(release, 'build-helpers'), /needs:\s*verify-source/u);
+  for (const job of ['smoke-linux', 'smoke-windows']) assert.match(workflowJob(release, job), /needs:\s*\[verify-source, build-helpers\]/u, `${job} lists verify-source directly`);
+  assert.match(workflowJob(release, 'gate'), /needs:\s*\[verify-source, smoke-linux, smoke-windows\]/u);
+  assert.match(workflowJob(release, 'gate'), /environment:\s*release/u);
+  assert.match(workflowJob(release, 'publish'), /needs:\s*\[verify-source, gate\]/u);
+  assert.match(workflowJob(release, 'publish'), /permissions:\s*\n\s*contents:\s*write/u);
+  for (const job of ['verify-source', 'build-helpers', 'smoke-linux', 'smoke-windows', 'gate']) assert.doesNotMatch(workflowJob(release, job), /contents:\s*write/u, `${job} must not be able to push`);
+  for (const job of ['build-helpers', 'smoke-linux', 'smoke-windows', 'publish']) assert.match(workflowJob(release, job), /ref:\s*\$\{\{ needs\.verify-source\.outputs\.source_sha \}\}/u, `${job} checks out SOURCE_SHA`);
+  assertOrdered(workflowStep(workflowJob(release, 'verify-source'), 'Require the tag to be absent or to sit on this source commit'), 'git fetch origin', 'git rev-parse -q --verify', 'the tag is fetched from origin before it is inspected');
+  for (const job of ['smoke-linux', 'smoke-windows', 'gate', 'publish']) assert.doesNotMatch(workflowJob(release, job), /build:native|msvc-dev-cmd|mingw/u, `${job} never compiles`);
+  assert.match(workflowStep(workflowJob(release, 'build-helpers'), 'Archive the candidate'), /tar -cf .*native-candidate\.tar/u);
+  for (const job of ['smoke-linux', 'smoke-windows', 'publish']) assert.match(workflowJob(release, job), /scripts\/verify-native-candidate\.mjs/u, `${job} runs the one verifier`);
+  assert.doesNotMatch(workflowJob(release, 'smoke-windows'), /sha256sum/u);
+  const probe = workflowStep(workflowJob(release, 'smoke-linux'), 'Probe the pinned Grok CLI inside the helper');
+  assertOrdered(probe, 'curl -fsSLo install.sh', 'bash install.sh', 'installer is downloaded before it runs');
+  assertOrdered(probe, 'GROK_CLI_INSTALLER_SHA256_LINUX', 'bash install.sh', 'installer digest is checked before it runs');
+  assertOrdered(probe, 'GROK_CLI_LAUNCHER_SHA256_LINUX', 'scripts/probe-native-helper.mjs', 'launcher digest is checked before the helper probe');
+  assert.match(probe, /node --input-type=module -e/u, 'module flags precede -e');
+  for (const step of [probe, workflowStep(workflowJob(release, 'smoke-windows'), 'Probe the pinned Grok CLI inside the helper')]) {
+    for (const snippet of step.match(/--input-type=module -e '[^']*'/gu) ?? []) assert.doesNotMatch(snippet, /require\(/u, 'module-mode -e never uses require');
+  }
+  const winProbe = workflowStep(workflowJob(release, 'smoke-windows'), 'Probe the pinned Grok CLI inside the helper');
+  assertOrdered(winProbe, 'Invoke-WebRequest', 'install.ps1', 'installer downloaded before it runs');
+  assertOrdered(winProbe, 'GROK_CLI_INSTALLER_SHA256_WINDOWS', '& ./install.ps1', 'installer digest checked before it runs');
+  assert.match(winProbe, /scripts\/probe-native-helper\.mjs/u);
+  assert.doesNotMatch(winProbe, /1> |2> /u, 'no pwsh redirection of native stdio');
+  const probeScript = readFileSync(path.join(sourceRoot, 'scripts', 'probe-native-helper.mjs'), 'utf8');
+  assert.match(probeScript, /'--parent-pid', String\(process\.pid\)/u);
+  assert.match(probeScript, /parseOwnerControlLines\(run\.stdout\)/u);
+  const publish = workflowJob(release, 'publish');
+  assertOrdered(publish, 'npm pack', 'git tag -a', 'pack before tag');
+  assertOrdered(publish, 'git tag -a', 'git push origin "refs/tags/', 'tag before push');
+  assert.match(publish, /git diff --name-only "\$SOURCE_SHA" HEAD/u);
+  assert.match(publish, /\^\{tree\}/u, 'idempotent rerun compares tree hashes');
+  assert.doesNotMatch(publish, /gh release (?:upload|create)[^\n]*--clobber|git push[^\n]*(?:--force|origin main|origin HEAD)/u);
+  assert.match(publish, /BUILD-MANIFEST\.json/u);
+  assert.doesNotMatch(publish, /native\/BUILD-MANIFEST\.json/u, 'the manifest never enters the native directory');
+  assert.match(publish, /--notes-file "\$RUNNER_TEMP\/release-notes\.md"/u);
+  const attributes = readFileSync(path.join(sourceRoot, '.gitattributes'), 'utf8');
+  assert.match(attributes, /hooks\/scripts\/lib\/native\/linux-x64\/\*\* binary/u);
+  assert.match(attributes, /hooks\/scripts\/lib\/native\/win32-x64\/\*\* binary/u);
+  assert.match(attributes, /hooks\/scripts\/lib\/native\/SHA256SUMS text eol=lf/u);
+  const verifier = readFileSync(path.join(sourceRoot, 'scripts', 'verify-native-candidate.mjs'), 'utf8');
+  for (const token of ['BUILD-MANIFEST.json', 'sources', 'artifacts', 'mode', 'argv', 'SHA256SUMS', "'rev-parse', 'HEAD'"]) assert.ok(verifier.includes(token), `verifier checks ${token}`);
+});
+
+test('verify-native-candidate accepts a bound candidate and refuses every provenance mutation', () => {
+  const repo = createGitFixture('verifier checkout');
+  mkdirSync(path.join(repo, 'hooks', 'scripts', 'lib', 'native'), { recursive: true });
+  for (const s of ['grok-linux-pidns-owner.c', 'grok-win32-job-owner.c']) copyFileSync(path.join(sourceRoot, nativeRelativeRoot, s), path.join(repo, 'hooks', 'scripts', 'lib', 'native', s));
+  git(repo, ['add', '-A']); git(repo, ['commit', '-qm', 'sources']);
+  const head = git(repo, ['rev-parse', 'HEAD']).trim();
+  const extracted = path.join(fixtureRootFor(repo), 'extracted');
+  const write = (rel, bytes) => { const p = path.join(extracted, ...rel.split('/')); mkdirSync(path.dirname(p), { recursive: true }); writeFileSync(p, bytes); if (process.platform !== 'win32' && rel.startsWith('linux-x64/')) chmodSync(p, 0o755); return p; };
+  write('linux-x64/grok-linux-pidns-owner', 'linux'); write('win32-x64/grok-win32-job-owner.exe', 'win');
+  const sha = (b) => createHash('sha256').update(b).digest('hex');
+  const manifest = () => ({
+    source_sha: head,
+    sources: Object.fromEntries(['grok-linux-pidns-owner.c', 'grok-win32-job-owner.c'].map((s) => [s, sha(readFileSync(path.join(repo, 'hooks', 'scripts', 'lib', 'native', s)))])),
+    linux: { compiler: 'cc (fixture)', argv: ['cc', '-std=c11', '/x/hooks/scripts/lib/native/grok-linux-pidns-owner.c', '-o', '/out/linux-x64/grok-linux-pidns-owner'] },
+    win32: { compiler: 'gcc (fixture)', argv: ['x86_64-w64-mingw32-gcc', '-municode', '/x/hooks/scripts/lib/native/grok-win32-job-owner.c', '-o', '/out/win32-x64/grok-win32-job-owner.exe'] },
+    artifacts: { 'linux-x64/grok-linux-pidns-owner': { sha256: sha('linux'), mode: process.platform === 'win32' ? '0644' : '0755' }, 'win32-x64/grok-win32-job-owner.exe': { sha256: sha('win'), mode: '0644' } },
+  });
+  const sums = () => `${sha('linux')}  linux-x64/grok-linux-pidns-owner\n${sha('win')}  win32-x64/grok-win32-job-owner.exe\n`;
+  const run = (m, s = sums()) => { writeFileSync(path.join(extracted, 'BUILD-MANIFEST.json'), JSON.stringify(m)); writeFileSync(path.join(extracted, 'SHA256SUMS'), s); return spawnSync(process.execPath, [path.join(sourceRoot, 'scripts', 'verify-native-candidate.mjs'), extracted, repo], { encoding: 'utf8' }); };
+  assert.equal(run(manifest()).status, 0, run(manifest()).stderr);
+  const mutations = {
+    'other source sha': (m) => { m.source_sha = 'a'.repeat(40); }, 'missing source': (m) => { delete m.sources['grok-win32-job-owner.c']; }, 'extra source': (m) => { m.sources['extra.c'] = sha('x'); },
+    'extra artifact': (m) => { m.artifacts['linux-x64/other'] = { sha256: sha('o'), mode: '0755' }; }, 'wrong artifact digest': (m) => { m.artifacts['win32-x64/grok-win32-job-owner.exe'].sha256 = sha('nope'); },
+    'compiler not allowed': (m) => { m.linux.argv[0] = 'evilcc'; }, 'argv without source': (m) => { m.win32.argv = ['x86_64-w64-mingw32-gcc', '-o', '/out/win32-x64/grok-win32-job-owner.exe']; }, 'argv without output': (m) => { m.linux.argv = ['cc', '/x/hooks/scripts/lib/native/grok-linux-pidns-owner.c']; },
+  };
+  if (process.platform !== 'win32') mutations['wrong mode'] = (m) => { m.artifacts['linux-x64/grok-linux-pidns-owner'].mode = '0644'; };
+  for (const [label, mutate] of Object.entries(mutations)) { const m = manifest(); mutate(m); assert.equal(run(m).status, 1, label); }
+  assert.equal(run(manifest(), `${sha('linux')}  linux-x64/grok-linux-pidns-owner\n`).status, 1, 'sums line count');
 });
 
 test('native owner sources implement the inventoried containment mechanisms and owner handshakes without literal NUL bytes', async () => {
@@ -2021,17 +2125,17 @@ test('native owner sources implement the inventoried containment mechanisms and 
   const windowsMain = windows.slice(windows.indexOf('int wmain(int argc, wchar_t **argv)'));
   assert.match(
     windowsMain,
-    /LimitFlags\s*=\s*JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;\s*limits\.BasicLimitInformation\.LimitFlags\s*&=\s*~\(\s*JOB_OBJECT_LIMIT_BREAKAWAY_OK\s*\|\s*JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK\s*\);\s*if \(!SetInformationJobObject\(\s*job,\s*JobObjectExtendedLimitInformation,\s*&limits,\s*\(DWORD\)sizeof\(limits\)\s*\)\) \{[\s\S]{0,280}CloseHandle\(job\);\s*return 125;\s*\}/u,
+    /LimitFlags\s*=\s*JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;\s*limits\.BasicLimitInformation\.LimitFlags\s*&=\s*~\(\s*JOB_OBJECT_LIMIT_BREAKAWAY_OK\s*\|\s*JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK\s*\);\s*if \(!SetInformationJobObject\(\s*job,\s*JobObjectExtendedLimitInformation,\s*&limits,\s*\(DWORD\)sizeof\(limits\)\s*\)\) \{[\s\S]{0,280}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;\s*\}/u,
     'the Windows job limits must be passed to a checked SetInformationJobObject call',
   );
   assert.match(
     windowsMain,
-    /const BOOL created\s*=\s*CreateProcessW\(\s*NULL,\s*command_line,\s*NULL,\s*NULL,\s*TRUE,\s*CREATE_SUSPENDED \| CREATE_UNICODE_ENVIRONMENT \| EXTENDED_STARTUPINFO_PRESENT,\s*NULL,\s*NULL,\s*&startup\.StartupInfo,\s*&process\s*\);[\s\S]{0,360}if \(!created\) \{[\s\S]{0,240}CloseHandle\(job\);\s*return 125;\s*\}/u,
+    /const BOOL created\s*=\s*CreateProcessW\(\s*NULL,\s*command_line,\s*NULL,\s*NULL,\s*TRUE,\s*CREATE_SUSPENDED \| CREATE_UNICODE_ENVIRONMENT \| EXTENDED_STARTUPINFO_PRESENT,\s*NULL,\s*NULL,\s*&startup\.StartupInfo,\s*&process\s*\);[\s\S]{0,360}if \(!created\) \{[\s\S]{0,240}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;\s*\}/u,
     'the Windows provider must be created suspended with explicit stdio and creation failure must stop assignment',
   );
   assert.match(
     windowsMain,
-    /if \(ResumeThread\(process\.hThread\) == \(DWORD\)-1\) \{[\s\S]{0,240}TerminateJobObject\(job, 125U\);[\s\S]{0,160}close_process\(&process\);[\s\S]{0,160}return 125;\s*\}/u,
+    /if \(ResumeThread\(process\.hThread\) == \(DWORD\)-1\) \{[\s\S]{0,240}TerminateJobObject\(job, 125U\);[\s\S]{0,160}close_process\(&process\);[\s\S]{0,160}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;\s*\}/u,
     'resume failure must be checked and fail closed before waiting on the provider',
   );
   assertOrdered(windowsMain, 'CreateProcessW(', 'AssignProcessToJobObject(', 'Windows create before assignment');
@@ -2142,7 +2246,7 @@ test('native owners keep control stdout unreachable from provider stdio on both 
   const windowsMain = windows.slice(windows.indexOf('int wmain(int argc, wchar_t **argv)'));
   assert.match(
     windowsMain,
-    /if \(!prepare_provider_stdio\(&startup, &provider_stdio\)\) \{[\s\S]{0,280}free\(command_line\);[\s\S]{0,120}CloseHandle\(job\);[\s\S]{0,120}return 125;\s*\}/u,
+    /if \(!prepare_provider_stdio\(&startup, &provider_stdio\)\) \{[\s\S]{0,280}free\(command_line\);[\s\S]{0,120}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;\s*\}/u,
     'Windows must stop before CreateProcessW when explicit provider stdio setup fails',
   );
   assert.match(
@@ -2237,7 +2341,30 @@ test('Windows assignment failure checks termination and waits before closing pro
   const windowsMain = windows.slice(windows.indexOf('int wmain(int argc, wchar_t **argv)'));
   assert.match(
     windowsMain,
-    /if \(!AssignProcessToJobObject\(job, process\.hProcess\)\) \{[\s\S]{0,320}if \(!terminate_process_and_wait\(&process, 125U\)\) \{[\s\S]{0,240}\}[\s\S]{0,120}close_process\(&process\);/u,
+    /if \(!AssignProcessToJobObject\(job, process\.hProcess\)\) \{[\s\S]{0,320}if \(!terminate_process_and_wait\(&process, 125U\)\) \{[\s\S]{0,240}\}[\s\S]{0,120}close_process\(&process\);[\s\S]{0,160}CloseHandle\(job\);\s*(?:if \(parent != NULL\) CloseHandle\(parent\);\s*)?return 125;/u,
     'assignment failure must use terminate-and-wait before handle close',
   );
+});
+
+test('T-NATIVE-1: both helpers parse the E2d grammar and arm the parent leash', () => {
+  const linux = readFileSync(path.join(sourceRoot, nativeRelativeRoot, 'grok-linux-pidns-owner.c'), 'utf8');
+  const windows = readFileSync(path.join(sourceRoot, nativeRelativeRoot, 'grok-win32-job-owner.c'), 'utf8');
+  for (const [label, source] of [['linux', linux], ['windows', windows]]) {
+    assert.match(source, /--own-grok-tree \[--parent-pid <pid>\] \[-- command \[args\.\.\.\]\]/u, `${label}: usage string`);
+    assert.match(source, /parse_owner_arguments\(/u, `${label}: one parser function`);
+    assert.doesNotMatch(source, /argc == 2/u, `${label}: preflight is the absence of a command operand`);
+    assert.match(source, /leading zero/u, `${label}: rejects a leading zero`);
+    assert.match(source, /duplicate/u, `${label}: rejects a duplicate --parent-pid`);
+  }
+  const linuxMain = linux.slice(linux.indexOf('int main(int argc, char **argv)'));
+  assert.match(linuxMain, /if \(arguments\.parent_pid > 0\) \{\s*if \(prctl\(PR_SET_PDEATHSIG, SIGKILL\) < 0\)[\s\S]{0,200}if \(getppid\(\) != arguments\.parent_pid\)[\s\S]{0,160}return 125;/u,
+    'Linux arms PDEATHSIG in the helper and re-checks the parent before clone');
+  assert.ok(linuxMain.indexOf('PR_SET_PDEATHSIG') < linuxMain.indexOf('int clone_flags ='), 'leash precedes clone');
+  const windowsMain = windows.slice(windows.indexOf('int wmain(int argc, wchar_t **argv)'));
+  assert.ok(windowsMain.indexOf('OpenProcess(SYNCHRONIZE') < windowsMain.indexOf('CreateJobObjectW('), 'parent handle before the Job');
+  assert.match(windowsMain, /WaitForMultipleObjects\(2, wait_handles, FALSE, INFINITE\)/u, 'wait-any on provider and parent when a parent was given');
+  assert.match(windowsMain, /WaitForSingleObject\(process\.hProcess, INFINITE\)/u, 'the no-parent path keeps the single wait');
+  assert.match(windowsMain, /WAIT_OBJECT_0 \+ 1[\s\S]{0,240}TerminateJobObject\(job, 125U\)[\s\S]{0,240}wait_for_empty_job\(job\)[\s\S]{0,160}return 125;/u,
+    'parent death terminates the Job, proves it empty and exits 125 without a report');
+  assert.match(windowsMain, /CloseHandle\(parent\)/u);
 });

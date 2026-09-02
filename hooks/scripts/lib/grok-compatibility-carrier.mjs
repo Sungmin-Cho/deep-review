@@ -2,21 +2,49 @@ import { createHash } from 'node:crypto';
 
 export const GROK_CARRIER_MAX_BYTES = 65536;
 
-export const SUPPORTED_GROK_CLI_VERSIONS = new Set(['1.0.4']);
-const GROK_REQUIRED_HELP_FLAGS = Object.freeze([
-  '--cwd',
-  '--max-turns',
-  '--model',
-  '--no-memory',
-  '--no-subagents',
-  '--output-format',
-  '--permission-mode',
-  '--prompt-file',
-  '--reasoning-effort',
-  '--sandbox',
-  '--session-id',
-  '--single',
+const HELP_FLAGS_1_0_4 = Object.freeze([
+  '--cwd', '--max-turns', '--model', '--no-memory', '--no-subagents', '--output-format',
+  '--permission-mode', '--prompt-file', '--reasoning-effort', '--sandbox', '--session-id', '--single',
 ]);
+
+// One profile per allowlisted CLI version: the flags that version documents in
+// `--help`, and the flags it accepts without documenting them (proven by the
+// CLI at launch, never by this parser). Keys are in ascending semver order and
+// that order is the public `grok_supported_versions` order.
+export const GROK_CLI_PROFILES = Object.freeze({
+  '1.0.4': Object.freeze({ required_help_flags: HELP_FLAGS_1_0_4, hidden_accepted_flags: Object.freeze([]) }),
+  '1.0.13': Object.freeze({
+    required_help_flags: Object.freeze(HELP_FLAGS_1_0_4.filter((flag) => flag !== '--no-memory')),
+    hidden_accepted_flags: Object.freeze(['--no-memory']),
+  }),
+});
+
+function compareSemver(left, right) {
+  const a = left.split('.').map(Number);
+  const b = right.split('.').map(Number);
+  for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] - b[i];
+  return 0;
+}
+
+export function supportedGrokCliVersions() {
+  return Object.keys(GROK_CLI_PROFILES).sort(compareSemver);
+}
+
+export const SUPPORTED_GROK_CLI_VERSIONS = new Set(supportedGrokCliVersions());
+// Legacy alias: the 1.0.4 profile list. Tests and older callers import it.
+export const GROK_REQUIRED_HELP_FLAGS = GROK_CLI_PROFILES['1.0.4'].required_help_flags;
+
+function isVersionString(value) { return typeof value === 'string' && /^\d+\.\d+\.\d+$/u.test(value); }
+
+export function grokCliProfile(version) {
+  if (!isVersionString(version) || !Object.hasOwn(GROK_CLI_PROFILES, version)) {
+    const supported = supportedGrokCliVersions();
+    const error = new TypeError(`unsupported Grok CLI version: ${version} (supported: ${supported.join(', ')})`);
+    error.grokVersionRejection = { observed: version, supported };
+    throw error;
+  }
+  return GROK_CLI_PROFILES[version];
+}
 
 const CARRIER_KEYS = Object.freeze([
   'schema_version',
@@ -326,15 +354,16 @@ export function validateGrokCompatibilityCarrier(carrier) {
   requireDigest(carrier.executable_sha256, 'carrier.executable_sha256');
   requireSize(carrier.executable_size, 'carrier.executable_size');
   validatePreparedSpawnChain(carrier.prepared_spawn_chain);
-  if (carrier.version !== '1.0.4') throw new TypeError('carrier.version is unsupported or malformed');
+  if (!isVersionString(carrier.version)) throw new TypeError('carrier.version is unsupported or malformed');
+  const expectedFlags = grokCliProfile(carrier.version).required_help_flags;
   if (!/^[a-f0-9]+$/u.test(carrier.version_build)) throw new TypeError('carrier.version_build is malformed');
   requireDigest(carrier.version_banner_sha256, 'carrier.version_banner_sha256');
   requireDigest(carrier.help_sha256, 'carrier.help_sha256');
   requireSize(carrier.help_size, 'carrier.help_size');
   if (!Array.isArray(carrier.required_help_flags)
-      || carrier.required_help_flags.length !== GROK_REQUIRED_HELP_FLAGS.length
-      || carrier.required_help_flags.some((flag, index) => flag !== GROK_REQUIRED_HELP_FLAGS[index])) {
-    throw new TypeError('carrier.required_help_flags is incomplete or malformed');
+      || carrier.required_help_flags.length !== expectedFlags.length
+      || carrier.required_help_flags.some((flag, index) => flag !== expectedFlags[index])) {
+    throw new TypeError('carrier.required_help_flags is incomplete or malformed for this version');
   }
   bindCarrierToSealedLauncher(carrier);
   requireDigest(carrier.evidence_sha256, 'carrier.evidence_sha256');
@@ -345,30 +374,25 @@ export function validateGrokCompatibilityCarrier(carrier) {
   return carrier;
 }
 
-export function parseGrokCompatibilityStdout(text, kind) {
+export function parseGrokCompatibilityStdout(text, kind, options = {}) {
   if (typeof text !== 'string') throw new TypeError('Grok CLI stdout must be text');
   if (kind === 'version') {
     const match = /^grok (\d+\.\d+\.\d+) \(([a-f0-9]+)\)(?: \[stable\])?\s*$/u.exec(text);
     if (!match) throw new TypeError('Grok CLI version stdout is malformed');
     const [, version, versionBuild] = match;
-    if (!SUPPORTED_GROK_CLI_VERSIONS.has(version)) {
-      const supported = [...SUPPORTED_GROK_CLI_VERSIONS];
-      const error = new TypeError(
-        `unsupported Grok CLI version: ${version} (supported: ${supported.join(', ')})`,
-      );
-      error.grokVersionRejection = { observed: version, supported };
-      throw error;
-    }
+    grokCliProfile(version);
     return { version, version_build: versionBuild };
   }
   if (kind === 'help') {
-    for (const flag of GROK_REQUIRED_HELP_FLAGS) {
+    if (!isVersionString(options.version)) throw new TypeError('Grok CLI help parsing requires the parsed version');
+    const flags = grokCliProfile(options.version).required_help_flags;
+    for (const flag of flags) {
       const escaped = flag.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
       if (!new RegExp(`(?:^|[\\s,[\\(])${escaped}(?=$|[\\s,=\\]>)])`, 'mu').test(text)) {
         throw new TypeError(`Grok CLI help stdout is missing required flag ${flag}`);
       }
     }
-    return { required_help_flags: [...GROK_REQUIRED_HELP_FLAGS] };
+    return { required_help_flags: [...flags] };
   }
   throw new TypeError('Grok CLI stdout kind is invalid');
 }

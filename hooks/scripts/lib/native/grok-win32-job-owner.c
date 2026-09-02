@@ -10,10 +10,12 @@
 
 #include <windows.h>
 
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <wchar.h>
 
 /* Owner-only stdout carries the JS-authoritative "containment_ready" and
@@ -229,16 +231,70 @@ static void close_process(PROCESS_INFORMATION *process) {
   process->hProcess = NULL;
 }
 
+struct owner_arguments {
+  DWORD parent_pid;        /* 0 when --parent-pid was not given */
+  int command_argc;
+  wchar_t **command_argv;  /* NULL in preflight mode */
+};
+
+/* Grammar: --own-grok-tree [--parent-pid <pid>] [-- command [args...]].
+ * Preflight mode is the absence of a "--" command operand. Every violation
+ * is usage (64): missing value, non-decimal, zero, leading zero, sign,
+ * overflow, duplicate flag, unknown option, a bare "--" with no command. */
+static int parse_parent_pid(const wchar_t *text, DWORD *out) {
+  if (text == NULL || *text == L'\0' || *text == L'0' /* leading zero or zero */ || *text == L'+' || *text == L'-') return -1;
+  for (const wchar_t *p = text; *p != L'\0'; p += 1) if (*p < L'0' || *p > L'9') return -1;
+  errno = 0;
+  wchar_t *end = NULL;
+  const unsigned long value = wcstoul(text, &end, 10);
+  if (errno == ERANGE || end == NULL || *end != L'\0' || value == 0UL || value > 0xFFFFFFFEUL) return -1;
+  *out = (DWORD)value;
+  return 0;
+}
+
+static int parse_owner_arguments(int argc, wchar_t **argv, struct owner_arguments *out) {
+  memset(out, 0, sizeof(*out));
+  if (argc < 2 || wcscmp(argv[1], L"--own-grok-tree") != 0) return -1;
+  int have_parent = 0;
+  for (int index = 2; index < argc; index += 1) {
+    if (wcscmp(argv[index], L"--") == 0) {
+      if (index + 1 >= argc) return -1;             /* bare separator */
+      out->command_argc = argc - index - 1;
+      out->command_argv = &argv[index + 1];
+      return 0;
+    }
+    if (wcscmp(argv[index], L"--parent-pid") == 0) {
+      if (have_parent) return -1;                   /* duplicate flag */
+      if (index + 1 >= argc || parse_parent_pid(argv[index + 1], &out->parent_pid) < 0) return -1;
+      have_parent = 1;
+      index += 1;
+      continue;
+    }
+    return -1;                                      /* unknown option before "--" */
+  }
+  return 0;                                         /* preflight: no command operand */
+}
+
 int wmain(int argc, wchar_t **argv) {
-  if (argc < 2 || wcscmp(argv[1], L"--own-grok-tree") != 0
-      || (argc > 2 && wcscmp(argv[2], L"--") != 0)) {
-    fputws(L"usage: grok-win32-job-owner --own-grok-tree [-- command [args...]]\n", stderr);
+  struct owner_arguments arguments;
+  if (parse_owner_arguments(argc, argv, &arguments) < 0) {
+    fputws(L"usage: grok-win32-job-owner --own-grok-tree [--parent-pid <pid>] [-- command [args...]]\n", stderr);
     return 64;
+  }
+
+  HANDLE parent = NULL;
+  if (arguments.parent_pid != 0U) {
+    parent = OpenProcess(SYNCHRONIZE, FALSE, arguments.parent_pid);
+    if (parent == NULL) {
+      fwprintf(stderr, L"grok-win32-job-owner: OpenProcess(parent) failed: %lu\n", GetLastError());
+      return 125;
+    }
   }
 
   HANDLE job = CreateJobObjectW(NULL, NULL);
   if (job == NULL) {
     fwprintf(stderr, L"grok-win32-job-owner: CreateJobObjectW failed: %lu\n", GetLastError());
+    if (parent != NULL) CloseHandle(parent);
     return 125;
   }
 
@@ -256,10 +312,11 @@ int wmain(int argc, wchar_t **argv) {
   )) {
     fwprintf(stderr, L"grok-win32-job-owner: SetInformationJobObject failed: %lu\n", GetLastError());
     CloseHandle(job);
+    if (parent != NULL) CloseHandle(parent);
     return 125;
   }
 
-  if (argc == 2) {
+  if (arguments.command_argv == NULL) {
     emit_containment_ready();
     char discard[256];
     DWORD received = 0U;
@@ -269,17 +326,20 @@ int wmain(int argc, wchar_t **argv) {
     }
     if (!wait_for_empty_job(job)) {
       CloseHandle(job);
+      if (parent != NULL) CloseHandle(parent);
       return 125;
     }
     emit_termination_report();
     CloseHandle(job);
+    if (parent != NULL) CloseHandle(parent);
     return 0;
   }
 
-  wchar_t *command_line = build_command_line(argc - 3, &argv[3]);
+  wchar_t *command_line = build_command_line(arguments.command_argc, arguments.command_argv);
   if (command_line == NULL) {
     fputws(L"grok-win32-job-owner: command-line allocation failed\n", stderr);
     CloseHandle(job);
+    if (parent != NULL) CloseHandle(parent);
     return 125;
   }
 
@@ -291,6 +351,7 @@ int wmain(int argc, wchar_t **argv) {
     fwprintf(stderr, L"grok-win32-job-owner: prepare provider stdio failed: %lu\n", GetLastError());
     free(command_line);
     CloseHandle(job);
+    if (parent != NULL) CloseHandle(parent);
     return 125;
   }
 
@@ -312,6 +373,7 @@ int wmain(int argc, wchar_t **argv) {
   if (!created) {
     fwprintf(stderr, L"grok-win32-job-owner: CreateProcessW failed: %lu\n", create_error);
     CloseHandle(job);
+    if (parent != NULL) CloseHandle(parent);
     return 125;
   }
 
@@ -322,6 +384,7 @@ int wmain(int argc, wchar_t **argv) {
     }
     close_process(&process);
     CloseHandle(job);
+    if (parent != NULL) CloseHandle(parent);
     return 125;
   }
 
@@ -332,14 +395,32 @@ int wmain(int argc, wchar_t **argv) {
     TerminateJobObject(job, 125U);
     close_process(&process);
     CloseHandle(job);
+    if (parent != NULL) CloseHandle(parent);
     return 125;
   }
 
-  if (WaitForSingleObject(process.hProcess, INFINITE) != WAIT_OBJECT_0) {
+  DWORD waited;
+  if (parent != NULL) {
+    HANDLE wait_handles[2] = { process.hProcess, parent };
+    waited = WaitForMultipleObjects(2, wait_handles, FALSE, INFINITE);
+    if (waited == WAIT_OBJECT_0 + 1) {
+      /* The bridge is gone: nobody will read a report. Tear the tree down. */
+      TerminateJobObject(job, 125U);
+      (void)wait_for_empty_job(job);
+      close_process(&process);
+      CloseHandle(job);
+      CloseHandle(parent);
+      return 125;
+    }
+  } else {
+    waited = WaitForSingleObject(process.hProcess, INFINITE);
+  }
+  if (waited != WAIT_OBJECT_0) {
     fputws(L"grok-win32-job-owner: process wait failed\n", stderr);
     TerminateJobObject(job, 125U);
     close_process(&process);
     CloseHandle(job);
+    if (parent != NULL) CloseHandle(parent);
     return 125;
   }
 
@@ -353,10 +434,12 @@ int wmain(int argc, wchar_t **argv) {
   if (!wait_for_empty_job(job)) {
     fputws(L"grok-win32-job-owner: JobObjectBasicProcessIdList did not reach zero\n", stderr);
     CloseHandle(job);
+    if (parent != NULL) CloseHandle(parent);
     return 125;
   }
 
   emit_termination_report();
   CloseHandle(job);
+  if (parent != NULL) CloseHandle(parent);
   return provider_exit <= 255U ? (int)provider_exit : 125;
 }
