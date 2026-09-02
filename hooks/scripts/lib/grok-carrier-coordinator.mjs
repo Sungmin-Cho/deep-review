@@ -25,10 +25,12 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import {
+  GROK_CONTAINMENT_HELPER_FAILED,
   MISSING_GROK_CONTAINMENT_HELPER,
   UNSUPPORTED_GROK_CONTAINMENT,
   resolveGrokContainmentPlatform,
 } from './grok-process-supervisor.mjs';
+import { DEFAULT_PLUGIN_ROOT, evaluateHelperArtifact } from './grok-native-artifact.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   GROK_CARRIER_MAX_BYTES,
@@ -324,7 +326,7 @@ export function defaultCoordinatorHelperExists(helperPath) {
 }
 
 function containmentRefusalError({
-  reason, platform, arch, mechanism, helperPath, mode, remedy, observed, supported,
+  reason, platform, arch, mechanism, helperPath, mode, remedy, observed, supported, detail = null, helperStderr,
 }) {
   const refusal = {
     ok: false,
@@ -335,6 +337,8 @@ function containmentRefusalError({
     helper_path: helperPath,
     mode,
     remedy,
+    detail,
+    ...(helperStderr ? { helper_stderr: helperStderr } : {}),
     ...(observed ? { grok_version: observed } : {}),
     ...(supported ? { grok_supported_versions: supported } : {}),
   };
@@ -343,13 +347,19 @@ function containmentRefusalError({
   return error;
 }
 
-export function evaluateCoordinatorContainment({
-  platform = process.platform,
-  arch = process.arch,
-  helperExists = defaultCoordinatorHelperExists,
-  mode = 'review',
-} = {}) {
-  const gate = resolveGrokContainmentPlatform({ platform, arch });
+export function evaluateCoordinatorContainment(options = {}) {
+  const {
+    platform = process.platform,
+    arch = process.arch,
+    helperExists = null,
+    helperArtifact = null,
+    mode = 'review',
+    pluginRoot = DEFAULT_PLUGIN_ROOT,
+    enabledPlatforms,
+  } = options;
+  const productionMode = !Object.hasOwn(options, 'nativeDirectory');
+  const nativeDirectory = productionMode ? join(pluginRoot, 'hooks', 'scripts', 'lib', 'native') : options.nativeDirectory;
+  const gate = resolveGrokContainmentPlatform({ platform, arch, nativeDirectory, enabledPlatforms });
   if (!gate.supported) {
     throw containmentRefusalError({
       reason: UNSUPPORTED_GROK_CONTAINMENT,
@@ -359,9 +369,13 @@ export function evaluateCoordinatorContainment({
       helperPath: null,
       mode,
       remedy: 'Grok containment is not inventoried on this platform; --grok stays inactive.',
+      detail: gate.detail,
     });
   }
-  if (!helperExists(gate.helper_path)) {
+  const artifact = helperArtifact
+    ? helperArtifact(gate, { nativeDirectory, pluginRoot, productionMode })
+    : evaluateHelperArtifact(gate, { nativeDirectory, pluginRoot, productionMode });
+  if (!artifact.present || !artifact.executable || (helperExists && !helperExists(gate.helper_path))) {
     throw containmentRefusalError({
       reason: MISSING_GROK_CONTAINMENT_HELPER,
       platform: gate.platform,
@@ -370,6 +384,18 @@ export function evaluateCoordinatorContainment({
       helperPath: gate.helper_path,
       mode,
       remedy: 'The inventoried containment helper is missing or not a regular executable file.',
+    });
+  }
+  if (artifact.integrity !== 'ok') {
+    throw containmentRefusalError({
+      reason: GROK_CONTAINMENT_HELPER_FAILED,
+      platform: gate.platform,
+      arch: gate.arch,
+      mechanism: gate.mechanism,
+      helperPath: gate.helper_path,
+      mode,
+      remedy: 'The containment helper is present but failed integrity verification.',
+      detail: `integrity_${artifact.integrity}`,
     });
   }
   return gate;
@@ -417,21 +443,34 @@ function closedSchemaContainmentRefusal(stdout, mode) {
   };
 }
 
-export async function createGrokCarrierCoordinator({
-  cwd = process.cwd(),
-  mode = 'review',
-  env = process.env,
-  detectorPath = defaultDetectorPath(),
-  nodePath = process.execPath,
-  drainTimeoutMs = COORDINATOR_DRAIN_TIMEOUT_MS,
-  platform = process.platform,
-  arch = process.arch,
-  helperExists = defaultCoordinatorHelperExists,
-} = {}) {
+export async function createGrokCarrierCoordinator(options = {}) {
+  const {
+    cwd = process.cwd(),
+    mode = 'review',
+    env = process.env,
+    detectorPath = defaultDetectorPath(),
+    nodePath = process.execPath,
+    drainTimeoutMs = COORDINATOR_DRAIN_TIMEOUT_MS,
+    platform = process.platform,
+    arch = process.arch,
+    helperExists = null,
+    helperArtifact = null,
+    pluginRoot = DEFAULT_PLUGIN_ROOT,
+    enabledPlatforms,
+  } = options;
   if (!COORDINATOR_MODES.includes(mode)) {
     throw new TypeError(`coordinator mode must be one of ${COORDINATOR_MODES.join(', ')}`);
   }
-  evaluateCoordinatorContainment({ platform, arch, helperExists, mode });
+  evaluateCoordinatorContainment({
+    platform,
+    arch,
+    helperExists,
+    helperArtifact,
+    pluginRoot,
+    enabledPlatforms,
+    mode,
+    ...(Object.hasOwn(options, 'nativeDirectory') ? { nativeDirectory: options.nativeDirectory } : {}),
+  });
   const workingDirectory = resolve(cwd);
   const producer = drainProducer({
     nodePath, detectorPath, cwd: workingDirectory, env, drainTimeoutMs,

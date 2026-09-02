@@ -33,12 +33,14 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { isAbsolute, join } from 'node:path';
 import {
+  DEFAULT_NATIVE_DIRECTORY,
+  DEFAULT_PLUGIN_ROOT,
   GROK_CONTAINMENT_INVENTORY,
   NATIVE_INVENTORY_PATHS,
   NATIVE_PLACEHOLDER_DIGEST,
+  evaluateHelperArtifact,
   isNativeGrokLauncher,
   nativeTreeState,
   parseSha256Sums,
@@ -59,6 +61,12 @@ export const GROK_CONTAINMENT_PROTOCOL_VERSION = '1.0';
 // and `review-synthesis.mjs` reads it terminally.
 export const UNSUPPORTED_GROK_CONTAINMENT = 'unsupported_grok_containment';
 export const MISSING_GROK_CONTAINMENT_HELPER = 'missing_grok_containment_helper';
+export const GROK_CONTAINMENT_HELPER_FAILED = 'grok_containment_helper_failed';
+const ENABLED_PLATFORM_SET = new Set(['linux/x64']);
+export const GROK_ENABLED_PLATFORMS = Object.freeze([...ENABLED_PLATFORM_SET]);
+export function isGrokPlatformEnabled(key, enabledPlatforms) {
+  return (enabledPlatforms ? new Set(enabledPlatforms) : ENABLED_PLATFORM_SET).has(key);
+}
 
 export const GROK_LIFECYCLE_UNCONFIRMED = 'lifecycle_unconfirmed';
 export const GROK_INVALID_LIFECYCLE = 'invalid_grok_process_lifecycle';
@@ -66,8 +74,6 @@ export const GROK_INVALID_LIFECYCLE = 'invalid_grok_process_lifecycle';
 // D20's bounded owner-handshake polling.
 export const GROK_TREE_POLL_MS = 10;
 export const GROK_TREE_HARD_DEADLINE_MS = 1000;
-
-const NATIVE_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), 'native');
 
 function containmentError(reason, detail) {
   const error = new Error(`ERROR_GROK_CONTAINMENT: ${reason}${detail ? ` — ${detail}` : ''}`);
@@ -84,7 +90,8 @@ function containmentError(reason, detail) {
 export function resolveGrokContainmentPlatform({
   platform = process.platform,
   arch = process.arch,
-  nativeDirectory = NATIVE_DIRECTORY,
+  nativeDirectory = DEFAULT_NATIVE_DIRECTORY,
+  enabledPlatforms,
 } = {}) {
   const key = `${platform}/${arch}`;
   const entry = Object.hasOwn(GROK_CONTAINMENT_INVENTORY, key)
@@ -96,10 +103,26 @@ export function resolveGrokContainmentPlatform({
       platform,
       arch,
       supported: false,
+      inventoried: false,
       reason: UNSUPPORTED_GROK_CONTAINMENT,
+      detail: null,
       mechanism: null,
       helper_path: null,
       source: null,
+    });
+  }
+  if (!isGrokPlatformEnabled(key, enabledPlatforms)) {
+    return Object.freeze({
+      key,
+      platform,
+      arch,
+      supported: false,
+      inventoried: true,
+      reason: UNSUPPORTED_GROK_CONTAINMENT,
+      detail: 'platform_verification_pending',
+      mechanism: entry.mechanism,
+      helper_path: join(nativeDirectory, ...entry.helper.split('/')),
+      source: entry.source,
     });
   }
   return Object.freeze({
@@ -107,7 +130,9 @@ export function resolveGrokContainmentPlatform({
     platform,
     arch,
     supported: true,
+    inventoried: true,
     reason: null,
+    detail: null,
     mechanism: entry.mechanism,
     helper_path: join(nativeDirectory, ...entry.helper.split('/')),
     source: entry.source,
@@ -147,7 +172,7 @@ function tokenSeal(record) {
 
 function mintOwnerToken({ platform, arch, ownerId, generation, startedAt, nativeDirectory }) {
   const gate = resolveGrokContainmentPlatform({ platform, arch, nativeDirectory });
-  if (!gate.supported) throw containmentError(UNSUPPORTED_GROK_CONTAINMENT, gate.key);
+  if (!gate.inventoried) throw containmentError(UNSUPPORTED_GROK_CONTAINMENT, gate.key);
   const record = {
     protocol_version: GROK_CONTAINMENT_PROTOCOL_VERSION,
     containment_ready: true,
@@ -155,7 +180,7 @@ function mintOwnerToken({ platform, arch, ownerId, generation, startedAt, native
     generation,
     platform: gate.platform,
     arch: gate.arch,
-    mechanism: gate.mechanism,
+    mechanism: GROK_CONTAINMENT_INVENTORY[gate.key].mechanism,
     helper_path: gate.helper_path,
     started_at: startedAt,
   };
@@ -179,7 +204,7 @@ export function assertContainmentReadyToken(token) {
     throw containmentError('invalid_containment_ready_token', 'generation must be a positive integer');
   }
   const gate = resolveGrokContainmentPlatform({ platform: token.platform, arch: token.arch });
-  if (!gate.supported || token.mechanism !== gate.mechanism) {
+  if (!gate.inventoried || token.mechanism !== GROK_CONTAINMENT_INVENTORY[gate.key].mechanism) {
     throw containmentError(UNSUPPORTED_GROK_CONTAINMENT, `${token.platform}/${token.arch} is not an inventoried containment platform`);
   }
   if (typeof token.helper_path !== 'string' || token.helper_path.length === 0
@@ -212,17 +237,19 @@ export function isGrokContainmentOwnerLive(token) {
   return owner !== undefined && owner.generation === token.generation;
 }
 
-function refusal({ platform, arch, reason, gate }) {
+function refusal({ platform, arch, reason, gate, detail, helperStderr }) {
   return Object.freeze({
     ok: false,
     containment_ready: false,
     containment_ready_token: null,
     reason,
+    detail: detail ?? gate?.detail ?? null,
     platform,
     arch,
     mechanism: gate?.supported ? gate.mechanism : null,
     helper_path: gate?.supported ? gate.helper_path : null,
     owner_id: null,
+    ...(helperStderr !== undefined ? { helper_stderr: helperStderr } : {}),
   });
 }
 
@@ -230,27 +257,25 @@ function refusal({ platform, arch, reason, gate }) {
 // classification and before privacy, fingerprint, UUID, prompt composition and
 // provider launch. It issues an owner-bound token on success and none on
 // refusal; a refusal produces zero executable lookup and zero child.
-export function preflightGrokContainment({
-  platform = process.platform,
-  arch = process.arch,
-  nativeDirectory = NATIVE_DIRECTORY,
-  now = () => Date.now(),
-  ownerIdGenerator = defaultOwnerId,
-  helperExists = existsSync,
-  // The side-effecting dependencies. Production supplies none of them, so the
-  // default owner-start is itself a refusal: without an inventoried artifact
-  // there is nothing to start, and a JS-only owner is not a boundary.
-  executableResolver = (helperPath) => helperPath,
-  helperSpawner = () => null,
-} = {}) {
-  const gate = resolveGrokContainmentPlatform({ platform, arch, nativeDirectory });
-  if (!gate.supported) {
-    return refusal({ platform, arch, reason: UNSUPPORTED_GROK_CONTAINMENT, gate });
-  }
-  // The helper is loaded or the launch is refused. There is no fallback owner,
-  // because a JS-only owner is not a containment boundary.
-  if (!helperExists(gate.helper_path)) {
+export function preflightGrokContainment(options = {}) {
+  const {
+    platform = process.platform, arch = process.arch, pluginRoot = DEFAULT_PLUGIN_ROOT,
+    now = () => Date.now(), ownerIdGenerator = defaultOwnerId, helperExists = null, helperArtifact = null,
+    executableResolver = (helperPath) => helperPath, helperSpawner = () => null,
+    enabledPlatforms,
+  } = options;
+  const productionMode = !Object.hasOwn(options, 'nativeDirectory');
+  const nativeDirectory = productionMode ? join(pluginRoot, 'hooks', 'scripts', 'lib', 'native') : options.nativeDirectory;
+  const gate = resolveGrokContainmentPlatform({ platform, arch, nativeDirectory, enabledPlatforms });
+  if (!gate.supported) return refusal({ platform, arch, reason: UNSUPPORTED_GROK_CONTAINMENT, gate });
+  const artifact = helperArtifact
+    ? helperArtifact(gate, { nativeDirectory, pluginRoot, productionMode })
+    : evaluateHelperArtifact(gate, { nativeDirectory, pluginRoot, productionMode });
+  if (!artifact.present || !artifact.executable || (helperExists && !helperExists(gate.helper_path))) {
     return refusal({ platform, arch, reason: MISSING_GROK_CONTAINMENT_HELPER, gate });
+  }
+  if (artifact.integrity !== 'ok') {
+    return refusal({ platform, arch, reason: GROK_CONTAINMENT_HELPER_FAILED, gate, detail: `integrity_${artifact.integrity}` });
   }
   const helperExecutable = executableResolver(gate.helper_path);
   if (typeof helperExecutable !== 'string' || helperExecutable.length === 0) {
@@ -265,17 +290,7 @@ export function preflightGrokContainment({
   const startedAt = now();
   const token = mintOwnerToken({ platform, arch, ownerId, generation, startedAt, nativeDirectory });
   liveOwners.set(ownerId, { generation, mechanism: gate.mechanism, helper_path: gate.helper_path, started_at: startedAt });
-  return Object.freeze({
-    ok: true,
-    containment_ready: true,
-    containment_ready_token: token,
-    reason: null,
-    platform: gate.platform,
-    arch: gate.arch,
-    mechanism: gate.mechanism,
-    helper_path: gate.helper_path,
-    owner_id: ownerId,
-  });
+  return Object.freeze({ ok: true, containment_ready: true, containment_ready_token: token, reason: null, platform: gate.platform, arch: gate.arch, mechanism: gate.mechanism, helper_path: gate.helper_path, owner_id: ownerId });
 }
 
 export function releaseGrokContainment(token, { reason = 'no_launch' } = {}) {

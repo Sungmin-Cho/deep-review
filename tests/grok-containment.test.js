@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -30,8 +31,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import {
+  GROK_CONTAINMENT_HELPER_FAILED,
   GROK_CONTAINMENT_INVENTORY,
   GROK_CONTAINMENT_PROTOCOL_VERSION,
+  GROK_ENABLED_PLATFORMS,
   GROK_INVALID_LIFECYCLE,
   GROK_LIFECYCLE_UNCONFIRMED,
   GROK_TREE_HARD_DEADLINE_MS,
@@ -41,6 +44,7 @@ import {
   evaluateContainedLaunchAdmission,
   evaluateTerminationReport,
   isGrokContainmentPlatformSupported,
+  isGrokPlatformEnabled,
   preflightGrokContainment,
   releaseGrokContainment,
   resolveGrokContainmentPlatform,
@@ -59,9 +63,14 @@ import { synthesizeReviewRound } from '../hooks/scripts/review-synthesis.mjs';
 import {
   NATIVE_INVENTORY_PATHS,
   NATIVE_PLACEHOLDER_DIGEST,
+  evaluateHelperArtifact,
   nativeTreeState,
   parseSha256Sums,
 } from '../hooks/scripts/lib/grok-native-artifact.mjs';
+import {
+  createGrokCarrierCoordinator,
+  evaluateCoordinatorContainment,
+} from '../hooks/scripts/lib/grok-carrier-coordinator.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const BASELINE_COMMIT = '1c3ef2d';
@@ -69,6 +78,12 @@ const HOST_CONTAINMENT_GATE = resolveGrokContainmentPlatform();
 const SUPPORTED_HERE = HOST_CONTAINMENT_GATE.supported;
 const PLATFORM_SKIP = `${HOST_CONTAINMENT_GATE.key} is not a Grok containment platform`;
 const HELPER_SKIP = 'the inventoried native containment helpers are not present in this tree';
+const LINUX = { platform: 'linux', arch: 'x64' };
+const ALL_INVENTORIED = ['linux/x64', 'win32/x64'];
+function gateFor(nativeDirectory, { platform = 'linux', arch = 'x64', enabledPlatforms = ALL_INVENTORIED } = {}) {
+  return resolveGrokContainmentPlatform({ platform, arch, nativeDirectory, enabledPlatforms });
+}
+const ARTIFACT_OK = () => ({ present: true, executable: true, integrity: 'ok', helper_sha256: 'a'.repeat(64), real_path: '/fixture/helper', detail: null });
 
 function workspace(label) {
   return mkdtempSync(join(tmpdir(), `deep-review-${label}-`));
@@ -116,20 +131,33 @@ test('resolveGrokContainmentPlatform refuses every unsupported platform/arch pai
   for (const [platform, arch] of unsupported) {
     const gate = resolveGrokContainmentPlatform({ platform, arch });
     assert.equal(gate.supported, false, `${platform}/${arch} must not be a containment platform`);
+    assert.equal(gate.inventoried, false, `${platform}/${arch} is not inventoried`);
     assert.equal(gate.reason, UNSUPPORTED_GROK_CONTAINMENT, `${platform}/${arch}`);
+    assert.equal(gate.detail, null, `${platform}/${arch}`);
     assert.equal(gate.mechanism, null);
     assert.equal(gate.helper_path, null);
   }
-  for (const [platform, arch, mechanism] of [
-    ['linux', 'x64', 'pid-namespace'],
-    ['win32', 'x64', 'job-object'],
-  ]) {
-    const gate = resolveGrokContainmentPlatform({ platform, arch });
-    assert.equal(gate.supported, true, `${platform}/${arch} is a declared containment platform`);
-    assert.equal(gate.reason, null);
-    assert.equal(gate.mechanism, mechanism);
-    assert.equal(typeof gate.helper_path, 'string');
-  }
+  const linux = resolveGrokContainmentPlatform({ platform: 'linux', arch: 'x64' });
+  assert.equal(linux.supported, true, 'linux/x64 is enabled');
+  assert.equal(linux.inventoried, true);
+  assert.equal(linux.reason, null);
+  assert.equal(linux.detail, null);
+  assert.equal(linux.mechanism, 'pid-namespace');
+  assert.equal(typeof linux.helper_path, 'string');
+  const winPending = resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64' });
+  assert.equal(winPending.supported, false, 'win32/x64 is inventoried but not enabled');
+  assert.equal(winPending.inventoried, true);
+  assert.equal(winPending.reason, UNSUPPORTED_GROK_CONTAINMENT);
+  assert.equal(winPending.detail, 'platform_verification_pending');
+  assert.equal(winPending.mechanism, 'job-object');
+  const winEnabled = resolveGrokContainmentPlatform({
+    platform: 'win32', arch: 'x64', enabledPlatforms: ALL_INVENTORIED,
+  });
+  assert.equal(winEnabled.supported, true, 'win32/x64 is supported only when enabledPlatforms admits it');
+  assert.equal(winEnabled.inventoried, true);
+  assert.equal(winEnabled.reason, null);
+  assert.equal(winEnabled.detail, null);
+  assert.equal(winEnabled.mechanism, 'job-object');
 });
 
 function linkFile(target, path) {
@@ -251,7 +279,7 @@ test('an unsupported platform and a supported platform with no loadable artifact
   assert.equal(macos.mechanism, null);
 
   for (const [platform, arch] of [['linux', 'x64'], ['win32', 'x64']]) {
-    const supported = preflightGrokContainment({ platform, arch });
+    const supported = preflightGrokContainment({ platform, arch, enabledPlatforms: ALL_INVENTORIED });
     assert.equal(supported.ok, false, 'the inventoried helper is not in this tree');
     assert.equal(supported.reason, 'missing_grok_containment_helper');
     assert.equal(supported.containment_ready_token, null);
@@ -270,7 +298,7 @@ test('an unsupported-platform preflight observes zero executable lookup and zero
     // executable lookup touches none of them.
     executableResolver: (name) => { events.push(`lookup ${name}`); return null; },
     helperSpawner: (...args) => { events.push(`child ${JSON.stringify(args)}`); return null; },
-    ownerIdGenerator: () => { events.push('owner'); return 'owner-x'; },
+    ownerIdGenerator: () => { events.push('owner'); return 'grok-containment-owner-1-1-0000000a'; },
   });
   assert.equal(preflight.ok, false);
   assert.deepEqual(events, []);
@@ -406,10 +434,10 @@ test('a live retained owner still cannot launch on a host that cannot contain th
   const preflight = preflightGrokContainment({
     platform: 'linux',
     arch: 'x64',
-    helperExists: () => true,
+    helperArtifact: ARTIFACT_OK,
     executableResolver: (helperPath) => helperPath,
     helperSpawner: () => ({ ok: true }),
-    ownerIdGenerator: () => 'owner-live-on-foreign-host',
+    ownerIdGenerator: () => 'grok-containment-owner-1-2-0000000b',
     now: () => 4242,
   });
   assert.equal(preflight.ok, true, 'the owner registry accepted a real supported-platform owner');
@@ -432,7 +460,7 @@ test('the contained-launch admission refuses an uncontainable host, a foreign to
   assert.equal(evaluateContainedLaunchAdmission({ ...all, hostGate: macosGate }).reason, UNSUPPORTED_GROK_CONTAINMENT);
   assert.equal(evaluateContainedLaunchAdmission({
     ...all,
-    hostGate: resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64' }),
+    hostGate: resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64', enabledPlatforms: ALL_INVENTORIED }),
   }).reason, 'foreign_containment_owner');
   assert.equal(evaluateContainedLaunchAdmission({ ...all, ownerLive: false }).reason, 'containment_owner_not_live');
   assert.equal(evaluateContainedLaunchAdmission({ ...all, helperPresent: false }).reason, 'missing_grok_containment_helper');
@@ -1151,4 +1179,108 @@ test('the replay harness observes a mutation planted in the pinned baseline', as
   const mutated = runMatrix(await loadCarriers(mutatedRoot));
   const observed = baseline.filter((row, index) => row !== mutated[index]);
   assert.ok(observed.length > 0, 'the positive control must be visible to the diff');
+});
+
+test('T-OWN-17: an inventoried platform outside GROK_ENABLED_PLATFORMS is refused before helper lookup', () => {
+  assert.deepEqual([...GROK_ENABLED_PLATFORMS], ['linux/x64']);
+  assert.equal(Object.isFrozen(GROK_ENABLED_PLATFORMS), true);
+  assert.equal(typeof GROK_ENABLED_PLATFORMS.add, 'undefined', 'the public value is an array, not a mutable Set');
+  assert.throws(() => { GROK_ENABLED_PLATFORMS.push('win32/x64'); }, TypeError);
+  assert.equal(isGrokPlatformEnabled('win32/x64'), false);
+  assert.equal(isGrokPlatformEnabled('linux/x64'), true);
+  for (const key of GROK_ENABLED_PLATFORMS) assert.ok(Object.hasOwn(GROK_CONTAINMENT_INVENTORY, key));
+  const lookups = [];
+  const win = preflightGrokContainment({ platform: 'win32', arch: 'x64', executableResolver: (p) => { lookups.push(p); return p; }, helperSpawner: () => ({ ok: true }) });
+  assert.equal(win.ok, false);
+  assert.equal(win.reason, UNSUPPORTED_GROK_CONTAINMENT);
+  assert.equal(win.detail, 'platform_verification_pending');
+  assert.deepEqual(lookups, []);
+  const artifactCalls = [];
+  assert.throws(() => evaluateCoordinatorContainment({ platform: 'win32', arch: 'x64', helperArtifact: (...a) => { artifactCalls.push(a); return ARTIFACT_OK(); } }),
+    (error) => error.containment_refusal?.reason === UNSUPPORTED_GROK_CONTAINMENT && error.containment_refusal?.detail === 'platform_verification_pending');
+  assert.deepEqual(artifactCalls, [], 'zero helper lookup at the coordinator for a pending platform');
+  const gate = resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64' });
+  assert.deepEqual([gate.supported, gate.inventoried, gate.detail, gate.mechanism], [false, true, 'platform_verification_pending', 'job-object']);
+  // a token can be minted and asserted for an inventoried-but-not-enabled pair (inventory-bound), yet the preflight refuses it
+  const winToken = supervisorTesting.mintOwnerToken({ platform: 'win32', arch: 'x64', ownerId: 'grok-containment-owner-1-1-0000000c', generation: 1, startedAt: 1 });
+  assert.equal(assertContainmentReadyToken(winToken).mechanism, 'job-object');
+  const enabled = resolveGrokContainmentPlatform({ platform: 'win32', arch: 'x64', enabledPlatforms: ALL_INVENTORIED });
+  assert.equal(enabled.supported, true);
+  assert.deepEqual(resolveGrokContainmentPlatform({ platform: 'darwin', arch: 'arm64' }).inventoried, false);
+});
+
+test('T-OWN-9: evaluateHelperArtifact names every integrity state and never follows a symlink', (t) => {
+  const good = nativeFixture('t-own-9-ok').root;
+  const ok = evaluateHelperArtifact(gateFor(good), { nativeDirectory: good, pluginRoot: good });
+  assert.deepEqual([ok.present, ok.executable, ok.integrity], [true, true, 'ok']);
+  assert.match(ok.helper_sha256, /^[a-f0-9]{64}$/u);
+  const cases = [
+    ['mismatch', { sums: 'wrong' }], ['sums_missing', { sums: 'absent' }], ['sums_malformed', { sums: 'truncated' }],
+    ['sums_malformed', { extra: 'linux-x64/other' }], ['not_listed', { hostPlaceholder: true }], ['sums_symlink', { symlinkSums: true }],
+  ];
+  for (const [expected, options] of cases) {
+    const fixture = nativeFixture(`t-own-9-${expected}-${Math.random().toString(16).slice(2, 6)}`, options);
+    if (fixture.skipped) { t.diagnostic(`${expected}: file symlinks need elevation; skipped`); continue; }
+    assert.equal(evaluateHelperArtifact(gateFor(fixture.root), { nativeDirectory: fixture.root, pluginRoot: fixture.root }).integrity, expected, expected);
+  }
+  const sym = nativeFixture('t-own-9-symlink-helper', { symlinkHelper: true });
+  if (!sym.skipped) assert.equal(evaluateHelperArtifact(gateFor(sym.root), { nativeDirectory: sym.root, pluginRoot: sym.root }).present, false);
+  // a symlinked/junctioned platform directory component under a real native dir
+  const comp = nativeFixture('t-own-9-symlink-dir').root;
+  renameSync(join(comp, 'linux-x64'), join(comp, 'real-linux'));
+  linkDirectory(join(comp, 'real-linux'), join(comp, 'linux-x64'));
+  assert.equal(evaluateHelperArtifact(gateFor(comp), { nativeDirectory: comp, pluginRoot: comp }).integrity, 'symlink_component');
+  // the native directory itself is a link: the component walk from the plugin root sees it before any realpath
+  const plugin = workspace('t-own-9-plugin');
+  const realNative = nativeFixture('t-own-9-real-native').root;
+  linkDirectory(realNative, join(plugin, 'native'));
+  assert.equal(evaluateHelperArtifact(gateFor(join(plugin, 'native')), { nativeDirectory: join(plugin, 'native'), pluginRoot: plugin }).integrity, 'symlink_component');
+  // a native directory that is not under the plugin root at all
+  const elsewhere = nativeFixture('t-own-9-elsewhere').root;
+  assert.equal(evaluateHelperArtifact(gateFor(elsewhere), { nativeDirectory: elsewhere, pluginRoot: workspace('t-own-9-other-root') }).integrity, 'outside_root');
+  // production mode requires the release polarity; the same one-helper root is fine for a test locator
+  const oneHelper = nativeFixture('t-own-9-one-helper', { win: false }).root;
+  assert.equal(evaluateHelperArtifact(gateFor(oneHelper), { nativeDirectory: oneHelper, pluginRoot: oneHelper, productionMode: true }).integrity, 'not_release');
+  assert.equal(evaluateHelperArtifact(gateFor(oneHelper), { nativeDirectory: oneHelper, pluginRoot: oneHelper }).integrity, 'ok');
+});
+
+test('T-OWN-9: the coordinator and the preflight refuse integrity failures, and production mode refuses a one-helper root', () => {
+  const bad = nativeFixture('t-own-9-coord', { sums: 'wrong' }).root;
+  assert.throws(
+    () => evaluateCoordinatorContainment({ ...LINUX, nativeDirectory: bad, pluginRoot: bad }),
+    (error) => error.containment_refusal?.reason === GROK_CONTAINMENT_HELPER_FAILED && error.containment_refusal?.detail === 'integrity_mismatch',
+  );
+  const preflight = preflightGrokContainment({ ...LINUX, nativeDirectory: bad, pluginRoot: bad });
+  assert.deepEqual([preflight.ok, preflight.reason, preflight.detail, preflight.containment_ready_token], [false, GROK_CONTAINMENT_HELPER_FAILED, 'integrity_mismatch', null]);
+  const absent = workspace('t-own-9-absent');
+  assert.equal(preflightGrokContainment({ ...LINUX, nativeDirectory: absent, pluginRoot: absent }).reason, 'missing_grok_containment_helper');
+  // production mode: no nativeDirectory supplied, but the plugin root is pointed at a fixture whose native tree is a one-helper root
+  const fixturePlugin = workspace('t-own-9-prod-plugin');
+  mkdirSync(join(fixturePlugin, 'hooks', 'scripts', 'lib'), { recursive: true });
+  renameSync(nativeFixture('t-own-9-prod-native', { win: false }).root, join(fixturePlugin, 'hooks', 'scripts', 'lib', 'native'));
+  const prod = preflightGrokContainment({ ...LINUX, pluginRoot: fixturePlugin, helperSpawner: () => ({ ok: true }) });
+  assert.equal(prod.reason, GROK_CONTAINMENT_HELPER_FAILED);
+  assert.equal(prod.detail, 'integrity_not_release');
+  assert.throws(() => evaluateCoordinatorContainment({ ...LINUX, pluginRoot: fixturePlugin }), (error) => error.containment_refusal?.detail === 'integrity_not_release');
+  // the same tree accepted through the test locator
+  const native = join(fixturePlugin, 'hooks', 'scripts', 'lib', 'native');
+  assert.equal(preflightGrokContainment({ ...LINUX, nativeDirectory: native, pluginRoot: fixturePlugin, helperSpawner: () => ({ ok: true }) }).ok, true);
+});
+
+test('T-OWN-12: integrity runs on the production default path; only helperArtifact bypasses it', async () => {
+  const production = preflightGrokContainment();
+  assert.equal(production.ok, false);
+  assert.ok([UNSUPPORTED_GROK_CONTAINMENT, 'missing_grok_containment_helper'].includes(production.reason), production.reason);
+  const bad = nativeFixture('t-own-12', { sums: 'wrong' }).root;
+  assert.throws(
+    () => evaluateCoordinatorContainment({ ...LINUX, nativeDirectory: bad, pluginRoot: bad, helperExists: () => true }),
+    (error) => error.containment_refusal?.detail === 'integrity_mismatch',
+    'an injected helperExists alone does not skip integrity',
+  );
+  assert.equal(evaluateCoordinatorContainment({ ...LINUX, nativeDirectory: bad, pluginRoot: bad, helperArtifact: ARTIFACT_OK }).supported, true);
+  // createGrokCarrierCoordinator with neither seam consults SHA256SUMS before spawning the detector
+  await assert.rejects(
+    () => createGrokCarrierCoordinator({ cwd: workspace('t-own-12-cwd'), mode: 'review', ...LINUX, nativeDirectory: bad, pluginRoot: bad, detectorPath: join(bad, 'never-run.mjs') }),
+    (error) => error.containment_refusal?.detail === 'integrity_mismatch',
+  );
 });

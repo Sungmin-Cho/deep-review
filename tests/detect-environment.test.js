@@ -57,6 +57,15 @@ async function loadGitModule() {
   return import(gitModuleUrl);
 }
 
+const ARTIFACT_OK = () => ({
+  present: true,
+  executable: true,
+  integrity: 'ok',
+  helper_sha256: 'a'.repeat(64),
+  real_path: '/fixture/helper',
+  detail: null,
+});
+
 function isolatedEnvironment(overrides = {}) {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
@@ -950,7 +959,7 @@ test('the coordinator drain fails closed across the negative frame matrix, with 
     await assert.rejects(
       () => createGrokCarrierCoordinator({
         cwd: repo, mode: 'review', env, detectorPath, drainTimeoutMs: 5000,
-        platform: 'linux', arch: 'x64', helperExists: () => true,
+        platform: 'linux', arch: 'x64', helperArtifact: ARTIFACT_OK,
       }),
       expected,
       `${label} must fail closed`,
@@ -965,7 +974,7 @@ test('the coordinator drain fails closed across the negative frame matrix, with 
   await assert.rejects(
     () => createGrokCarrierCoordinator({
       cwd: repo, mode: 'review', env, detectorPath: stalled, drainTimeoutMs: 400,
-      platform: 'linux', arch: 'x64', helperExists: () => true,
+      platform: 'linux', arch: 'x64', helperArtifact: ARTIFACT_OK,
     }),
     /deadline/u,
   );
@@ -981,7 +990,7 @@ test('the coordinator drain fails closed across the negative frame matrix, with 
   await assert.rejects(
     () => createGrokCarrierCoordinator({
       cwd: repo, mode: 'review', env, detectorPath: swapped, drainTimeoutMs: 5000,
-      platform: 'linux', arch: 'x64', helperExists: () => true,
+      platform: 'linux', arch: 'x64', helperArtifact: ARTIFACT_OK,
     }),
     /carrier|identity|evidence/u,
   );
@@ -1289,6 +1298,7 @@ test('coordinator startup refuses missing, directory, symlink, and non-executabl
         platform: 'linux',
         arch: 'x64',
         helperExists: () => defaultCoordinatorHelperExists(helperPath),
+        helperArtifact: ARTIFACT_OK,
         detectorPath: join(root, 'unused.mjs'),
       }),
       (error) => {
@@ -1430,7 +1440,7 @@ test('missing carrier frame with closed-schema stdout becomes containment_refusa
       detectorPath,
       platform: 'linux',
       arch: 'x64',
-      helperExists: () => true,
+      helperArtifact: ARTIFACT_OK,
       drainTimeoutMs: 5000,
     }),
     (error) => error.containment_refusal?.reason === 'incompatible_grok_cli',
@@ -1453,7 +1463,7 @@ test('missing carrier frame with closed-schema stdout becomes containment_refusa
       detectorPath: versionDetector,
       platform: 'linux',
       arch: 'x64',
-      helperExists: () => true,
+      helperArtifact: ARTIFACT_OK,
       drainTimeoutMs: 5000,
     }),
     (error) => {
@@ -1479,7 +1489,7 @@ test('closed-schema stdout with nonzero process A exit is not laundered (T10)', 
       detectorPath,
       platform: 'linux',
       arch: 'x64',
-      helperExists: () => true,
+      helperArtifact: ARTIFACT_OK,
       drainTimeoutMs: 5000,
     }),
     (error) => !error.containment_refusal && /exited with code 2|carrier frame is missing/u.test(error.message),

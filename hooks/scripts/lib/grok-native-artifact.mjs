@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { accessSync, constants as fsConstants, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const GROK_CONTAINMENT_INVENTORY = Object.freeze({
   'linux/x64': Object.freeze({
@@ -101,4 +102,70 @@ export function isNativeGrokLauncher(chain) {
   if (!chain || typeof chain !== 'object') return false;
   if (chain.prepared_kind !== 'direct' || chain.shebang !== null) return false;
   return chain.posix_executable_type === null || /^native-/u.test(String(chain.posix_executable_type));
+}
+
+const HELPER_MAX_BYTES = 4 * 1024 * 1024;
+// <root>/hooks/scripts/lib/grok-native-artifact.mjs -> <root>
+export const DEFAULT_PLUGIN_ROOT = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))));
+export const DEFAULT_NATIVE_DIRECTORY = join(DEFAULT_PLUGIN_ROOT, 'hooks', 'scripts', 'lib', 'native');
+
+function canonical(path) { try { return realpathSync.native(path); } catch { return null; } }
+
+// lstat every component of `relativePath` below `base`, in order; the first
+// symlink or junction wins. Never realpath here: canonicalising first would
+// erase exactly the component this walk exists to see.
+function walkNoSymlink(base, relativePath) {
+  let current = base;
+  for (const segment of relativePath.split(/[\\/]/u).filter(Boolean)) {
+    current = join(current, segment);
+    let st;
+    try { st = lstatSync(current); } catch { return { ok: false, reason: 'missing', path: current }; }
+    if (st.isSymbolicLink()) return { ok: false, reason: 'symlink_component', path: current };
+  }
+  return { ok: true, path: current };
+}
+
+export function evaluateHelperArtifact(gate, { nativeDirectory, pluginRoot = DEFAULT_PLUGIN_ROOT, productionMode = false } = {}) {
+  const result = { present: false, executable: false, integrity: 'sums_missing', helper_sha256: null, real_path: null, detail: null };
+  if (!gate || (!gate.supported && !gate.inventoried)) return result;
+  const entry = GROK_CONTAINMENT_INVENTORY[gate.key];
+  if (!entry) return result;
+  const root = canonical(pluginRoot);
+  const pluginAbs = resolve(pluginRoot);
+  const native = resolve(nativeDirectory ?? DEFAULT_NATIVE_DIRECTORY);
+  if (!root) return { ...result, integrity: 'outside_root' };
+  // Walk from the caller-supplied plugin spelling. Canonicalising the walk
+  // base first fails on macOS tmpdir (/var vs /private/var) and would also
+  // hide a symlinked native directory (E4: component walk first).
+  if (native !== pluginAbs && !native.startsWith(pluginAbs + sep)) {
+    return { ...result, integrity: 'outside_root' };
+  }
+  const relNative = native === pluginAbs ? '' : relative(pluginAbs, native);
+  if (relNative.split(/[\\/]/u).includes('..')) return { ...result, integrity: 'outside_root' };
+  const nativeWalk = walkNoSymlink(pluginAbs, relNative);
+  if (!nativeWalk.ok) return { ...result, integrity: nativeWalk.reason === 'symlink_component' ? 'symlink_component' : 'sums_missing', detail: `native:${nativeWalk.reason}` };
+  const walked = walkNoSymlink(native, entry.helper);
+  if (!walked.ok) return { ...result, integrity: walked.reason === 'symlink_component' ? 'symlink_component' : 'sums_missing', detail: walked.reason };
+  let st;
+  try { st = lstatSync(walked.path); } catch { return result; }
+  if (!st.isFile()) return result;
+  result.present = true;
+  try { accessSync(walked.path, fsConstants.X_OK); result.executable = true; } catch { return result; }
+  // Presence and executability are decided above so that a present-but-partial
+  // tree is an INTEGRITY refusal (grok_containment_helper_failed), never a
+  // missing-helper one.
+  if (productionMode && nativeTreeState(native) !== 'release') return { ...result, integrity: 'not_release' };
+  const real = canonical(walked.path);
+  if (!real || !real.startsWith(root + sep)) return { ...result, integrity: 'outside_root' };
+  result.real_path = real;
+  if (st.size > HELPER_MAX_BYTES) return { ...result, integrity: 'mismatch', detail: 'oversized' };
+  result.helper_sha256 = sha256File(walked.path);
+  const sums = walkNoSymlink(native, 'SHA256SUMS');
+  if (!sums.ok) return { ...result, integrity: sums.reason === 'symlink_component' ? 'sums_symlink' : 'sums_missing' };
+  if (!lstatSync(sums.path).isFile()) return { ...result, integrity: 'sums_symlink' };
+  const parsed = parseSha256Sums(readFileSync(sums.path, 'utf8'));
+  if (!parsed.ok) return { ...result, integrity: 'sums_malformed', detail: parsed.reason };
+  const expected = parsed.entries.get(entry.helper);
+  if (expected === NATIVE_PLACEHOLDER_DIGEST) return { ...result, integrity: 'not_listed' };
+  return { ...result, integrity: expected === result.helper_sha256 ? 'ok' : 'mismatch' };
 }

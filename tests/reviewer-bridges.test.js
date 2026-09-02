@@ -29,6 +29,14 @@ import { parseCli as parseClaudeCli, runClaudeReviewer } from '../hooks/scripts/
 import { parseCli as parseCodexCli, runCodexReviewer } from '../hooks/scripts/run-codex-reviewer.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const ARTIFACT_OK = () => ({
+  present: true,
+  executable: true,
+  integrity: 'ok',
+  helper_sha256: 'a'.repeat(64),
+  real_path: '/fixture/helper',
+  detail: null,
+});
 const claudeBridgePath = join(pluginRoot, 'hooks', 'scripts', 'run-claude-reviewer.mjs');
 const codexBridgePath = join(pluginRoot, 'hooks', 'scripts', 'run-codex-reviewer.mjs');
 
@@ -1984,7 +1992,7 @@ test('T-PROBE-8: the negative frame matrix fails closed with a real process A an
     'try {',
     '  coordinator = await createGrokCarrierCoordinator({',
     '    cwd, mode: "review", env: process.env, detectorPath, drainTimeoutMs: Number(deadline),',
-    '    platform: "linux", arch: "x64", helperExists: () => true,',
+    '    platform: "linux", arch: "x64", helperArtifact: () => ({ present: true, executable: true, integrity: "ok", helper_sha256: "a".repeat(64), real_path: "/fixture/helper", detail: null }),',
     '  });',
     '} catch (error) {',
     '  process.stdout.write(`${JSON.stringify({ acquired: false, message: error.message })}\\n`);',
@@ -2080,7 +2088,7 @@ test('the Grok bridge child-process entry consumes the transported token instead
   const admission = preflightGrokContainment({
     platform: 'linux',
     arch: 'x64',
-    helperExists: () => true,
+    helperArtifact: ARTIFACT_OK,
     helperSpawner: () => ({ ok: true }),
   });
   assert.equal(admission.ok, true);
