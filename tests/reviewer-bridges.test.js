@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
@@ -29,6 +30,8 @@ import { parseCli as parseClaudeCli, runClaudeReviewer } from '../hooks/scripts/
 import { parseCli as parseCodexCli, runCodexReviewer } from '../hooks/scripts/run-codex-reviewer.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const require = createRequire(import.meta.url);
+const { stubGrokLauncher } = require('./helpers/native-stub.cjs');
 const ARTIFACT_OK = () => ({
   present: true,
   executable: true,
@@ -1674,12 +1677,6 @@ const executionPlanModuleUrl = pathToFileURL(
   join(pluginRoot, 'hooks', 'scripts', 'lib', 'execution-plan.mjs'),
 ).href;
 
-const GROK_HELP_FLAGS = [
-  '--single', '--prompt-file', '--model', '--reasoning-effort',
-  '--permission-mode', '--sandbox', '--cwd', '--output-format', '--max-turns',
-  '--session-id', '--no-memory', '--no-subagents',
-].join(' ');
-
 const liveCoordinatorChildren = new Set();
 test.after(() => {
   cleanupGitFixtures();
@@ -1712,39 +1709,29 @@ function coordinatorInvocationFromInstructions(relativePath, mode) {
 }
 
 function grokProbeBin(prefix) {
-  const dir = workspace(prefix);
-  const bin = join(dir, 'bin');
-  const grokLog = join(dir, 'grok-children.ndjson');
+  const grok = stubGrokLauncher();
+  if (grok.skipReason) return { skipReason: grok.skipReason };
+  const dir = grok.root;
+  const bin = grok.bin;
+  const grokLog = grok.log;
   const detectionLog = join(dir, 'agy-children.ndjson');
-  mkdirSync(bin, { recursive: true });
-  const writeStub = (command, log, body) => {
-    const source = [
-      "'use strict';",
-      "const fs = require('node:fs');",
-      `fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
-      body,
-      '',
-    ].join('\n');
-    if (process.platform === 'win32') {
-      const program = join(dir, `${command}-probe.js`);
-      writeFileSync(program, source);
-      writeFileSync(join(bin, `${command}.cmd`), `@echo off\r\n"${process.execPath}" "${program}" %*\r\n`);
-      return;
-    }
-    const launcher = join(bin, command);
-    writeFileSync(launcher, `#!/usr/bin/env node\n${source}`);
+  const agySource = [
+    "'use strict';",
+    "const fs = require('node:fs');",
+    `fs.appendFileSync(${JSON.stringify(detectionLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
+    "process.stdout.write('agy 9.9.9\\n');",
+    '',
+  ].join('\n');
+  if (process.platform === 'win32') {
+    const program = join(dir, 'agy-probe.js');
+    writeFileSync(program, agySource);
+    writeFileSync(join(bin, 'agy.cmd'), `@echo off\r\n"${process.execPath}" "${program}" %*\r\n`);
+  } else {
+    const launcher = join(bin, 'agy');
+    writeFileSync(launcher, `#!/usr/bin/env node\n${agySource}`);
     chmodSync(launcher, 0o755);
-  };
-  writeStub('grok', grokLog, [
-    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
-    `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${GROK_HELP_FLAGS}\n`)});`,
-    'else process.exitCode = 2;',
-  ].join('\n'));
-  // `detectEnvironment` probes `agy --version`; nothing downstream of it does.
-  // One line here is one environment DETECTION, which is the only way to see a
-  // consumer that re-detects without candidacy and so spawns no Grok child.
-  writeStub('agy', detectionLog, "process.stdout.write('agy 9.9.9\\n');");
-  return { dir, bin, grokLog, detectionLog };
+  }
+  return { dir, bin, grokLog, detectionLog, env: grok.env, skipReason: null };
 }
 
 function childArgvRows(log) {
@@ -1809,9 +1796,13 @@ test('T-PROBE-8: the public normal-review and dry-run/explain entrypoints cannot
     return;
   }
   const grok = grokProbeBin('grok-public-entrypoints-');
+  if (grok.skipReason) {
+    t.skip(grok.skipReason);
+    return;
+  }
   const repo = createGitFixture('public entrypoint repo');
   writeFileSync(join(repo, 'candidate.md'), '# Candidate design\n\nA short design note.\n');
-  const env = probeEnvironment(grok.bin);
+  const env = { ...probeEnvironment(grok.bin), ...grok.env };
   const { requestCoordinatorShutdown } = await import(coordinatorLibraryUrl);
   const { parseExecutionRoute } = await import(executionPlanModuleUrl);
 
@@ -1951,9 +1942,13 @@ test('T-PROBE-8: the negative frame matrix fails closed with a real process A an
     return;
   }
   const grok = grokProbeBin('grok-public-negative-');
+  if (grok.skipReason) {
+    t.skip(grok.skipReason);
+    return;
+  }
   const repo = createGitFixture('public negative repo');
   writeFileSync(join(repo, 'candidate.md'), '# Candidate\n');
-  const env = probeEnvironment(grok.bin);
+  const env = { ...probeEnvironment(grok.bin), ...grok.env };
   const producerRoot = workspace('grok-public-producers-');
 
   // The good frame, produced by the real standalone detector — real process A.
@@ -2079,7 +2074,7 @@ test('the Grok bridge CLI transports the owner-bound containment token as one in
   );
 });
 
-test('the Grok bridge child-process entry consumes the transported token instead of always refusing', async () => {
+test('the Grok bridge child-process entry consumes the transported token instead of always refusing', async (t) => {
   const supervisorUrl = pathToFileURL(
     join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs'),
   ).href;
@@ -2094,7 +2089,11 @@ test('the Grok bridge child-process entry consumes the transported token instead
   assert.equal(admission.ok, true);
 
   const grok = grokProbeBin('grok-token-transport-');
-  const env = probeEnvironment(grok.bin);
+  if (grok.skipReason) {
+    t.skip(grok.skipReason);
+    return;
+  }
+  const env = { ...probeEnvironment(grok.bin), ...grok.env };
   const root = workspace('grok-token-transport');
   const promptFile = join(root, 'payload.txt');
   const outputFile = join(root, 'output.txt');

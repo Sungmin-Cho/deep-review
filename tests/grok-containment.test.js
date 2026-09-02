@@ -25,6 +25,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -71,6 +72,7 @@ import {
   createGrokCarrierCoordinator,
   evaluateCoordinatorContainment,
 } from '../hooks/scripts/lib/grok-carrier-coordinator.mjs';
+import { parseOwnerControlLines } from '../hooks/scripts/lib/grok-owner-control.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const BASELINE_COMMIT = '1c3ef2d';
@@ -84,6 +86,11 @@ function gateFor(nativeDirectory, { platform = 'linux', arch = 'x64', enabledPla
   return resolveGrokContainmentPlatform({ platform, arch, nativeDirectory, enabledPlatforms });
 }
 const ARTIFACT_OK = () => ({ present: true, executable: true, integrity: 'ok', helper_sha256: 'a'.repeat(64), real_path: '/fixture/helper', detail: null });
+const require = createRequire(import.meta.url);
+const { stubNativeRoot, ARGV_MATRIX } = require('./helpers/native-stub.cjs');
+
+const READY = '{"protocol_version":"1.0","handshake":"containment_ready","containment_ready":true,"mechanism":"pid-namespace"}';
+const REPORT = '{"protocol_version":"1.0","handshake":"termination_report","live_members":0,"member_pids":[]}';
 
 function workspace(label) {
   return mkdtempSync(join(tmpdir(), `deep-review-${label}-`));
@@ -1283,4 +1290,44 @@ test('T-OWN-12: integrity runs on the production default path; only helperArtifa
     () => createGrokCarrierCoordinator({ cwd: workspace('t-own-12-cwd'), mode: 'review', ...LINUX, nativeDirectory: bad, pluginRoot: bad, detectorPath: join(bad, 'never-run.mjs') }),
     (error) => error.containment_refusal?.detail === 'integrity_mismatch',
   );
+});
+
+test('T-OWN-6 (parser): the normative control-line grammar is CRLF tolerant and admits exactly ready-then-report', () => {
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n${REPORT}\n`)).ok, true);
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\r\n${REPORT}\r\n`)).ok, true);
+  assert.equal(parseOwnerControlLines(Buffer.from(`  ${READY}\n${REPORT}  \n\n`)).ok, true);
+  assert.deepEqual(parseOwnerControlLines(Buffer.alloc(0)), { ok: false, reason: 'empty', lines: [] });
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\nnot json\n${REPORT}\n`)).reason, 'malformed');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n`)).reason, 'shape');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${REPORT}\n${READY}\n`)).reason, 'shape');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n${READY}\n${REPORT}\n`)).reason, 'shape');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n${REPORT}\n{"handshake":"extra"}\n`)).reason, 'shape');
+  const withOwner = REPORT.replace('"live_members"', '"owner_id":"x","generation":1,"observed_at":5,"live_members"');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY}\n${withOwner}\n`)).reason, 'shape');
+  assert.equal(parseOwnerControlLines(Buffer.from(`${READY.replace('"1.0"', '"2.0"')}\n${REPORT}\n`)).reason, 'shape');
+});
+
+test('the stub helper compiles and speaks the two-line protocol in preflight and launch mode', (t) => {
+  const stub = stubNativeRoot({ platform: 'linux', arch: 'x64' });
+  if (stub.skipReason) { t.skip(stub.skipReason); return; }
+  const preflight = spawnSync(stub.helperPath, ['--own-grok-tree', '--parent-pid', String(process.pid)], { input: '', encoding: 'utf8', timeout: 5000 });
+  assert.equal(preflight.status, 0, preflight.stderr);
+  assert.equal(parseOwnerControlLines(Buffer.from(preflight.stdout)).ok, true);
+  const launch = spawnSync(stub.helperPath, ['--own-grok-tree', '--parent-pid', String(process.pid), '--', 'provider', 'arg'], {
+    input: '', encoding: 'utf8', timeout: 5000, env: { ...process.env, STUB_PROVIDER_OUTPUT: 'hello from provider', STUB_EXIT: '3' },
+  });
+  assert.equal(launch.status, 3);
+  assert.match(launch.stderr, /hello from provider/u);
+  assert.equal(parseOwnerControlLines(Buffer.from(launch.stdout)).ok, true);
+  // `--parent-pid` after `--` is a command operand, not an option
+  const operand = spawnSync(stub.helperPath, ['--own-grok-tree', '--', '--parent-pid', 'x'], { input: '', encoding: 'utf8', timeout: 5000 });
+  assert.equal(operand.status, 0, operand.stderr);
+  for (const row of ARGV_MATRIX) {
+    const marker = join(stub.root, `${row.name.replaceAll(/\W+/gu, '-')}.marker`);
+    const argv = row.withCommandMarker ? [...row.argv, '--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] : row.argv;
+    const bad = spawnSync(stub.helperPath, argv, { input: '', encoding: 'utf8', timeout: 5000 });
+    assert.equal(bad.status, 64, `${row.name}: ${bad.stderr}`);
+    assert.equal(bad.stdout, '', row.name);
+    assert.equal(existsSync(marker), false, `${row.name}: the provider must never run`);
+  }
 });

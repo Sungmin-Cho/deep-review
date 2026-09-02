@@ -30,7 +30,7 @@ import {
   UNSUPPORTED_GROK_CONTAINMENT,
   resolveGrokContainmentPlatform,
 } from './grok-process-supervisor.mjs';
-import { DEFAULT_PLUGIN_ROOT, evaluateHelperArtifact } from './grok-native-artifact.mjs';
+import { DEFAULT_PLUGIN_ROOT, evaluateHelperArtifact, isNativeGrokLauncher } from './grok-native-artifact.mjs';
 import { fileURLToPath } from 'node:url';
 import {
   GROK_CARRIER_MAX_BYTES,
@@ -327,6 +327,7 @@ export function defaultCoordinatorHelperExists(helperPath) {
 
 function containmentRefusalError({
   reason, platform, arch, mechanism, helperPath, mode, remedy, observed, supported, detail = null, helperStderr,
+  launcherKind,
 }) {
   const refusal = {
     ok: false,
@@ -341,6 +342,7 @@ function containmentRefusalError({
     ...(helperStderr ? { helper_stderr: helperStderr } : {}),
     ...(observed ? { grok_version: observed } : {}),
     ...(supported ? { grok_supported_versions: supported } : {}),
+    ...(launcherKind ? { launcher_kind: launcherKind } : {}),
   };
   const error = new Error(reason);
   error.containment_refusal = refusal;
@@ -524,6 +526,16 @@ export async function createGrokCarrierCoordinator(options = {}) {
     throw error;
   }
   const carrier = validateGrokCompatibilityCarrier(parsedFrame);
+
+  const chain = carrier.prepared_spawn_chain;
+  if (!isNativeGrokLauncher(chain)) {
+    producer.child.kill('SIGKILL');
+    throw containmentRefusalError({
+      reason: 'incompatible_grok_cli', platform, arch, mechanism: null, helperPath: null, mode,
+      remedy: 'the Grok launcher must be a native executable, not a .cmd/.bat, PowerShell shim or #! script',
+      launcherKind: chain.prepared_kind === 'direct' ? `direct:${chain.posix_executable_type}` : chain.prepared_kind,
+    });
+  }
 
   let environment;
   try {

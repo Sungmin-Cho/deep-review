@@ -24,6 +24,7 @@ const {
   fixtureRootFor,
   git,
 } = require('./helpers/git-fixture.js');
+const { stubGrokLauncher } = require('./helpers/native-stub.cjs');
 
 const detectorPath = join(__dirname, '..', 'hooks', 'scripts', 'detect-environment.mjs');
 const detectorUrl = pathToFileURL(detectorPath).href;
@@ -735,10 +736,14 @@ test('the shipped coordinator executable drains one frame from real process A an
     t.skip('shipped coordinator CLI success path requires an inventoried executable helper');
     return;
   }
-  const grok = makeGrokBin('coordinator-e2e-');
+  const grok = stubGrokLauncher();
+  if (grok.skipReason) {
+    t.skip(grok.skipReason);
+    return;
+  }
   const repo = createGitFixture('coordinator repo');
   writeFileSync(join(repo, 'candidate.md'), '# Candidate\n');
-  const env = pathEnvironment(grok.bin);
+  const env = { ...pathEnvironment(grok.bin), ...grok.env };
   const {
     COORDINATOR_ENVIRONMENT_FIELDS,
     COORDINATOR_GROK_FIELDS,
@@ -807,9 +812,13 @@ test('every control-protocol message is observed on the private control path', a
     t.skip('shipped coordinator CLI success path requires an inventoried executable helper');
     return;
   }
-  const grok = makeGrokBin('coordinator-protocol-');
+  const grok = stubGrokLauncher();
+  if (grok.skipReason) {
+    t.skip(grok.skipReason);
+    return;
+  }
   const repo = createGitFixture('coordinator protocol repo');
-  const env = pathEnvironment(grok.bin);
+  const env = { ...pathEnvironment(grok.bin), ...grok.env };
   const { decodeControlFrames, encodeControlFrame } = await import(coordinatorLibUrl);
   const coordinator = await startCoordinator(repo, env, 'dry-run');
 
@@ -1110,6 +1119,95 @@ function completeEnvironmentFixture() {
     grok_compatibility_verified: false,
     grok_compatibility_evidence: null,
   };
+}
+
+function environmentFor(carrier) {
+  return {
+    ...completeEnvironmentFixture(),
+    grok_cli: true,
+    grok_cli_path: carrier.launcher_path,
+    grok_version: carrier.version,
+    grok_compatibility_verified: true,
+    grok_compatibility_evidence: carrier,
+  };
+}
+
+function fixtureCarrier(stringify, flags) {
+  const identity = {
+    kind: 'posix-dev-ino-v1',
+    fields: { dev: '1', ino: '2', type: 'regular-file', uid: '0' },
+  };
+  const member = (filePath, purpose) => ({
+    path: filePath,
+    real_path: filePath,
+    platform_identity: identity,
+    sha256: 'a'.repeat(64),
+    size: 12,
+    classification_purpose: purpose,
+  });
+  const chain = {
+    schema_version: '1.0',
+    prepared_kind: 'direct',
+    launcher: member('/opt/grok', 'effective-executable'),
+    shim: null,
+    interpreter: null,
+    shebang: null,
+    posix_executable_type: 'native-elf',
+    native_loader: member('/lib64/ld-linux-x86-64.so.2', 'native-loader'),
+  };
+  const prepared_spawn_chain = {
+    ...chain,
+    chain_sha256: createHash('sha256').update(Buffer.from(stringify(chain), 'utf8')).digest('hex'),
+  };
+  const evidence = {
+    schema_version: '1.0',
+    launcher_path: '/opt/grok',
+    real_path: '/opt/grok',
+    platform_identity: identity,
+    executable_sha256: 'a'.repeat(64),
+    executable_size: 12,
+    prepared_spawn_chain,
+    version: '1.0.4',
+    version_build: 'd846eb93d94d',
+    version_banner_sha256: 'b'.repeat(64),
+    help_sha256: 'c'.repeat(64),
+    help_size: 1024,
+    required_help_flags: [...flags],
+  };
+  return {
+    ...evidence,
+    evidence_sha256: createHash('sha256').update(Buffer.from(stringify(evidence), 'utf8')).digest('hex'),
+  };
+}
+
+function frameProducer(root, name, body, { chainOverride = null, encodeFrame, stringify, flags } = {}) {
+  let carrier = fixtureCarrier(stringify, flags);
+  if (chainOverride) {
+    const launcher = chainOverride.launcher;
+    const { evidence_sha256: _seal, ...body0 } = carrier;
+    const rebound = {
+      ...body0,
+      prepared_spawn_chain: chainOverride,
+      launcher_path: launcher.path,
+      real_path: launcher.real_path,
+      executable_sha256: launcher.sha256,
+      executable_size: launcher.size,
+      platform_identity: launcher.platform_identity,
+    };
+    carrier = {
+      ...rebound,
+      evidence_sha256: createHash('sha256').update(Buffer.from(stringify(rebound), 'utf8')).digest('hex'),
+    };
+  }
+  const detectorPath = join(root, `${name}-detector.mjs`);
+  writeFileSync(detectorPath, [
+    'import { writeSync } from \'node:fs\';',
+    `const frame = Buffer.from(${JSON.stringify(encodeFrame(carrier).toString('base64'))}, 'base64');`,
+    `process.stdout.write(${JSON.stringify(`${JSON.stringify(environmentFor(carrier))}\n`)});`,
+    body,
+    '',
+  ].join('\n'));
+  return detectorPath;
 }
 
 // A fake coordinator whose control protocol is well-formed but whose private
@@ -1502,4 +1600,75 @@ test('coordinator CLI rejects --platform as an unknown argument (T9)', async () 
     () => parseArguments(['--cwd', '/tmp', '--mode', 'review', '--platform', 'linux']),
     /unknown argument: --platform/u,
   );
+});
+
+test('T-OWN-10 (coordinator): a shebang or shim Grok launcher is refused before privacy as incompatible_grok_cli', async () => {
+  const { createGrokCarrierCoordinator } = await import(coordinatorLibUrl);
+  const { isNativeGrokLauncher } = await import(pathToFileURL(join(__dirname, '..', 'hooks', 'scripts', 'lib', 'grok-native-artifact.mjs')).href);
+  const {
+    encodeGrokCompatibilityCarrierFrame,
+    canonicalStringify,
+    GROK_REQUIRED_HELP_FLAGS,
+  } = await import(pathToFileURL(join(__dirname, '..', 'hooks', 'scripts', 'lib', 'grok-compatibility-carrier.mjs')).href);
+  const { prepareSpawnChain } = await import(pathToFileURL(join(__dirname, '..', 'hooks', 'scripts', 'lib', 'process.mjs')).href);
+  const repo = createGitFixture('t-own-10 coordinator');
+  const env = isolatedEnvironment({});
+  const chainRoot = makeTemporaryDirectory('t-own-10-chains-');
+  let SHEBANG_CHAIN_FIXTURE = null;
+  let POWERSHELL_SHIM_CHAIN_FIXTURE = null;
+  if (process.platform !== 'win32') {
+    const script = join(chainRoot, 'grok');
+    makeExecutable(script, '#!/usr/bin/env node\nprocess.exit(0)\n');
+    SHEBANG_CHAIN_FIXTURE = prepareSpawnChain(script, ['--version'], { cwd: chainRoot, env: process.env }).prepared_spawn_chain;
+  } else {
+    const cmd = join(chainRoot, 'grok.cmd');
+    writeFileSync(cmd, '@echo off\r\nexit /b 0\r\n');
+    POWERSHELL_SHIM_CHAIN_FIXTURE = prepareSpawnChain(cmd, ['--version'], { cwd: chainRoot, env: process.env }).prepared_spawn_chain;
+  }
+  const producerOptions = {
+    encodeFrame: encodeGrokCompatibilityCarrierFrame,
+    stringify: canonicalStringify,
+    flags: GROK_REQUIRED_HELP_FLAGS,
+  };
+  if (SHEBANG_CHAIN_FIXTURE) {
+    assert.equal(isNativeGrokLauncher(SHEBANG_CHAIN_FIXTURE), false);
+    const shebangProducer = frameProducer(repo, 'shebang', 'writeSync(3, frame);', {
+      ...producerOptions,
+      chainOverride: SHEBANG_CHAIN_FIXTURE,
+    });
+    await assert.rejects(
+      () => createGrokCarrierCoordinator({
+        cwd: repo, mode: 'review', env, detectorPath: shebangProducer, drainTimeoutMs: 5000,
+        platform: 'linux', arch: 'x64', helperArtifact: ARTIFACT_OK,
+      }),
+      (error) => {
+        assert.equal(error.containment_refusal?.reason, 'incompatible_grok_cli');
+        assert.equal(error.containment_refusal?.launcher_kind, 'direct:shebang');
+        assert.match(error.containment_refusal?.remedy, /native executable/u);
+        return true;
+      },
+    );
+    const nativeChain = { ...SHEBANG_CHAIN_FIXTURE, posix_executable_type: 'native-elf', shebang: null };
+    assert.equal(isNativeGrokLauncher(nativeChain), true);
+    assert.equal(isNativeGrokLauncher({ ...nativeChain, posix_executable_type: 'native-macho' }), true);
+  }
+  if (POWERSHELL_SHIM_CHAIN_FIXTURE) {
+    const shimProducer = frameProducer(repo, 'shim', 'writeSync(3, frame);', {
+      ...producerOptions,
+      chainOverride: POWERSHELL_SHIM_CHAIN_FIXTURE,
+    });
+    const expectedKind = POWERSHELL_SHIM_CHAIN_FIXTURE.prepared_kind === 'direct'
+      ? `direct:${POWERSHELL_SHIM_CHAIN_FIXTURE.posix_executable_type}`
+      : POWERSHELL_SHIM_CHAIN_FIXTURE.prepared_kind;
+    await assert.rejects(
+      () => createGrokCarrierCoordinator({
+        cwd: repo, mode: 'review', env, detectorPath: shimProducer, drainTimeoutMs: 5000,
+        platform: 'win32', arch: 'x64', helperArtifact: ARTIFACT_OK,
+        enabledPlatforms: ['linux/x64', 'win32/x64'],
+      }),
+      (error) => error.containment_refusal?.reason === 'incompatible_grok_cli'
+        && error.containment_refusal?.launcher_kind === expectedKind,
+    );
+  }
+  assert.equal(isNativeGrokLauncher({ prepared_kind: 'direct', posix_executable_type: null, shebang: null }), true);
 });
