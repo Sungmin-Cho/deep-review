@@ -634,6 +634,26 @@ function pathEnvironment(bin) {
   });
 }
 
+test('isNativeGrokLauncher accepts native launchers and refuses shebang and shim chains', async () => {
+  const repoRoot = join(__dirname, '..');
+  const { isNativeGrokLauncher } = await import(pathToFileURL(join(repoRoot, 'hooks', 'scripts', 'lib', 'grok-native-artifact.mjs')).href);
+  const { prepareSpawnChain } = await import(pathToFileURL(join(repoRoot, 'hooks', 'scripts', 'lib', 'process.mjs')).href);
+  const root = makeTemporaryDirectory('native-launcher-');
+  assert.equal(isNativeGrokLauncher(prepareSpawnChain(process.execPath, ['--version'], { cwd: root, env: process.env }).prepared_spawn_chain), true, 'the node binary is a native launcher on every host');
+  if (process.platform !== 'win32') {
+    const script = join(root, 'grok'); writeFileSync(script, '#!/usr/bin/env node\nprocess.exit(0)\n'); makeExecutable(script, readFileSync(script, 'utf8'));
+    const chain = prepareSpawnChain(script, ['--version'], { cwd: root, env: process.env }).prepared_spawn_chain;
+    assert.equal(chain.prepared_kind, 'direct'); assert.equal(chain.posix_executable_type, 'shebang');
+    assert.equal(isNativeGrokLauncher(chain), false);
+  } else {
+    const cmd = join(root, 'grok.cmd'); writeFileSync(cmd, '@echo off\r\nexit /b 0\r\n');
+    assert.equal(isNativeGrokLauncher(prepareSpawnChain(cmd, ['--version'], { cwd: root, env: process.env }).prepared_spawn_chain), false);
+  }
+  assert.equal(isNativeGrokLauncher({ prepared_kind: 'direct', posix_executable_type: null, shebang: null }), true);
+  assert.equal(isNativeGrokLauncher({ prepared_kind: 'direct', posix_executable_type: 'native-macho', shebang: null }), true);
+  assert.equal(isNativeGrokLauncher(null), false);
+});
+
 // Real process B. It links the shipped owner module and nothing else, so what
 // it proves is the production acquisition path, not a test re-implementation.
 function writeConsumer(root, name) {
