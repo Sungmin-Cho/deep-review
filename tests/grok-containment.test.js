@@ -11,7 +11,7 @@
 // itself marked an explicit platform skip — a simulated branch is not proof.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -98,7 +98,6 @@ const BASELINE_COMMIT = '1c3ef2d';
 const HOST_CONTAINMENT_GATE = resolveGrokContainmentPlatform();
 const SUPPORTED_HERE = HOST_CONTAINMENT_GATE.supported;
 const PLATFORM_SKIP = `${HOST_CONTAINMENT_GATE.key} is not a Grok containment platform`;
-const HELPER_SKIP = 'the inventoried native containment helpers are not present in this tree';
 const LINUX = { platform: 'linux', arch: 'x64' };
 const ALL_INVENTORIED = ['linux/x64', 'win32/x64'];
 function gateFor(nativeDirectory, { platform = 'linux', arch = 'x64', enabledPlatforms = ALL_INVENTORIED } = {}) {
@@ -270,6 +269,9 @@ test('T-PACK-3: the plugin native tree is source (or release under DEEP_REVIEW_P
       );
     }
   }
+  const buildNativeSource = readFileSync(join(pluginRoot, 'scripts', 'build-native.mjs'), 'utf8');
+  assert.match(buildNativeSource, /export const NATIVE_PLACEHOLDER_DIGEST = '0'\.repeat\(64\)/u);
+  assert.equal(NATIVE_PLACEHOLDER_DIGEST, '0'.repeat(64));
 });
 
 test('parseSha256Sums accepts the inventory in either separator form and refuses everything else', () => {
@@ -540,16 +542,168 @@ test('D21 native Windows containment assigns the Job Object before the suspended
   assert.ok(win32.applied_limits.includes('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE'));
 });
 
-test('a contained Grok provider launch inside a Linux PID namespace leaves zero surviving namespace members', {
-  skip: process.platform === 'linux' && process.arch === 'x64' ? HELPER_SKIP : PLATFORM_SKIP,
-}, () => {
-  assert.fail('unreachable: this polarity requires the inventoried Linux helper');
+function builtNativeRoot() {
+  const host = resolveGrokContainmentPlatform({ enabledPlatforms: ALL_INVENTORIED });
+  if (!host.inventoried) return { skip: PLATFORM_SKIP };
+  const root = process.env.GROK_NATIVE_OUTPUT_ROOT;
+  if (!root) return { skip: 'GROK_NATIVE_OUTPUT_ROOT is unset: no CI-built helper on this host' };
+  const helper = join(root, ...GROK_CONTAINMENT_INVENTORY[host.key].helper.split('/'));
+  if (!existsSync(helper) || !existsSync(join(root, 'SHA256SUMS'))) return { fail: `GROK_NATIVE_OUTPUT_ROOT is set but ${helper} or SHA256SUMS is missing` };
+  return { root, host: resolveGrokContainmentPlatform({ nativeDirectory: root, enabledPlatforms: ALL_INVENTORIED }) };
+}
+
+function lifeContext(t, label) {
+  const built = builtNativeRoot();
+  if (built.skip) { t.skip(built.skip); return null; }
+  if (built.fail) assert.fail(built.fail);
+  const tmpRoot = workspace(`${label}-tmp`);
+  const preflight = preflightGrokContainment({ platform: built.host.platform, arch: built.host.arch, nativeDirectory: built.root, pluginRoot: built.root, tmpRoot, enabledPlatforms: [built.host.key] });
+  assert.equal(preflight.ok, true, JSON.stringify(preflight));
+  const runner = supervisorTesting.createContainedRunner({ platform: built.host.platform, arch: built.host.arch, nativeDirectory: built.root, pluginRoot: built.root, enabledPlatforms: [built.host.key], tmpRoot });
+  return { ...built, tmpRoot, preflight, runner, token: preflight.containment_ready_token, recordPath: join(tmpRoot, 'deep-review-grok-containment', `${preflight.containment_ready_token.owner_id}.json`) };
+}
+
+function providerScript(dir, body) {
+  const file = join(dir, `provider-${Math.random().toString(16).slice(2, 8)}.cjs`);
+  writeFileSync(file, body);
+  return file;
+}
+
+async function launch(ctx, script, { timeoutMs = 20000, onSpawn } = {}) {
+  const env = scrubGrokEnvironment(process.env);
+  const chain = prepareSpawnChain(process.execPath, [script], { cwd: ctx.tmpRoot, env }).prepared_spawn_chain;
+  return ctx.runner.run(process.execPath, [script], { cwd: ctx.tmpRoot, env, timeoutMs, expectedPreparedSpawnChain: chain, containmentToken: ctx.token, onSpawn });
+}
+
+const sleepAndMark = (marker, ms) => `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "x"), ${ms})`;
+
+test('T-LIFE-9: a contained launch waits for (Linux) or kills (Windows) an escaped descendant and reports zero members', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-escape'); if (!ctx) return;
+  const marker = join(ctx.tmpRoot, 'escapee.marker');
+  const script = providerScript(ctx.tmpRoot, `
+    const { spawn } = require('node:child_process');
+    spawn(process.execPath, ['-e', ${JSON.stringify(sleepAndMark(marker, 1000))}], { detached: true, stdio: 'ignore' }).unref();
+    process.stdout.write('PROVIDER-RAN\\n');
+    process.exit(0);
+  `);
+  const started = Date.now();
+  const result = await launch(ctx, script);
+  assert.match(result.stdout.toString('utf8'), /PROVIDER-RAN/u);
+  assert.equal(result.termination_confirmed, true, JSON.stringify({ detail: result.detail, lines: result.control_lines }));
+  assert.equal(result.termination_report.live_members, 0);
+  if (process.platform === 'linux') { assert.ok(Date.now() - started >= 1000, 'namespace init waited for the escapee'); assert.equal(existsSync(marker), true); }
+  else { await new Promise((r) => setTimeout(r, 3000)); assert.equal(existsSync(marker), false, 'the Job killed the escapee before it wrote'); }
+  assert.equal(existsSync(ctx.recordPath), false, 'consumed at admission');
 });
 
-test('a contained Grok provider launch inside a native Windows Job Object reports zero live members', {
-  skip: process.platform === 'win32' && process.arch === 'x64' ? HELPER_SKIP : PLATFORM_SKIP,
-}, () => {
-  assert.fail('unreachable: this polarity requires the inventoried native Windows helper');
+test('T-LIFE-9: a second admission after consume is refused (real helper)', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-second'); if (!ctx) return;
+  const script = providerScript(ctx.tmpRoot, 'process.exit(0)');
+  assert.equal((await launch(ctx, script)).termination_confirmed, true);
+  await assert.rejects(() => launch(ctx, script), /containment_owner_not_live/u, 'second admission after consume');
+});
+
+test('T-LIFE-9: timeout leaves no survivor', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-timeout'); if (!ctx) return;
+  const marker = join(ctx.tmpRoot, 'late.marker');
+  const pidFile = join(ctx.tmpRoot, 'tree.pids');
+  const script = providerScript(ctx.tmpRoot, `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', ${JSON.stringify(sleepAndMark(marker, 3000))}], { detached: true, stdio: 'ignore' });
+    child.unref();
+    require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ provider: process.pid, grandchild: child.pid }));
+    setTimeout(() => {}, 30000);
+  `);
+  const pids = [];
+  const result = await launch(ctx, script, { timeoutMs: 1000, onSpawn: (info) => pids.push(info.pid) });
+  assert.deepEqual([result.timedOut, result.code, result.termination_confirmed], [true, 124, false]);
+  await new Promise((r) => setTimeout(r, 5000));
+  assert.equal(existsSync(marker), false, 'the grandchild never wrote after the tree was killed');
+  const tree = JSON.parse(readFileSync(pidFile, 'utf8'));
+  for (const [label, pid] of [['helper', pids[0]], ['provider', tree.provider], ['grandchild', tree.grandchild]]) {
+    if (process.platform === 'linux') assert.equal(existsSync(`/proc/${pid}`), false, `${label} is gone`);
+    else assert.throws(() => process.kill(pid, 0), `${label} is gone`);
+  }
+  if (process.platform === 'linux') assert.equal(result.group_gone, true);
+});
+
+test('T-LIFE-9: killing the bridge process tears the whole tree down (parent leash)', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-crash'); if (!ctx) return;
+  const marker = join(ctx.tmpRoot, 'orphan.marker');
+  const pidFile = join(ctx.tmpRoot, 'helper.pid');
+  const readyFile = join(ctx.tmpRoot, 'tree.ready');
+  const script = providerScript(ctx.tmpRoot, `
+    const fs = require('node:fs');
+    const { spawn } = require('node:child_process');
+    // double-fork/setsid-style escapee: detached, unref'd, writes a marker after 5 s
+    const grandchild = spawn(process.execPath, ['-e', ${JSON.stringify(sleepAndMark(marker, 5000))}], { detached: true, stdio: 'ignore' });
+    grandchild.unref();
+    // atomic ready record: provider and grandchild pids, written only once the grandchild exists
+    fs.writeFileSync(${JSON.stringify(readyFile + '.tmp')}, JSON.stringify({ provider: process.pid, grandchild: grandchild.pid }));
+    fs.renameSync(${JSON.stringify(readyFile + '.tmp')}, ${JSON.stringify(readyFile)});
+    setTimeout(() => {}, 30000);
+  `);
+  const env = scrubGrokEnvironment(process.env);
+  const chain = prepareSpawnChain(process.execPath, [script], { cwd: ctx.tmpRoot, env }).prepared_spawn_chain;
+  const spec = join(ctx.tmpRoot, 'bridge-spec.json');   // by file, never on argv (Windows 32767-char command line)
+  writeFileSync(spec, JSON.stringify({ context: { platform: ctx.host.platform, arch: ctx.host.arch, nativeDirectory: ctx.root, pluginRoot: ctx.root, enabledPlatforms: [ctx.host.key], tmpRoot: ctx.tmpRoot }, script, cwd: ctx.tmpRoot, env, chain, token: ctx.token, pidFile }));
+  const bridge = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import { __testing } from ${JSON.stringify(pathToFileURL(join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs')).href)};
+    const spec = JSON.parse(readFileSync(process.argv[1], 'utf8'));
+    const runner = __testing.createContainedRunner(spec.context);
+    await runner.run(process.execPath, [spec.script], { cwd: spec.cwd, env: spec.env, timeoutMs: 60000, expectedPreparedSpawnChain: spec.chain, containmentToken: spec.token, onSpawn: (info) => writeFileSync(spec.pidFile, String(info.pid)) });
+  `, spec], { stdio: 'ignore' });
+  for (let i = 0; i < 100 && !(existsSync(pidFile) && existsSync(readyFile)); i += 1) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(existsSync(pidFile), true, 'the bridge spawned the helper');
+  assert.equal(existsSync(readyFile), true, 'the provider and its grandchild were running before the crash');
+  const helperPid = Number(readFileSync(pidFile, 'utf8'));
+  const tree = JSON.parse(readFileSync(readyFile, 'utf8'));
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  assert.equal(alive(tree.provider) && alive(tree.grandchild) && alive(helperPid), true, 'all three processes are alive before the crash');
+  bridge.kill('SIGKILL');
+  await new Promise((r) => setTimeout(r, 3000));
+  for (const [label, pid] of [['helper', helperPid], ['provider', tree.provider], ['grandchild', tree.grandchild]]) {
+    if (process.platform === 'linux') assert.equal(existsSync(`/proc/${pid}`), false, `${label} is gone`);
+    else assert.equal(alive(pid), false, `${label} is gone`);
+  }
+  await new Promise((r) => setTimeout(r, 5000));
+  assert.equal(existsSync(marker), false, 'no descendant survived the bridge');
+});
+
+test('T-LIFE-9: the argv matrix is refused by the real helper with exit 64, empty control stdout and no provider spawn', (t) => {
+  const built = builtNativeRoot();
+  if (built.skip) { t.skip(built.skip); return; }
+  if (built.fail) assert.fail(built.fail);
+  const helper = join(built.root, ...GROK_CONTAINMENT_INVENTORY[built.host.key].helper.split('/'));
+  const dir = workspace('t-life-9-matrix');
+  for (const row of ARGV_MATRIX) {
+    const marker = join(dir, `${row.name.replaceAll(/\W+/gu, '-')}.marker`);
+    const argv = row.withCommandMarker ? [...row.argv, '--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] : row.argv;
+    const run = spawnSync(helper, argv, { input: '', encoding: 'utf8', timeout: 5000 });
+    assert.equal(run.status, 64, `${row.name}: ${run.stderr}`);
+    assert.equal(run.stdout, '', row.name);
+    assert.equal(existsSync(marker), false, `${row.name}: the provider never ran`);
+  }
+});
+
+test('T-LIFE-9: --parent-pid after -- is a command operand for the real helper', async (t) => {
+  const ctx = lifeContext(t, 't-life-9-operand'); if (!ctx) return;
+  const built = builtNativeRoot();
+  const helper = join(built.root, ...GROK_CONTAINMENT_INVENTORY[built.host.key].helper.split('/'));
+  const run = spawnSync(helper, ['--own-grok-tree', '--parent-pid', String(process.pid), '--', process.execPath, '-e', 'process.stdout.write(process.argv.slice(1).join(" "))', '--parent-pid', 'x'], { input: '', encoding: 'utf8', timeout: 10000 });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stderr, /--parent-pid x/u, 'the operand reached the provider argv');
+  assert.equal(parseOwnerControlLines(Buffer.from(run.stdout)).ok, true);
+});
+
+test('T-LIFE-9: provider exit 125 and 127 propagate with a confirmed report', async (t) => {
+  for (const code of [125, 127]) {
+    const ctx = lifeContext(t, `t-life-9-exit-${code}`); if (!ctx) return;
+    const result = await launch(ctx, providerScript(ctx.tmpRoot, `process.exit(${code})`));
+    assert.equal(result.code, code);
+    assert.equal(result.termination_confirmed, true, JSON.stringify(result.control_lines));
+  }
 });
 
 // ---------------------------------------------------------------------------

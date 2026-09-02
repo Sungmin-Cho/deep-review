@@ -1819,8 +1819,8 @@ test('T-PACK-1 provider stub emits the ran proof required by the packed helper s
 
 test('T-PACK-2: release automation builds, packs, verifies and integrity-binds both native helpers', () => {
   const manifest = JSON.parse(readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'));
-  const buildNative = manifest.scripts?.['build:native'];
-  assert.equal(typeof buildNative, 'string', 'package.json must define build:native');
+  assert.equal(manifest.scripts?.['build:native'], 'node scripts/build-native.mjs');
+  const buildNativeSource = readFileSync(path.join(sourceRoot, 'scripts', 'build-native.mjs'), 'utf8');
   for (const required of [
     'GROK_NATIVE_TARGET',
     'GROK_NATIVE_OUTPUT_ROOT',
@@ -1828,24 +1828,34 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
     'linux-x64/grok-linux-pidns-owner',
     'grok-win32-job-owner.c',
     'win32-x64/grok-win32-job-owner.exe',
+    'SHA256SUMS',
+    'NATIVE_PLACEHOLDER_DIGEST',
   ]) {
-    assert.match(buildNative, new RegExp(required.replaceAll('.', '\\.'), 'u'), `build:native misses ${required}`);
+    assert.match(buildNativeSource, new RegExp(required.replaceAll('.', '\\.'), 'u'), `build:native misses ${required}`);
   }
 
   const workflow = readFileSync(path.join(sourceRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
   const nativeTests = workflowJob(workflow, 'tests');
+  const testsHead = nativeTests.slice(0, nativeTests.indexOf('\n    steps:'));
+  assert.match(testsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ runner\.temp \}\}\/deep-review-native-build/u);
   const linuxCompile = workflowStep(nativeTests, 'Compile Linux containment helper');
   assert.match(linuxCompile, /if:\s*runner\.os == 'Linux'/u);
-  assert.match(linuxCompile, /GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ runner\.temp \}\}\/deep-review-native-build/u);
   assert.match(linuxCompile, /run:\s*npm run build:native/u);
+  assert.doesNotMatch(linuxCompile, /^\s+env:/mu);
+  const linuxNativeTests = workflowStep(nativeTests, 'Run native tests');
+  assert.doesNotMatch(linuxNativeTests, /^\s+env:/mu);
   assertOrdered(nativeTests, 'name: Compile Linux containment helper', 'name: Run native tests', 'ubuntu compile-before-test');
 
   const windowsShards = workflowJob(workflow, 'windows-test-shards');
+  const windowsHead = windowsShards.slice(0, windowsShards.indexOf('\n    steps:'));
+  assert.match(windowsHead, /\n    env:\n      GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ runner\.temp \}\}\\deep-review-native-build/u);
   const msvcSetup = workflowStep(windowsShards, 'Set up MSVC');
   assert.match(msvcSetup, /uses:\s*ilammy\/msvc-dev-cmd@v1/u);
   const windowsCompile = workflowStep(windowsShards, 'Compile Windows containment helper');
-  assert.match(windowsCompile, /GROK_NATIVE_OUTPUT_ROOT:\s*\$\{\{ runner\.temp \}\}\\deep-review-native-build/u);
   assert.match(windowsCompile, /run:\s*npm run build:native/u);
+  assert.doesNotMatch(windowsCompile, /^\s+env:/mu);
+  const windowsNativeShard = workflowStep(windowsShards, 'Run native test shard');
+  assert.doesNotMatch(windowsNativeShard, /^\s+env:/mu);
   assertOrdered(windowsShards, 'name: Set up MSVC', 'name: Compile Windows containment helper', 'MSVC setup before Windows compile');
   assertOrdered(windowsShards, 'name: Compile Windows containment helper', 'name: Run native test shard', 'Windows compile-before-test');
 
@@ -1871,23 +1881,36 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
   assert.match(verifyPacked, /sha256sum --check SHA256SUMS/u);
   assert.doesNotMatch(verifyPacked, /github\.workspace|GITHUB_WORKSPACE/iu);
 
+  const linuxPack3 = workflowStep(releaseBundle, 'Run packed-tree T-PACK-3 on Linux x86_64');
+  assert.match(linuxPack3, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\/packed-tree\/package/u);
+  assert.match(linuxPack3, /--test-name-pattern=['"]T-PACK-3['"]/u);
+  assert.match(linuxPack3, /grok-containment\.test\.js/u);
+  assert.doesNotMatch(linuxPack3, /github\.workspace|GITHUB_WORKSPACE/iu);
   const linuxSmoke = workflowStep(releaseBundle, 'Run packed-tree T-PACK-1 on Linux x86_64');
   assert.match(linuxSmoke, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\/packed-tree\/package/u);
   assert.match(linuxSmoke, /--test-name-pattern=['"]T-PACK-1['"]/u);
   assert.doesNotMatch(linuxSmoke, /github\.workspace|GITHUB_WORKSPACE/iu);
   assertOrdered(releaseBundle, 'name: Integrity-bind native helpers', 'name: Pack into an isolated release tree', 'integrity before pack');
   assertOrdered(releaseBundle, 'name: Pack into an isolated release tree', 'name: Verify packed native inventory', 'pack before packed-tree verification');
-  assertOrdered(releaseBundle, 'name: Verify packed native inventory', 'name: Run packed-tree T-PACK-1 on Linux x86_64', 'packed-tree verification before Linux smoke');
+  assertOrdered(releaseBundle, 'name: Verify packed native inventory', 'name: Run packed-tree T-PACK-3 on Linux x86_64', 'packed-tree verification before Linux T-PACK-3');
+  assertOrdered(releaseBundle, 'name: Run packed-tree T-PACK-3 on Linux x86_64', 'name: Run packed-tree T-PACK-1 on Linux x86_64', 'Linux T-PACK-3 before T-PACK-1');
 
   const windowsSmoke = workflowJob(workflow, 'release-bundle-windows-smoke');
   assert.match(windowsSmoke, /runs-on:\s*windows-latest/u);
   assert.match(windowsSmoke, /needs:\s*release-bundle/u);
   assert.match(windowsSmoke, /actions\/download-artifact@v4/u);
   assert.doesNotMatch(windowsSmoke, /actions\/checkout|npm run build:native|\bcl(?:\.exe)?\b|\bgcc\b/iu);
+  const windowsPack3 = workflowStep(windowsSmoke, 'Run packed-tree T-PACK-3 on native Windows x86_64');
+  assert.match(windowsPack3, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\\packed-tree\\package/u);
+  assert.match(windowsPack3, /--test-name-pattern=['"]T-PACK-3['"]/u);
+  assert.match(windowsPack3, /grok-containment\.test\.js/u);
+  assert.doesNotMatch(windowsPack3, /github\.workspace|GITHUB_WORKSPACE/iu);
   const nativeWindowsSmoke = workflowStep(windowsSmoke, 'Run packed-tree T-PACK-1 on native Windows x86_64');
   assert.match(nativeWindowsSmoke, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\\packed-tree\\package/u);
   assert.match(nativeWindowsSmoke, /--test-name-pattern=['"]T-PACK-1['"]/u);
   assert.doesNotMatch(nativeWindowsSmoke, /github\.workspace|GITHUB_WORKSPACE/iu);
+  assertOrdered(windowsSmoke, 'name: Extract isolated release bundle', 'name: Run packed-tree T-PACK-3 on native Windows x86_64', 'extract before Windows T-PACK-3');
+  assertOrdered(windowsSmoke, 'name: Run packed-tree T-PACK-3 on native Windows x86_64', 'name: Run packed-tree T-PACK-1 on native Windows x86_64', 'Windows T-PACK-3 before T-PACK-1');
 });
 
 test('native owner sources implement the inventoried containment mechanisms and owner handshakes without literal NUL bytes', async () => {
