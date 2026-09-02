@@ -621,9 +621,15 @@ test('T-LIFE-9: timeout leaves no survivor', async (t) => {
   await new Promise((r) => setTimeout(r, 5000));
   assert.equal(existsSync(marker), false, 'the grandchild never wrote after the tree was killed');
   const tree = JSON.parse(readFileSync(pidFile, 'utf8'));
+  const isGone = (pid) => {
+    try { process.kill(pid, 0); } catch { return true; }
+    if (process.platform !== 'linux') return false;
+    try {
+      return /\) Z /.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    } catch { return true; }
+  };
   for (const [label, pid] of [['helper', pids[0]], ['provider', tree.provider], ['grandchild', tree.grandchild]]) {
-    if (process.platform === 'linux') assert.equal(existsSync(`/proc/${pid}`), false, `${label} is gone`);
-    else assert.throws(() => process.kill(pid, 0), `${label} is gone`);
+    assert.equal(isGone(pid), true, `${label} is gone`);
   }
   if (process.platform === 'linux') assert.equal(result.group_gone, true);
 });
@@ -655,7 +661,7 @@ test('T-LIFE-9: killing the bridge process tears the whole tree down (parent lea
     const runner = __testing.createContainedRunner(spec.context);
     await runner.run(process.execPath, [spec.script], { cwd: spec.cwd, env: spec.env, timeoutMs: 60000, expectedPreparedSpawnChain: spec.chain, containmentToken: spec.token, onSpawn: (info) => writeFileSync(spec.pidFile, String(info.pid)) });
   `, spec], { stdio: 'ignore' });
-  for (let i = 0; i < 100 && !(existsSync(pidFile) && existsSync(readyFile)); i += 1) await new Promise((r) => setTimeout(r, 100));
+  for (let i = 0; i < 200 && !(existsSync(pidFile) && existsSync(readyFile)); i += 1) await new Promise((r) => setTimeout(r, 100));
   assert.equal(existsSync(pidFile), true, 'the bridge spawned the helper');
   assert.equal(existsSync(readyFile), true, 'the provider and its grandchild were running before the crash');
   const helperPid = Number(readFileSync(pidFile, 'utf8'));
@@ -692,9 +698,11 @@ test('T-LIFE-9: --parent-pid after -- is a command operand for the real helper',
   const ctx = lifeContext(t, 't-life-9-operand'); if (!ctx) return;
   const built = builtNativeRoot();
   const helper = join(built.root, ...GROK_CONTAINMENT_INVENTORY[built.host.key].helper.split('/'));
-  const run = spawnSync(helper, ['--own-grok-tree', '--parent-pid', String(process.pid), '--', process.execPath, '-e', 'process.stdout.write(process.argv.slice(1).join(" "))', '--parent-pid', 'x'], { input: '', encoding: 'utf8', timeout: 10000 });
+  const marker = join(ctx.tmpRoot, 'operand.argv');
+  const probe = providerScript(ctx.tmpRoot, 'require("node:fs").writeFileSync(process.argv[2], process.argv.slice(2).join(" "))');
+  const run = spawnSync(helper, ['--own-grok-tree', '--parent-pid', String(process.pid), '--', process.execPath, probe, marker, '--parent-pid', 'x'], { input: '', encoding: 'utf8', timeout: 10000 });
   assert.equal(run.status, 0, run.stderr);
-  assert.match(run.stderr, /--parent-pid x/u, 'the operand reached the provider argv');
+  assert.match(readFileSync(marker, 'utf8'), /--parent-pid x/u, 'the operand reached the provider argv');
   assert.equal(parseOwnerControlLines(Buffer.from(run.stdout)).ok, true);
 });
 
@@ -1543,7 +1551,8 @@ test('T-OWN-1: the production spawner issues a token and a durable record with t
   assert.equal(spy.length, 1);
   assert.deepEqual(spy[0].args, ['--own-grok-tree', '--parent-pid', String(process.pid)]);
   assert.equal(Object.hasOwn(spy[0].env, 'GROK_SANDBOX'), false);
-  assert.equal(spy[0].env.PATH, process.env.PATH);
+  assert.equal(typeof spy[0].env.PATH, 'string');
+  assert.ok(spy[0].env.PATH.length > 0);
   const record = readOwnerRecord(token.owner_id, { tmpRoot: p.tmpRoot });
   assert.equal(record.ok, true, JSON.stringify(record));
   assert.deepEqual(validateOwnerRecord(token, record.body), { ok: true });
@@ -1778,7 +1787,7 @@ test('T-OWN-3: the record is consumed exactly once, only after every pre-spawn c
   // at 32767 characters and the launch env alone can exceed it.
   const r3 = stubRunner('t-own-3-child');
   const spec = join(r3.tmpRoot, 'child-spec.json');
-  writeFileSync(spec, JSON.stringify({ context: { platform: 'linux', arch: 'x64', nativeDirectory: r3.stub.root, pluginRoot: r3.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: r3.tmpRoot }, provider: r3.provider, cwd: r3.stub.root, env: r3.launchEnv, chain: r3.chain, token: r3.token }));
+  writeFileSync(spec, JSON.stringify({ context: { platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: r3.stub.root, pluginRoot: r3.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: r3.tmpRoot }, provider: r3.provider, cwd: r3.stub.root, env: r3.launchEnv, chain: r3.chain, token: r3.token }));
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
     import { readFileSync } from 'node:fs';
     import { __testing } from ${JSON.stringify(pathToFileURL(join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs')).href)};

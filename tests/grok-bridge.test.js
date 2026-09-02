@@ -216,7 +216,7 @@ function plannedRoute(binary, overrides) {
 
 const CONTAINMENT_OWNER = 'grok-containment-owner-1-6-00000004';
 const CONTAINMENT_TOKEN = supervisorTesting.mintOwnerToken({
-  platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, ownerId: CONTAINMENT_OWNER, generation: 1, startedAt: 1_700_000_000_000,
+  platform: 'linux', arch: 'x64', ownerId: CONTAINMENT_OWNER, generation: 1, startedAt: 1_700_000_000_000,
 });
 test('the harness containment owner id matches the record grammar', () => {
   assert.match(CONTAINMENT_OWNER, OWNER_ID_PATTERN);
@@ -1279,6 +1279,7 @@ test('T-OWN-16: the bridge CLI serialises a containment admission refusal as std
   if (!tamperStub.skipReason) {
     const tmpRoot = workspace('grok-cli-tampered-tmp');
     const preflight = preflightGrokContainment({ platform: HOST_STUB_PLATFORM, arch: HOST_STUB_ARCH, nativeDirectory: tamperStub.root, pluginRoot: tamperStub.root, tmpRoot, enabledPlatforms: [HOST_STUB_KEY] });
+    assert.equal(preflight.ok, true, JSON.stringify(preflight));
     const tampered = { ...preflight.containment_ready_token, token_sha256: 'f'.repeat(64) };
     const e2e = harness('grok-cli-tampered');
     const out = []; const err = [];
