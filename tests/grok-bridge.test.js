@@ -13,11 +13,16 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,7 +31,9 @@ import test from 'node:test';
 import { canonicalStringify } from '../hooks/scripts/lib/grok-compatibility-carrier.mjs';
 import { parseExecutionRoute } from '../hooks/scripts/lib/execution-plan.mjs';
 import {
+  GROK_CONTAINMENT_HELPER_FAILED,
   GROK_INVALID_LIFECYCLE,
+  preflightGrokContainment,
   __testing as supervisorTesting,
 } from '../hooks/scripts/lib/grok-process-supervisor.mjs';
 import { OWNER_ID_PATTERN } from '../hooks/scripts/lib/grok-owner-record.mjs';
@@ -35,6 +42,7 @@ import {
   GROK_SUPPORTED_EFFORTS,
   buildGrokArgv,
   parseCli as parseGrokCli,
+  runBridgeCli,
   runGrokReviewer,
   validateGrokArgv,
   __testing as grokTesting,
@@ -43,6 +51,8 @@ import {
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const bridgePath = join(pluginRoot, 'hooks', 'scripts', 'run-grok-reviewer.mjs');
 const WINDOWS = process.platform === 'win32';
+const require = createRequire(import.meta.url);
+const { stubNativeRoot } = require('./helpers/native-stub.cjs');
 
 const REQUIRED_HELP_FLAGS = Object.freeze([
   '--cwd',
@@ -299,9 +309,11 @@ function harness(label, { body = 'review this diff\n', behavior = 'success', lif
 
   return {
     root,
+    projectRoot: root,
     binary,
     promptFile,
     outputFile,
+    route: grokRoute(binary),
     seams,
     calls,
     fingerprints,
@@ -1171,4 +1183,150 @@ test('the composed Grok prompt contains exactly one gate because exactly one lay
     : readFileSync(args[args.indexOf('--prompt-file') + 1]);
   const gateHeadings = [...promptBytes.toString('utf8').matchAll(/^## Artifact Gate[ \t]*$/gmu)];
   assert.equal(gateHeadings.length, 1);
+});
+
+function minimalBridgeArgv() {
+  const root = workspace('bridge-cli-argv');
+  const promptFile = join(root, 'payload.md');
+  writeFileSync(promptFile, 'review this diff\n');
+  return ['--project-root', root, '--plugin-root', pluginRoot, '--prompt-file', promptFile, '--output', join(root, 'grok.out'),
+    '--execution-route-json', JSON.stringify(grokRoute(launcherPath(root))), '--reviewer-id', 'grok',
+    '--containment-ready-token-json', JSON.stringify(CONTAINMENT_TOKEN), '--timeout-seconds', '5'];
+}
+
+function bridgeArgvFor(fixture, token) {
+  return ['--project-root', fixture.projectRoot, '--plugin-root', pluginRoot, '--prompt-file', fixture.promptFile, '--output', fixture.outputFile,
+    '--execution-route-json', JSON.stringify(fixture.route), '--reviewer-id', 'grok', '--containment-ready-token-json', JSON.stringify(token), '--timeout-seconds', '5'];
+}
+
+// mutateAfterPreflight runs once the token exists (so the preflight passed on
+// a healthy tree and only ADMISSION sees the defect). productionMode builds a
+// distinct plugin fixture whose own native directory is the one-helper tree,
+// preflights it WITH that exact locator, and admits WITHOUT a locator.
+async function expectCliRefusal(stub, detail, { pluginRoot: otherPluginRoot = null, productionMode = false, mutateAfterPreflight = null } = {}) {
+  const tmpRoot = workspace(`grok-admission-${detail}-tmp`);
+  let admissionPluginRoot = stub.root;
+  let nativeDirectory = stub.root;
+  if (productionMode) {
+    admissionPluginRoot = workspace(`grok-admission-${detail}-plugin`);
+    nativeDirectory = join(admissionPluginRoot, 'hooks', 'scripts', 'lib', 'native');
+    mkdirSync(dirname(nativeDirectory), { recursive: true });
+    renameSync(stub.root, nativeDirectory);
+  }
+  const preflight = preflightGrokContainment({ platform: 'linux', arch: 'x64', nativeDirectory, pluginRoot: admissionPluginRoot, tmpRoot, enabledPlatforms: ['linux/x64'] });
+  assert.equal(preflight.ok, true, `${detail}: the preflight must pass on the healthy tree (got ${JSON.stringify(preflight)})`);
+  if (mutateAfterPreflight) mutateAfterPreflight(nativeDirectory);
+  const context = { platform: 'linux', arch: 'x64', pluginRoot: otherPluginRoot ?? admissionPluginRoot, enabledPlatforms: ['linux/x64'], tmpRoot };
+  if (!productionMode) context.nativeDirectory = nativeDirectory;
+  const runner = supervisorTesting.createContainedRunner(context);
+  const e2e = harness(`grok-admission-cli-${detail}`);
+  e2e.seams.processRunner = (command, args, options) => runner.run(command, args, options);
+  const out = [];
+  const err = [];
+  const exit = await runBridgeCli(bridgeArgvFor(e2e, preflight.containment_ready_token), { run: (options) => runGrokReviewer({ ...e2e.seams, containmentToken: options.containmentToken }), stdout: { write: (s) => out.push(s) }, stderr: { write: (s) => err.push(s) } });
+  assert.equal(exit, 3, detail);
+  const refusal = JSON.parse(out.at(-1).trim());
+  assert.deepEqual([refusal.stage, refusal.reason, refusal.detail], ['bridge_admission', GROK_CONTAINMENT_HELPER_FAILED, detail], detail);
+  assert.equal(existsSync(join(tmpRoot, 'deep-review-grok-containment', `${preflight.containment_ready_token.owner_id}.json`)), true, `${detail}: record left in place`);
+}
+
+test('T-OWN-13: terminalStatus reads the auth and unsupported-model patterns from stdout on a merged channel', async () => {
+  const auth = harness('grok-merged-auth', { behavior: 'failure' });
+  auth.seams.processRunner = async () => contained({ code: 1, timedOut: false, stdout: Buffer.from('Reauthentication required\n'), stderr: Buffer.alloc(0), provider_channel: 'merged-owner-stderr' });
+  const result = await runGrokReviewer(auth.seams);
+  assert.equal(result.status, 'not_authenticated');
+  assert.ok(result.warnings.includes('provider_channel: merged-owner-stderr'));
+  const tail = readFileSync(`${auth.outputFile}.stderr-tail`, 'utf8');
+  assert.match(tail, /provider_channel: merged-owner-stderr/u);
+  assert.doesNotMatch(tail, /Reauthentication/u, 'the merged channel is the report, not the diagnostics tail');
+  const model = harness('grok-merged-model', { behavior: 'failure' });
+  model.seams.processRunner = async () => contained({ code: 1, timedOut: false, stdout: Buffer.from('error: unsupported model grok-4.6\n'), stderr: Buffer.alloc(0), provider_channel: 'merged-owner-stderr' });
+  assert.equal((await runGrokReviewer(model.seams)).error_code, 'ERROR_UNSUPPORTED_MODEL');
+});
+
+test('T-OWN-16: the bridge CLI serialises a containment admission refusal as stdout JSON with exit 3 and leaves the record', async () => {
+  const optionOut = [];
+  const optionErr = [];
+  const optionExit = await runBridgeCli(minimalBridgeArgv(), {
+    run: async (options) => {
+      assert.equal(typeof options.executionPlan, 'object');
+      assert.equal(options.containmentToken.owner_id, CONTAINMENT_TOKEN.owner_id);
+      return { attempted: true, code: 7 };
+    },
+    stdout: { write: (s) => optionOut.push(s) },
+    stderr: { write: (s) => optionErr.push(s) },
+  });
+  assert.equal(optionExit, 7);
+  assert.equal(JSON.parse(optionOut.at(-1).trim()).code, 7);
+  assert.deepEqual(optionErr, []);
+
+  const cases = ['foreign_containment_owner', 'missing_grok_containment_helper', GROK_CONTAINMENT_HELPER_FAILED, 'containment_owner_not_live', 'unsupported_prepared_chain'];
+  for (const reason of cases) {
+    const out = []; const err = [];
+    const refusal = Object.assign(new Error(`ERROR_GROK_CONTAINMENT: ${reason}`), { reason, detail: 'x', containment_refusal: { ok: false, stage: 'bridge_admission', reason, detail: 'x', remedy: null, owner_id: 'grok-containment-owner-1-1-0badf00d' } });
+    const seams = { run: async () => { throw refusal; }, stdout: { write: (s) => out.push(s) }, stderr: { write: (s) => err.push(s) } };
+    const exit = await runBridgeCli(minimalBridgeArgv(), seams);
+    assert.equal(exit, 3, reason);
+    assert.deepEqual(err, [], reason);
+    assert.equal(out.length, 1, reason);
+    assert.deepEqual(JSON.parse(out[0].trim()), refusal.containment_refusal, reason);
+  }
+  const other = { run: async () => { throw new Error('ERROR_GROK_PROMPT_TRANSPORT: boom'); }, stdout: { write: () => assert.fail('no stdout') }, stderr: { write: () => {} } };
+  assert.equal(await runBridgeCli(minimalBridgeArgv(), other), 2);
+  // a tampered seal through the REAL run path with a live record: typed, exit 3, record untouched
+  const tamperStub = stubNativeRoot({ platform: 'linux', arch: 'x64' });
+  if (!tamperStub.skipReason) {
+    const tmpRoot = workspace('grok-cli-tampered-tmp');
+    const preflight = preflightGrokContainment({ platform: 'linux', arch: 'x64', nativeDirectory: tamperStub.root, pluginRoot: tamperStub.root, tmpRoot, enabledPlatforms: ['linux/x64'] });
+    const tampered = { ...preflight.containment_ready_token, token_sha256: 'f'.repeat(64) };
+    const e2e = harness('grok-cli-tampered');
+    const out = []; const err = [];
+    const exit = await runBridgeCli(bridgeArgvFor(e2e, tampered), { run: (options) => runGrokReviewer({ ...e2e.seams, containmentToken: options.containmentToken }), stdout: { write: (s) => out.push(s) }, stderr: { write: (s) => err.push(s) } });
+    assert.equal(exit, 3);
+    assert.deepEqual(err, []);
+    assert.equal(JSON.parse(out.at(-1).trim()).stage, 'bridge_admission');
+    assert.equal(existsSync(join(tmpRoot, 'deep-review-grok-containment', `${preflight.containment_ready_token.owner_id}.json`)), true);
+  }
+  // end to end: the real default runner, a token naming a foreign helper path, privacy auto_ack through the harness
+  const fixture = harness('grok-admission-e2e');
+  delete fixture.seams.processRunner;
+  fixture.seams.containmentToken = { ...CONTAINMENT_TOKEN, helper_path: '/elsewhere/helper', token_sha256: supervisorTesting.tokenSeal({ ...CONTAINMENT_TOKEN, helper_path: '/elsewhere/helper' }) };
+  await assert.rejects(() => runGrokReviewer(fixture.seams), (error) => error.containment_refusal?.stage === 'bridge_admission'
+    && ['foreign_containment_owner', 'unsupported_grok_containment'].includes(error.containment_refusal.reason));
+  // end to end through a test runner with a real stub root: every integrity_* detail and record_digest_mismatch, record left in place
+  const integrityStub = stubNativeRoot({ platform: 'linux', arch: 'x64' });
+  if (!integrityStub.skipReason) {
+    const tmpRoot = workspace('grok-admission-integrity-tmp');
+    const preflight = preflightGrokContainment({ platform: 'linux', arch: 'x64', nativeDirectory: integrityStub.root, pluginRoot: integrityStub.root, tmpRoot, enabledPlatforms: ['linux/x64'] });
+    assert.equal(preflight.ok, true);
+    const runner = supervisorTesting.createContainedRunner({ platform: 'linux', arch: 'x64', nativeDirectory: integrityStub.root, pluginRoot: integrityStub.root, enabledPlatforms: ['linux/x64'], tmpRoot });
+    const recordPath = join(tmpRoot, 'deep-review-grok-containment', `${preflight.containment_ready_token.owner_id}.json`);
+    const sums = join(integrityStub.root, 'SHA256SUMS');
+    const original = readFileSync(sums, 'utf8');
+    for (const [detail, mutate] of [
+      ['integrity_mismatch', () => writeFileSync(sums, original.replace(integrityStub.helperSha256, 'f'.repeat(64)))],
+      ['integrity_sums_missing', () => rmSync(sums)],
+      ['integrity_sums_malformed', () => writeFileSync(sums, 'garbage\n')],
+      ['integrity_not_listed', () => writeFileSync(sums, original.replace(integrityStub.helperSha256, '0'.repeat(64)))],
+    ]) {
+      mutate();
+      const e2e = harness(`grok-admission-${detail}`);
+      e2e.seams.processRunner = (command, args, options) => runner.run(command, args, options);
+      const out = []; const err = [];
+      const exit = await runBridgeCli(bridgeArgvFor(e2e, preflight.containment_ready_token), { run: (options) => runGrokReviewer({ ...e2e.seams, containmentToken: options.containmentToken }), stdout: { write: (s) => out.push(s) }, stderr: { write: (s) => err.push(s) } });
+      assert.equal(exit, 3, detail);
+      assert.deepEqual(err, [], detail);
+      const refusal = JSON.parse(out.at(-1).trim());
+      assert.deepEqual([refusal.ok, refusal.stage, refusal.reason, refusal.detail], [false, 'bridge_admission', GROK_CONTAINMENT_HELPER_FAILED, detail], detail);
+      assert.equal(existsSync(recordPath), true, `${detail}: record left in place`);
+      writeFileSync(sums, original);
+    }
+    if (process.platform !== 'win32') {
+      await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'integrity_sums_symlink', { mutateAfterPreflight: (native) => { const text = readFileSync(join(native, 'SHA256SUMS'), 'utf8'); rmSync(join(native, 'SHA256SUMS')); writeFileSync(join(native, 'real-sums'), text); symlinkSync(join(native, 'real-sums'), join(native, 'SHA256SUMS')); } });
+      await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'integrity_symlink_component', { mutateAfterPreflight: (native) => { renameSync(join(native, 'linux-x64'), join(native, 'real-linux')); symlinkSync(join(native, 'real-linux'), join(native, 'linux-x64')); } });
+    }
+    await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'integrity_outside_root', { pluginRoot: workspace('grok-admission-other-root') });
+    await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'integrity_not_release', { productionMode: true });
+    await expectCliRefusal(stubNativeRoot({ platform: 'linux', arch: 'x64' }), 'record_digest_mismatch', { mutateAfterPreflight: (native) => { const helper = join(native, 'linux-x64', 'grok-linux-pidns-owner'); const before = createHash('sha256').update(readFileSync(helper)).digest('hex'); writeFileSync(helper, Buffer.concat([readFileSync(helper), Buffer.from('\n')])); const after = createHash('sha256').update(readFileSync(helper)).digest('hex'); writeFileSync(join(native, 'SHA256SUMS'), readFileSync(join(native, 'SHA256SUMS'), 'utf8').replace(before, after)); } });
+  }
 });

@@ -25,11 +25,11 @@ import {
 const IS_WINDOWS = process.platform === 'win32';
 const CMD_META_CHARACTERS = /([()\][!^"`<>&|;, *?])/g;
 const CMD_LITERAL_PERCENT_ENV = 'DEEP_REVIEW_CMD_LITERAL_PERCENT_4BFE8C1A';
-const POSIX_TERMINATION_GRACE_MS = 100;
-const POSIX_GROUP_EXIT_POLL_MS = 10;
+export const POSIX_TERMINATION_GRACE_MS = 100;
+export const POSIX_GROUP_EXIT_POLL_MS = 10;
 // A stuck process group must not keep a caller alive forever. This limit starts
 // after SIGKILL; timing out reports that cleanup could not be confirmed.
-const POSIX_GROUP_EXIT_HARD_DEADLINE_MS = 1000;
+export const POSIX_GROUP_EXIT_HARD_DEADLINE_MS = 1000;
 const POSIX_GROUP_EXIT_UNCONFIRMED_DIAGNOSTIC =
   'POSIX process group remained after SIGKILL; cleanup could not be confirmed before the hard deadline\n';
 const WINDOWS_TASKKILL_FALLBACK_DIAGNOSTIC =
@@ -1174,7 +1174,7 @@ function comparePreparedShebang(expected, actual) {
 // first difference. Every member slot is compared for presence, normalized
 // paths, platform identity, size and digest, and the whole body is compared
 // canonically so no unnamed field can differ unnoticed.
-function comparePreparedSpawnChains(expected, actual) {
+export function comparePreparedSpawnChains(expected, actual) {
   if (!isPlainObject(expected)) return 'prepared_chain_is_not_an_object';
   for (const field of ['schema_version', 'prepared_kind', 'posix_executable_type']) {
     if (expected[field] !== actual[field]) return `prepared_chain_${field}_mismatch`;
@@ -1211,7 +1211,7 @@ function preparedChainMismatchReason(command, args, options, env) {
   );
 }
 
-function closedPreparedChainResult(reason, captureFields) {
+export function closedPreparedChainResult(reason, captureFields) {
   return {
     code: 2,
     signal: undefined,
@@ -1465,7 +1465,7 @@ function terminateWindowsProcessTree(child, env, appendStderr) {
   child.kill();
 }
 
-function signalPosixProcessGroup(child, signal) {
+export function signalPosixProcessGroup(child, signal) {
   if (!child.pid) return;
   try {
     process.kill(-child.pid, signal);
@@ -1479,7 +1479,7 @@ function signalPosixProcessGroup(child, signal) {
   }
 }
 
-function isPosixProcessGroupGone(processGroupId) {
+export function isPosixProcessGroupGone(processGroupId) {
   if (!processGroupId) return false;
   try {
     process.kill(-processGroupId, 0);

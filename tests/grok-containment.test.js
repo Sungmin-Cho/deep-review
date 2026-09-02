@@ -84,6 +84,14 @@ import {
   evaluateCoordinatorContainment,
 } from '../hooks/scripts/lib/grok-carrier-coordinator.mjs';
 import { parseOwnerControlLines } from '../hooks/scripts/lib/grok-owner-control.mjs';
+import {
+  comparePreparedSpawnChains,
+  closedPreparedChainResult,
+  signalPosixProcessGroup,
+  isPosixProcessGroupGone,
+  POSIX_TERMINATION_GRACE_MS,
+  prepareSpawnChain,
+} from '../hooks/scripts/lib/process.mjs';
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const BASELINE_COMMIT = '1c3ef2d';
@@ -443,7 +451,7 @@ test('runGrokContainedProcess and runGrokContainedProcessSync refuse on this hos
     spawner: (...args) => { spawned.push(args); throw new Error('a refused containment must never spawn'); },
   };
   const expected = SUPPORTED_HERE
-    ? /containment_owner_not_live/u
+    ? /missing_grok_containment_helper/u
     : new RegExp(UNSUPPORTED_GROK_CONTAINMENT, 'u');
   await assert.rejects(() => runGrokContainedProcess('/opt/grok', ['--version'], options), expected);
   assert.throws(() => runGrokContainedProcessSync('/opt/grok', ['--version'], options), expected);
@@ -1529,4 +1537,195 @@ test('T-OWN-14: --release from a child process removes the record with an empty 
   const again = spawnSync(process.execPath, [preflightCli, '--release', '--containment-ready-token-json', JSON.stringify(token)], { encoding: 'utf8', env });
   assert.equal(again.status, 3);
   assert.equal(JSON.parse(again.stdout.trim()).released, false);
+});
+
+// The preflight runs with a clean stub environment; faults and exit codes are
+// applied to the LAUNCH environment only (sol R1 F7).
+function stubRunner(label, { fault = '', platform = 'linux', arch = 'x64', providerOutput = 'PROVIDER OUTPUT LINE', exit = '0' } = {}) {
+  const p = stubPreflight(label, { platform, arch });
+  if (p.skipReason) return { skipReason: p.skipReason };
+  const launchEnv = { ...scrubGrokEnvironment(process.env), STUB_FAULT: fault, STUB_MECHANISM: platform === 'linux' ? 'pid-namespace' : 'job-object', STUB_PROVIDER_OUTPUT: providerOutput, STUB_EXIT: exit };
+  const runner = supervisorTesting.createContainedRunner({ platform, arch, nativeDirectory: p.stub.root, pluginRoot: p.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: p.tmpRoot });
+  const provider = process.execPath;   // sealed as native-elf on Linux, native-macho on macOS, PE on Windows -- all native
+  const chain = prepareSpawnChain(provider, ['-e', '0'], { cwd: p.stub.root, env: launchEnv }).prepared_spawn_chain;
+  const launch = (extra = {}) => runner.run(provider, ['-e', '0'], { cwd: p.stub.root, env: launchEnv, timeoutMs: 10000, expectedPreparedSpawnChain: chain, containmentToken: p.result.containment_ready_token, ...extra });
+  return { ...p, launchEnv, runner, provider, chain, launch, token: p.result.containment_ready_token, recordPath: join(p.tmpRoot, 'deep-review-grok-containment', `${p.result.containment_ready_token.owner_id}.json`) };
+}
+
+test('T-OWN-6: the adapter maps the provider channel, binds the report, spawns the inventoried path and propagates exit status', async (t) => {
+  const r = stubRunner('t-own-6');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const spawns = [];
+  const result = await r.launch({ onSpawn: (info) => spawns.push(info) });
+  assert.equal(result.code, 0);
+  assert.equal(result.provider_channel, 'merged-owner-stderr');
+  assert.match(result.stdout.toString('utf8'), /PROVIDER OUTPUT LINE/u);
+  assert.equal(result.stderr.length, 0);
+  assert.equal(result.termination_confirmed, true, JSON.stringify(result.detail));
+  assert.deepEqual([result.termination_report.owner_id, result.termination_report.generation, result.termination_report.live_members, result.termination_report.handshake], [r.token.owner_id, 1, 0, 'ok']);
+  assert.ok(Number.isFinite(result.termination_report.observed_at));
+  assert.equal(result.control_lines.length, 2);
+  assert.deepEqual([result.helper.path, result.helper.sha256], [r.stub.helperPath, r.stub.helperSha256]);
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].helperPath, r.stub.helperPath, 'the adapter spawns gate.helper_path');
+  assert.deepEqual(spawns[0].argv.slice(0, 4), ['--own-grok-tree', '--parent-pid', String(process.pid), '--']);
+  assert.equal(Object.hasOwn(spawns[0].env, 'GROK_SANDBOX'), false);
+  assert.equal(evaluateTerminationReport({ token: r.token, report: result.control_lines[1] }).termination_confirmed, false, 'a raw helper line never confirms on its own');
+  for (const exit of ['64', '125', '127']) {
+    const rr = stubRunner(`t-own-6-exit-${exit}`, { exit });
+    const res = await rr.launch();
+    assert.equal(res.code, Number(exit));
+    assert.equal(res.termination_confirmed, true, `exit ${exit} with a report is still a confirmed tree`);
+  }
+  const crlf = stubRunner('t-own-6-crlf', { fault: 'crlf' });
+  assert.equal((await crlf.launch()).termination_confirmed, true);
+});
+
+test('T-OWN-7: handshake-lost variants are unconfirmed whatever the exit status', async (t) => {
+  for (const [fault, expectedCode] of [['no_ready', 0], ['wrong_mechanism', 0], ['extra_line', 0], ['report_not_last', 0], ['exit_125_no_report', 125]]) {
+    const r = stubRunner(`t-own-7-${fault}`, { fault });
+    if (r.skipReason) { t.skip(r.skipReason); return; }
+    const res = await r.launch();
+    assert.equal(res.code, expectedCode, fault);
+    assert.equal(res.termination_confirmed, false, fault);
+    assert.equal(res.termination_report, null, fault);
+    assert.equal(res.detail, 'handshake_lost', `${fault}: the stub exits at once, so this is a lost handshake, never the start deadline (T-OWN-8 covers the hang)`);
+  }
+  const usage = stubRunner('t-own-7-usage');
+  const res = await usage.launch({ __argvOverride: ['--own-grok-tree', '--parent-pid', 'abc'] });
+  assert.deepEqual([res.code, res.termination_confirmed, res.detail], [64, false, 'handshake_lost']);
+});
+
+test('T-OWN-3: the record is consumed exactly once, only after every pre-spawn check, and never restored', async (t) => {
+  const r = stubRunner('t-own-3');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const mismatch = await r.launch({ expectedPreparedSpawnChain: { ...r.chain, chain_sha256: 'f'.repeat(64) } });
+  assert.equal(mismatch.preparedChainMismatch, true);
+  assert.equal(existsSync(r.recordPath), true, 'a pre-spawn failure leaves the record');
+  // the registry alone never admits: age the record past the TTL while liveOwners still holds the owner
+  assert.equal(supervisorTesting.liveOwners.has(r.token.owner_id), true);
+  const aged = supervisorTesting.createContainedRunner({ platform: 'linux', arch: 'x64', nativeDirectory: r.stub.root, pluginRoot: r.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: r.tmpRoot, now: () => Date.now() + GROK_CONTAINMENT_TOKEN_TTL_MS + 1 });
+  await assert.rejects(() => aged.run(r.provider, ['-e', '0'], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 10000, expectedPreparedSpawnChain: r.chain, containmentToken: r.token }), /containment_owner_not_live/u);
+  assert.equal(existsSync(r.recordPath), true);
+  // consume then spawn failure: not restored
+  const r2 = stubRunner('t-own-3-spawnfail');
+  await assert.rejects(() => r2.launch({ __spawnFailure: true }), /spawn_error/u);
+  assert.equal(existsSync(r2.recordPath), false, 'consumed before the failed spawn, never restored');
+  await assert.rejects(() => r2.launch(), /containment_owner_not_live/u);
+  // the happy path consumes; a second in-process launch is refused; --release reports consumed
+  const first = await r.launch();
+  assert.equal(first.termination_confirmed, true);
+  assert.equal(existsSync(r.recordPath), false);
+  await assert.rejects(() => r.launch(), /containment_owner_not_live/u);
+  assert.deepEqual(releaseGrokContainment(r.token, { tmpRoot: r.tmpRoot }), { released: true, reason: 'consumed', owner_id: r.token.owner_id, containment_ready: false });
+  // cross-process: a child consumes, the parent is then refused. Everything the
+  // child needs travels by FILE, never on argv: a Windows command line is capped
+  // at 32767 characters and the launch env alone can exceed it.
+  const r3 = stubRunner('t-own-3-child');
+  const spec = join(r3.tmpRoot, 'child-spec.json');
+  writeFileSync(spec, JSON.stringify({ context: { platform: 'linux', arch: 'x64', nativeDirectory: r3.stub.root, pluginRoot: r3.stub.root, enabledPlatforms: ALL_INVENTORIED, tmpRoot: r3.tmpRoot }, provider: r3.provider, cwd: r3.stub.root, env: r3.launchEnv, chain: r3.chain, token: r3.token }));
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { readFileSync } from 'node:fs';
+    import { __testing } from ${JSON.stringify(pathToFileURL(join(pluginRoot, 'hooks', 'scripts', 'lib', 'grok-process-supervisor.mjs')).href)};
+    const spec = JSON.parse(readFileSync(process.argv[1], 'utf8'));
+    const runner = __testing.createContainedRunner(spec.context);
+    const result = await runner.run(spec.provider, ['-e', '0'], { cwd: spec.cwd, env: spec.env, timeoutMs: 10000, expectedPreparedSpawnChain: spec.chain, containmentToken: spec.token });
+    process.stdout.write(JSON.stringify({ confirmed: result.termination_confirmed }));
+  `, spec], { encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(JSON.parse(child.stdout).confirmed, true);
+  await assert.rejects(() => r3.launch(), /containment_owner_not_live/u);
+});
+
+test('T-OWN-6 (sync): runSync mirrors run for a clean launch, a timeout and an overflow, and reports onSpawn after the fact', (t) => {
+  const r = stubRunner('t-own-6-sync');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const spawns = [];
+  const res = r.runner.runSync(r.provider, ['-e', '0'], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 10000, expectedPreparedSpawnChain: r.chain, containmentToken: r.token, onSpawn: (i) => spawns.push(i) });
+  assert.deepEqual([res.code, res.termination_confirmed, res.termination_ladder, res.provider_channel], [0, true, 'sync-kill', 'merged-owner-stderr']);
+  assert.equal(spawns.length, 1);
+  assert.match(res.stdout.toString('utf8'), /PROVIDER OUTPUT LINE/u);
+  const hang = stubRunner('t-own-6-sync-timeout', { fault: 'hang_after_ready' });
+  const late = hang.runner.runSync(hang.provider, ['-e', '0'], { cwd: hang.stub.root, env: hang.launchEnv, timeoutMs: 1000, expectedPreparedSpawnChain: hang.chain, containmentToken: hang.token });
+  assert.deepEqual([late.timedOut, late.code, late.termination_confirmed], [true, 124, false]);
+  const overflow = stubRunner('t-own-6-sync-overflow', { fault: 'overflow' });
+  const big = overflow.runner.runSync(overflow.provider, ['-e', '0'], { cwd: overflow.stub.root, env: overflow.launchEnv, timeoutMs: 20000, expectedPreparedSpawnChain: overflow.chain, containmentToken: overflow.token });
+  assert.deepEqual([big.captureOverflow, big.detail, big.termination_confirmed], [true, 'capture_overflow', false]);
+});
+
+test('T-OWN-8: timeout, start deadline and overflow are unconfirmed and the group is proven gone', async (t) => {
+  const hang = stubRunner('t-own-8-hang', { fault: 'hang' });
+  if (hang.skipReason) { t.skip(hang.skipReason); return; }
+  const started = Date.now();
+  const res = await hang.launch({ timeoutMs: 20000 });
+  assert.ok(Date.now() - started < 15000, 'the 5 s start deadline fires before the 20 s timeout');
+  assert.deepEqual([res.detail, res.termination_confirmed, res.group_gone], ['start_deadline', false, process.platform === 'win32' ? null : true]);
+  const slow = stubRunner('t-own-8-timeout', { fault: 'hang_after_ready' });
+  const late = await slow.launch({ timeoutMs: 1000 });
+  assert.deepEqual([late.timedOut, late.code, late.termination_confirmed], [true, 124, false]);
+  if (process.platform !== 'win32') assert.equal(late.group_gone, true, 'isPosixProcessGroupGone proved the group empty before resolving');
+  const overflow = stubRunner('t-own-8-overflow', { fault: 'overflow' });
+  const big = await overflow.launch({ timeoutMs: 20000 });
+  assert.deepEqual([big.captureOverflow, big.detail, big.termination_confirmed], [true, 'capture_overflow', false]);
+});
+
+test('T-OWN-10/11: a non-native launcher and a sealed-chain mismatch never spawn the helper and leave the record', async (t) => {
+  const r = stubRunner('t-own-10');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const spawns = [];
+  if (process.platform !== 'win32') {
+    const shebang = join(r.stub.root, 'grok-wrapper');
+    writeFileSync(shebang, '#!/usr/bin/env node\nprocess.exit(0)\n'); chmodSync(shebang, 0o755);
+    const shebangChain = prepareSpawnChain(shebang, [], { cwd: r.stub.root, env: r.launchEnv }).prepared_spawn_chain;
+    await assert.rejects(() => r.runner.run(shebang, [], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 5000, expectedPreparedSpawnChain: shebangChain, containmentToken: r.token, onSpawn: (i) => spawns.push(i) }), (error) => error.reason === 'unsupported_prepared_chain' && error.containment_refusal?.stage === 'bridge_admission');
+  }
+  if (process.platform === 'win32') {
+    const cmd = join(r.stub.root, 'grok.cmd');
+    writeFileSync(cmd, '@echo off\r\nexit /b 0\r\n');
+    const cmdChain = prepareSpawnChain(cmd, [], { cwd: r.stub.root, env: r.launchEnv }).prepared_spawn_chain;
+    assert.notEqual(cmdChain.prepared_kind, 'direct');
+    await assert.rejects(() => r.runner.run(cmd, [], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 5000, expectedPreparedSpawnChain: cmdChain, containmentToken: r.token, onSpawn: (i) => spawns.push(i) }), (error) => error.reason === 'unsupported_prepared_chain');
+  }
+  const mismatch = await r.launch({ expectedPreparedSpawnChain: { ...r.chain, chain_sha256: 'e'.repeat(64) }, onSpawn: (i) => spawns.push(i) });
+  assert.deepEqual([mismatch.preparedChainMismatch, mismatch.code], [true, 2]);
+  assert.deepEqual(spawns, []);
+  assert.equal(existsSync(r.recordPath), true);
+});
+
+test('T-OWN-17 (adapter): a token for an inventoried-but-not-enabled platform is refused before any helper lookup', async (t) => {
+  const r = stubRunner('t-own-17-adapter', { platform: 'win32', arch: 'x64' });
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const lookups = [];
+  const production = supervisorTesting.createContainedRunner({ platform: 'win32', arch: 'x64', nativeDirectory: r.stub.root, pluginRoot: r.stub.root, tmpRoot: r.tmpRoot });   // default enabled set
+  const stat = lstatSync(r.stub.helperPath);
+  rmSync(r.stub.helperPath);   // if admission looked the helper up it would now be missing_grok_containment_helper; the pending gate must fire first
+  await assert.rejects(() => production.run(r.provider, ['-e', '0'], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 5000, expectedPreparedSpawnChain: r.chain, containmentToken: r.token, onSpawn: (i) => lookups.push(i) }),
+    (error) => error.reason === UNSUPPORTED_GROK_CONTAINMENT && error.detail === 'platform_verification_pending' && error.containment_refusal?.stage === 'bridge_admission');
+  assert.deepEqual(lookups, []);
+  assert.equal(existsSync(r.recordPath), true);
+  assert.ok(stat.isFile());
+});
+
+test('T-OWN-12 (admission): the runner accepts no helper seam', async (t) => {
+  const r = stubRunner('t-own-12-admission');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  writeFileSync(join(r.stub.root, 'SHA256SUMS'), readFileSync(join(r.stub.root, 'SHA256SUMS'), 'utf8').replace(r.stub.helperSha256, 'f'.repeat(64)));
+  for (const seams of [{ helperExists: () => true }, { helperArtifact: ARTIFACT_OK }, { helperExists: () => true, helperArtifact: ARTIFACT_OK }]) {
+    await assert.rejects(() => r.launch(seams), (error) => error.reason === GROK_CONTAINMENT_HELPER_FAILED && error.detail === 'integrity_mismatch', JSON.stringify(Object.keys(seams)));
+    assert.throws(() => r.runner.runSync(r.provider, ['-e', '0'], { cwd: r.stub.root, env: r.launchEnv, timeoutMs: 5000, expectedPreparedSpawnChain: r.chain, containmentToken: r.token, ...seams }), /integrity_mismatch/u);
+  }
+  assert.equal(existsSync(r.recordPath), true);
+});
+
+test('T-OWN-9 (admission): a helper replaced between preflight and launch is record_digest_mismatch', async (t) => {
+  const r = stubRunner('t-own-9-admit');
+  if (r.skipReason) { t.skip(r.skipReason); return; }
+  const bytes = readFileSync(r.stub.helperPath);
+  writeFileSync(r.stub.helperPath, Buffer.concat([bytes, Buffer.from('\n')]));
+  // re-sign the sums so SHA256SUMS matches the new bytes: only the record disagrees now
+  const digest = createHash('sha256').update(readFileSync(r.stub.helperPath)).digest('hex');
+  const sums = readFileSync(join(r.stub.root, 'SHA256SUMS'), 'utf8').replace(r.stub.helperSha256, digest);
+  writeFileSync(join(r.stub.root, 'SHA256SUMS'), sums);
+  await assert.rejects(() => r.launch(), (error) => error.reason === GROK_CONTAINMENT_HELPER_FAILED && error.detail === 'record_digest_mismatch');
+  assert.equal(existsSync(r.recordPath), true);
 });

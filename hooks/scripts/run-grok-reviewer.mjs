@@ -458,11 +458,17 @@ function readContainmentLifecycle(processResult, containmentToken) {
   };
 }
 
+function providerDiagnostics(processResult) {
+  return processResult.provider_channel === 'merged-owner-stderr'
+    ? processResult.stdout.toString('utf8')
+    : processResult.stderr.toString('utf8');
+}
+
 function terminalStatus({ mutation, processResult }) {
   if (mutation) return 'mutated';
   if (processResult.code === 124 || processResult.timedOut) return 'timeout';
-  const stderr = processResult.stderr.toString('utf8');
-  if (processResult.code !== 0 && AUTH_PATTERN.test(stderr)) return 'not_authenticated';
+  const diagnostics = providerDiagnostics(processResult);
+  if (processResult.code !== 0 && AUTH_PATTERN.test(diagnostics)) return 'not_authenticated';
   if (processResult.code !== 0 || processResult.stdout.length === 0) return 'failed';
   return 'success';
 }
@@ -542,7 +548,22 @@ export async function runGrokReviewer(options = {}) {
 
   // D21 first of all: the owner-bound containment admission. It is consumed,
   // never established here, and a refusal precedes every downstream call.
-  const containmentToken = assertContainmentReadyToken(options.containmentToken ?? null);
+  let containmentToken;
+  try {
+    containmentToken = assertContainmentReadyToken(options.containmentToken ?? null);
+  } catch (error) {
+    if (options.containmentToken != null) {
+      error.containment_refusal = {
+        ok: false,
+        stage: 'bridge_admission',
+        reason: error.reason ?? 'invalid_containment_ready_token',
+        detail: error.message,
+        remedy: null,
+        owner_id: options.containmentToken.owner_id ?? null,
+      };
+    }
+    throw error;
+  }
 
   // D18 next: missing, malformed or seal-mismatched evidence fails before
   // privacy, prompt composition, fingerprinting, session creation and spawn.
@@ -656,6 +677,9 @@ export async function runGrokReviewer(options = {}) {
       expectedPreparedSpawnChain: carrier.prepared_spawn_chain,
       containmentToken,
     });
+    if (processResult.provider_channel === 'merged-owner-stderr') {
+      warnings.push('provider_channel: merged-owner-stderr');
+    }
 
     let identityFailure = null;
     if (derived) {
@@ -712,10 +736,11 @@ export async function runGrokReviewer(options = {}) {
 
     let status = terminalStatus({ mutation: mutation.changed, processResult });
     const stderr = processResult.stderr.toString('utf8');
+    const diagnostics = providerDiagnostics(processResult);
     let errorCode = null;
     // D11 P5: an unsupported-model diagnostic is terminal. There is no second
     // spawn, no retry without `--model`, and no resume.
-    if (status !== 'success' && processResult.code !== 0 && UNSUPPORTED_MODEL_PATTERN.test(stderr)) {
+    if (status !== 'success' && processResult.code !== 0 && UNSUPPORTED_MODEL_PATTERN.test(diagnostics)) {
       errorCode = 'ERROR_UNSUPPORTED_MODEL';
       warnings.push(`ERROR_UNSUPPORTED_MODEL: grok rejected ${model}; the Grok bridge has no retry path`);
     }
@@ -843,35 +868,40 @@ export function parseCli(argv) {
   return values;
 }
 
-async function main() {
-  const options = parseCli(process.argv.slice(2));
-  if (options.help) {
-    process.stdout.write('Usage: run-grok-reviewer.mjs --project-root DIR --plugin-root DIR --prompt-file FILE --output FILE (--routing-plan FILE | --execution-route-json JSON) --reviewer-id grok --containment-ready-token-json JSON [--mode MODE] [--timeout-seconds N] [--max-turns N]\n');
-    return;
-  }
-  if (options.containmentReadyTokenJson !== undefined) {
-    try {
-      options.containmentToken = JSON.parse(options.containmentReadyTokenJson);
-    } catch (error) {
-      throw new Error(`invalid_containment_ready_token: ${error.message}`);
+export async function runBridgeCli(argv, { run = runGrokReviewer, stdout = process.stdout, stderr = process.stderr } = {}) {
+  try {
+    const options = parseCli(argv);
+    if (options.help) {
+      stdout.write('Usage: run-grok-reviewer.mjs --project-root DIR --plugin-root DIR --prompt-file FILE --output FILE (--routing-plan FILE | --execution-route-json JSON) --reviewer-id grok --containment-ready-token-json JSON [--mode MODE] [--timeout-seconds N] [--max-turns N]\n');
+      return 0;
     }
+    if (options.containmentReadyTokenJson !== undefined) {
+      try {
+        options.containmentToken = JSON.parse(options.containmentReadyTokenJson);
+      } catch (error) {
+        throw new Error(`invalid_containment_ready_token: ${error.message}`);
+      }
+    }
+    options.pluginRoot ??= resolvePluginRoot();
+    options.executionPlan = options.executionRouteJson
+      ? parseExecutionRouteJson(options.executionRouteJson, options.reviewerId)
+      : loadExecutionPlan(options.routingPlan, options.reviewerId);
+    if (options.timeoutSeconds !== undefined) options.timeoutSeconds = Number(options.timeoutSeconds);
+    if (options.maxTurns !== undefined) options.maxTurns = Number(options.maxTurns);
+    const result = await run(options);
+    stdout.write(`${JSON.stringify(result)}\n`);
+    return result.attempted && result.code !== 0 ? result.code : 0;
+  } catch (error) {
+    if (error?.containment_refusal) {
+      stdout.write(`${JSON.stringify(error.containment_refusal)}\n`);
+      return 3;
+    }
+    stderr.write(`run-grok-reviewer.mjs: ${error.message}\n`);
+    return error.code === 'ENOENT' ? 127 : 2;
   }
-  options.pluginRoot ??= resolvePluginRoot();
-  options.executionPlan = options.executionRouteJson
-    ? parseExecutionRouteJson(options.executionRouteJson, options.reviewerId)
-    : loadExecutionPlan(options.routingPlan, options.reviewerId);
-  if (options.timeoutSeconds !== undefined) options.timeoutSeconds = Number(options.timeoutSeconds);
-  if (options.maxTurns !== undefined) options.maxTurns = Number(options.maxTurns);
-  const result = await runGrokReviewer(options);
-  process.stdout.write(`${JSON.stringify(result)}\n`);
-  if (result.attempted && result.code !== 0) process.exitCode = result.code;
 }
-
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main().catch((error) => {
-    process.stderr.write(`run-grok-reviewer.mjs: ${error.message}\n`);
-    process.exitCode = error.code === 'ENOENT' ? 127 : 2;
-  });
+  runBridgeCli(process.argv.slice(2)).then((code) => { process.exitCode = code; });
 }
 
 export const __testing = Object.freeze({
