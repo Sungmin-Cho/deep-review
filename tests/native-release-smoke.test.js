@@ -1911,6 +1911,84 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
   assert.doesNotMatch(nativeWindowsSmoke, /github\.workspace|GITHUB_WORKSPACE/iu);
   assertOrdered(windowsSmoke, 'name: Extract isolated release bundle', 'name: Run packed-tree T-PACK-3 on native Windows x86_64', 'extract before Windows T-PACK-3');
   assertOrdered(windowsSmoke, 'name: Run packed-tree T-PACK-3 on native Windows x86_64', 'name: Run packed-tree T-PACK-1 on native Windows x86_64', 'Windows T-PACK-3 before T-PACK-1');
+
+  const release = readFileSync(path.join(sourceRoot, '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.match(release, /^on:\s*\n\s*workflow_dispatch:/mu);
+  for (const job of ['verify-source', 'build-helpers', 'smoke-linux', 'smoke-windows', 'gate', 'publish']) workflowJob(release, job);
+  assert.match(workflowJob(release, 'build-helpers'), /needs:\s*verify-source/u);
+  for (const job of ['smoke-linux', 'smoke-windows']) assert.match(workflowJob(release, job), /needs:\s*\[verify-source, build-helpers\]/u, `${job} lists verify-source directly`);
+  assert.match(workflowJob(release, 'gate'), /needs:\s*\[verify-source, smoke-linux, smoke-windows\]/u);
+  assert.match(workflowJob(release, 'gate'), /environment:\s*release/u);
+  assert.match(workflowJob(release, 'publish'), /needs:\s*\[verify-source, gate\]/u);
+  assert.match(workflowJob(release, 'publish'), /permissions:\s*\n\s*contents:\s*write/u);
+  for (const job of ['verify-source', 'build-helpers', 'smoke-linux', 'smoke-windows', 'gate']) assert.doesNotMatch(workflowJob(release, job), /contents:\s*write/u, `${job} must not be able to push`);
+  for (const job of ['build-helpers', 'smoke-linux', 'smoke-windows', 'publish']) assert.match(workflowJob(release, job), /ref:\s*\$\{\{ needs\.verify-source\.outputs\.source_sha \}\}/u, `${job} checks out SOURCE_SHA`);
+  assertOrdered(workflowStep(workflowJob(release, 'verify-source'), 'Require the tag to be absent or to sit on this source commit'), 'git fetch origin', 'git rev-parse -q --verify', 'the tag is fetched from origin before it is inspected');
+  for (const job of ['smoke-linux', 'smoke-windows', 'gate', 'publish']) assert.doesNotMatch(workflowJob(release, job), /build:native|msvc-dev-cmd|mingw/u, `${job} never compiles`);
+  assert.match(workflowStep(workflowJob(release, 'build-helpers'), 'Archive the candidate'), /tar -cf .*native-candidate\.tar/u);
+  for (const job of ['smoke-linux', 'smoke-windows', 'publish']) assert.match(workflowJob(release, job), /scripts\/verify-native-candidate\.mjs/u, `${job} runs the one verifier`);
+  assert.doesNotMatch(workflowJob(release, 'smoke-windows'), /sha256sum/u);
+  const probe = workflowStep(workflowJob(release, 'smoke-linux'), 'Probe the pinned Grok CLI inside the helper');
+  assertOrdered(probe, 'curl -fsSLo install.sh', 'bash install.sh', 'installer is downloaded before it runs');
+  assertOrdered(probe, 'GROK_CLI_INSTALLER_SHA256_LINUX', 'bash install.sh', 'installer digest is checked before it runs');
+  assertOrdered(probe, 'GROK_CLI_LAUNCHER_SHA256_LINUX', 'scripts/probe-native-helper.mjs', 'launcher digest is checked before the helper probe');
+  assert.match(probe, /node --input-type=module -e/u, 'module flags precede -e');
+  for (const step of [probe, workflowStep(workflowJob(release, 'smoke-windows'), 'Probe the pinned Grok CLI inside the helper')]) {
+    for (const snippet of step.match(/--input-type=module -e '[^']*'/gu) ?? []) assert.doesNotMatch(snippet, /require\(/u, 'module-mode -e never uses require');
+  }
+  const winProbe = workflowStep(workflowJob(release, 'smoke-windows'), 'Probe the pinned Grok CLI inside the helper');
+  assertOrdered(winProbe, 'Invoke-WebRequest', 'install.ps1', 'installer downloaded before it runs');
+  assertOrdered(winProbe, 'GROK_CLI_INSTALLER_SHA256_WINDOWS', '& ./install.ps1', 'installer digest checked before it runs');
+  assert.match(winProbe, /scripts\/probe-native-helper\.mjs/u);
+  assert.doesNotMatch(winProbe, /1> |2> /u, 'no pwsh redirection of native stdio');
+  const probeScript = readFileSync(path.join(sourceRoot, 'scripts', 'probe-native-helper.mjs'), 'utf8');
+  assert.match(probeScript, /'--parent-pid', String\(process\.pid\)/u);
+  assert.match(probeScript, /parseOwnerControlLines\(run\.stdout\)/u);
+  const publish = workflowJob(release, 'publish');
+  assertOrdered(publish, 'npm pack', 'git tag -a', 'pack before tag');
+  assertOrdered(publish, 'git tag -a', 'git push origin "refs/tags/', 'tag before push');
+  assert.match(publish, /git diff --name-only "\$SOURCE_SHA" HEAD/u);
+  assert.match(publish, /\^\{tree\}/u, 'idempotent rerun compares tree hashes');
+  assert.doesNotMatch(publish, /gh release (?:upload|create)[^\n]*--clobber|git push[^\n]*(?:--force|origin main|origin HEAD)/u);
+  assert.match(publish, /BUILD-MANIFEST\.json/u);
+  assert.doesNotMatch(publish, /native\/BUILD-MANIFEST\.json/u, 'the manifest never enters the native directory');
+  assert.match(publish, /--notes-file "\$RUNNER_TEMP\/release-notes\.md"/u);
+  const attributes = readFileSync(path.join(sourceRoot, '.gitattributes'), 'utf8');
+  assert.match(attributes, /hooks\/scripts\/lib\/native\/linux-x64\/\*\* binary/u);
+  assert.match(attributes, /hooks\/scripts\/lib\/native\/win32-x64\/\*\* binary/u);
+  assert.match(attributes, /hooks\/scripts\/lib\/native\/SHA256SUMS text eol=lf/u);
+  const verifier = readFileSync(path.join(sourceRoot, 'scripts', 'verify-native-candidate.mjs'), 'utf8');
+  for (const token of ['BUILD-MANIFEST.json', 'sources', 'artifacts', 'mode', 'argv', 'SHA256SUMS', "'rev-parse', 'HEAD'"]) assert.ok(verifier.includes(token), `verifier checks ${token}`);
+});
+
+test('verify-native-candidate accepts a bound candidate and refuses every provenance mutation', () => {
+  const repo = createGitFixture('verifier checkout');
+  mkdirSync(path.join(repo, 'hooks', 'scripts', 'lib', 'native'), { recursive: true });
+  for (const s of ['grok-linux-pidns-owner.c', 'grok-win32-job-owner.c']) copyFileSync(path.join(sourceRoot, nativeRelativeRoot, s), path.join(repo, 'hooks', 'scripts', 'lib', 'native', s));
+  git(repo, ['add', '-A']); git(repo, ['commit', '-qm', 'sources']);
+  const head = git(repo, ['rev-parse', 'HEAD']).trim();
+  const extracted = path.join(fixtureRootFor(repo), 'extracted');
+  const write = (rel, bytes) => { const p = path.join(extracted, ...rel.split('/')); mkdirSync(path.dirname(p), { recursive: true }); writeFileSync(p, bytes); if (process.platform !== 'win32' && rel.startsWith('linux-x64/')) chmodSync(p, 0o755); return p; };
+  write('linux-x64/grok-linux-pidns-owner', 'linux'); write('win32-x64/grok-win32-job-owner.exe', 'win');
+  const sha = (b) => createHash('sha256').update(b).digest('hex');
+  const manifest = () => ({
+    source_sha: head,
+    sources: Object.fromEntries(['grok-linux-pidns-owner.c', 'grok-win32-job-owner.c'].map((s) => [s, sha(readFileSync(path.join(repo, 'hooks', 'scripts', 'lib', 'native', s)))])),
+    linux: { compiler: 'cc (fixture)', argv: ['cc', '-std=c11', '/x/hooks/scripts/lib/native/grok-linux-pidns-owner.c', '-o', '/out/linux-x64/grok-linux-pidns-owner'] },
+    win32: { compiler: 'gcc (fixture)', argv: ['x86_64-w64-mingw32-gcc', '-municode', '/x/hooks/scripts/lib/native/grok-win32-job-owner.c', '-o', '/out/win32-x64/grok-win32-job-owner.exe'] },
+    artifacts: { 'linux-x64/grok-linux-pidns-owner': { sha256: sha('linux'), mode: process.platform === 'win32' ? '0644' : '0755' }, 'win32-x64/grok-win32-job-owner.exe': { sha256: sha('win'), mode: '0644' } },
+  });
+  const sums = () => `${sha('linux')}  linux-x64/grok-linux-pidns-owner\n${sha('win')}  win32-x64/grok-win32-job-owner.exe\n`;
+  const run = (m, s = sums()) => { writeFileSync(path.join(extracted, 'BUILD-MANIFEST.json'), JSON.stringify(m)); writeFileSync(path.join(extracted, 'SHA256SUMS'), s); return spawnSync(process.execPath, [path.join(sourceRoot, 'scripts', 'verify-native-candidate.mjs'), extracted, repo], { encoding: 'utf8' }); };
+  assert.equal(run(manifest()).status, 0, run(manifest()).stderr);
+  const mutations = {
+    'other source sha': (m) => { m.source_sha = 'a'.repeat(40); }, 'missing source': (m) => { delete m.sources['grok-win32-job-owner.c']; }, 'extra source': (m) => { m.sources['extra.c'] = sha('x'); },
+    'extra artifact': (m) => { m.artifacts['linux-x64/other'] = { sha256: sha('o'), mode: '0755' }; }, 'wrong artifact digest': (m) => { m.artifacts['win32-x64/grok-win32-job-owner.exe'].sha256 = sha('nope'); },
+    'compiler not allowed': (m) => { m.linux.argv[0] = 'evilcc'; }, 'argv without source': (m) => { m.win32.argv = ['x86_64-w64-mingw32-gcc', '-o', '/out/win32-x64/grok-win32-job-owner.exe']; }, 'argv without output': (m) => { m.linux.argv = ['cc', '/x/hooks/scripts/lib/native/grok-linux-pidns-owner.c']; },
+  };
+  if (process.platform !== 'win32') mutations['wrong mode'] = (m) => { m.artifacts['linux-x64/grok-linux-pidns-owner'].mode = '0644'; };
+  for (const [label, mutate] of Object.entries(mutations)) { const m = manifest(); mutate(m); assert.equal(run(m).status, 1, label); }
+  assert.equal(run(manifest(), `${sha('linux')}  linux-x64/grok-linux-pidns-owner\n`).status, 1, 'sums line count');
 });
 
 test('native owner sources implement the inventoried containment mechanisms and owner handshakes without literal NUL bytes', async () => {

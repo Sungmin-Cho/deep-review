@@ -1,0 +1,347 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (x.y.z); must equal the three manifests on main'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  GROK_CLI_VERSION: '1.0.13'
+  # Bootstrap: leave a pin empty on the first run; the probe records the observed
+  # digest, fails with pin_bootstrap_required, and the maintainer commits the pin.
+  # Never invent these values.
+  GROK_CLI_INSTALLER_SHA256_LINUX: ''
+  GROK_CLI_LAUNCHER_SHA256_LINUX: ''
+  GROK_CLI_INSTALLER_SHA256_WINDOWS: ''
+  GROK_CLI_LAUNCHER_SHA256_WINDOWS: ''
+
+jobs:
+  verify-source:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Record SOURCE_SHA
+        id: source
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Require the version triple to equal the input
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            for (const f of ["package.json", ".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]) {
+              const v = JSON.parse(fs.readFileSync(f, "utf8")).version;
+              if (v !== process.env.VERSION) { console.error(`${f} carries ${v}, not ${process.env.VERSION}`); process.exit(1); }
+            }'
+      - name: Require the source polarity of the native tree
+        run: node --test --test-name-pattern='T-PACK-3' tests/grok-containment.test.js
+      - name: Require the tag to be absent or to sit on this source commit
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git fetch origin "+refs/tags/v$VERSION:refs/tags/v$VERSION" 2>/dev/null || true   # checkout@v4 fetches no tags
+          if git rev-parse -q --verify "refs/tags/v$VERSION^{commit}" >/dev/null 2>&1; then
+            parent="$(git rev-parse "v$VERSION^{commit}^")"
+            test "$parent" = "$(git rev-parse HEAD)" || { echo "tag v$VERSION exists on another source commit"; exit 1; }
+          fi
+
+  build-helpers:
+    needs: verify-source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-source.outputs.source_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install the Windows cross-compiler
+        run: sudo apt-get update && sudo apt-get install --yes gcc-mingw-w64-x86-64
+      - name: Build both native helpers
+        env:
+          GROK_NATIVE_OUTPUT_ROOT: ${{ runner.temp }}/native
+        run: |
+          GROK_NATIVE_TARGET=linux-x64 npm run build:native
+          GROK_NATIVE_TARGET=win32-x64 CC=x86_64-w64-mingw32-gcc GROK_NATIVE_COMPILER_FAMILY=gnu npm run build:native
+          chmod 0755 "$GROK_NATIVE_OUTPUT_ROOT/linux-x64/grok-linux-pidns-owner"
+          chmod 0644 "$GROK_NATIVE_OUTPUT_ROOT/win32-x64/grok-win32-job-owner.exe"
+          cd "$GROK_NATIVE_OUTPUT_ROOT" && sha256sum --check SHA256SUMS
+      - name: Write the build manifest
+        env:
+          GROK_NATIVE_OUTPUT_ROOT: ${{ runner.temp }}/native
+          SOURCE_SHA: ${{ needs.verify-source.outputs.source_sha }}
+        run: |
+          node -e '
+            const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), cp = require("node:child_process");
+            const sha = (f) => crypto.createHash("sha256").update(fs.readFileSync(f)).digest("hex");
+            const mode = (f) => (fs.statSync(f).mode & 0o777).toString(8).padStart(4, "0");
+            const root = process.env.GROK_NATIVE_OUTPUT_ROOT;
+            const first = (cmd) => cp.execSync(cmd, { encoding: "utf8" }).split("\n")[0];
+            const src = "hooks/scripts/lib/native";
+            const receipt = (target) => JSON.parse(fs.readFileSync(path.join(root, `build-receipt.${target}.json`), "utf8"));
+            const linuxReceipt = receipt("linux-x64"), winReceipt = receipt("win32-x64");
+            const manifest = {
+              source_sha: process.env.SOURCE_SHA,
+              sources: Object.fromEntries(["grok-linux-pidns-owner.c", "grok-win32-job-owner.c"].map((s) => [s, sha(path.join(src, s))])),
+              linux: { compiler: first(`${linuxReceipt.compiler} --version`), argv: linuxReceipt.argv },
+              win32: { compiler: first(`${winReceipt.compiler} --version`), argv: winReceipt.argv },
+              artifacts: {
+                "linux-x64/grok-linux-pidns-owner": { sha256: sha(path.join(root, "linux-x64/grok-linux-pidns-owner")), mode: mode(path.join(root, "linux-x64/grok-linux-pidns-owner")) },
+                "win32-x64/grok-win32-job-owner.exe": { sha256: sha(path.join(root, "win32-x64/grok-win32-job-owner.exe")), mode: mode(path.join(root, "win32-x64/grok-win32-job-owner.exe")) },
+              },
+            };
+            fs.writeFileSync(path.join(root, "BUILD-MANIFEST.json"), JSON.stringify(manifest, null, 2) + "\n");'
+          node scripts/verify-native-candidate.mjs "$GROK_NATIVE_OUTPUT_ROOT" "$GITHUB_WORKSPACE"
+      - name: Archive the candidate
+        working-directory: ${{ runner.temp }}/native
+        run: tar -cf "$RUNNER_TEMP/native-candidate.tar" linux-x64/grok-linux-pidns-owner win32-x64/grok-win32-job-owner.exe SHA256SUMS BUILD-MANIFEST.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-candidate
+          path: ${{ runner.temp }}/native-candidate.tar
+          if-no-files-found: error
+
+  smoke-linux:
+    needs: [verify-source, build-helpers]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-source.outputs.source_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Extract and verify the candidate outside the worktree
+        run: |
+          mkdir -p "$RUNNER_TEMP/extracted"
+          tar -xf "$RUNNER_TEMP/candidate/native-candidate.tar" -C "$RUNNER_TEMP/extracted"
+          node scripts/verify-native-candidate.mjs "$RUNNER_TEMP/extracted" "$GITHUB_WORKSPACE"
+      - name: Assemble the candidate tree (three runtime files only)
+        run: |
+          mkdir -p hooks/scripts/lib/native/linux-x64 hooks/scripts/lib/native/win32-x64
+          cp "$RUNNER_TEMP/extracted/linux-x64/grok-linux-pidns-owner" hooks/scripts/lib/native/linux-x64/
+          cp "$RUNNER_TEMP/extracted/win32-x64/grok-win32-job-owner.exe" hooks/scripts/lib/native/win32-x64/
+          cp "$RUNNER_TEMP/extracted/SHA256SUMS" hooks/scripts/lib/native/
+          chmod 0755 hooks/scripts/lib/native/linux-x64/grok-linux-pidns-owner
+      - name: Run the release-tree oracles
+        env:
+          DEEP_REVIEW_PACKED_ROOT: ${{ github.workspace }}
+          GROK_NATIVE_OUTPUT_ROOT: ${{ github.workspace }}/hooks/scripts/lib/native
+        run: node --test --test-name-pattern='T-PACK-1|T-PACK-3|T-LIFE-9' tests/native-release-smoke.test.js tests/grok-containment.test.js
+      - name: Probe the pinned Grok CLI inside the helper
+        env:
+          PROBE_RECORD: ${{ runner.temp }}/cli-probe.txt
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLo install.sh https://x.ai/cli/install.sh
+          installer_sha256="$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(require("node:fs").readFileSync("install.sh")).digest("hex"))')"
+          echo "installer=$installer_sha256" >> "$PROBE_RECORD"
+          if [ -z "$GROK_CLI_INSTALLER_SHA256_LINUX" ]; then echo "pin_bootstrap_required installer=$installer_sha256"; exit 1; fi
+          test "$installer_sha256" = "$GROK_CLI_INSTALLER_SHA256_LINUX" || { echo "installer digest mismatch: $installer_sha256"; exit 1; }
+          bash install.sh -s "$GROK_CLI_VERSION"
+          export PATH="$HOME/.grok/bin:$PATH"
+          cd "$GITHUB_WORKSPACE"
+          launcher="$(node --input-type=module -e 'const { prepareSpawnChain } = await import("./hooks/scripts/lib/process.mjs"); const p = prepareSpawnChain("grok", ["--version"], { env: process.env }); if (!p.ok || p.prepared_spawn_chain.prepared_kind !== "direct" || p.prepared_spawn_chain.posix_executable_type !== "native-elf" || p.prepared_spawn_chain.shebang !== null) { console.error(JSON.stringify(p)); process.exit(1); } process.stdout.write(p.prepared_spawn_chain.launcher.path)')"
+          echo "launcher_kind=direct:native-elf launcher=$launcher" >> "$PROBE_RECORD"
+          launcher_sha256="$(node -e "process.stdout.write(require('node:crypto').createHash('sha256').update(require('node:fs').readFileSync(process.argv[1])).digest('hex'))" "$launcher")"
+          echo "launcher_sha256=$launcher_sha256" >> "$PROBE_RECORD"
+          if [ -z "$GROK_CLI_LAUNCHER_SHA256_LINUX" ]; then echo "pin_bootstrap_required launcher=$launcher_sha256"; exit 1; fi
+          test "$launcher_sha256" = "$GROK_CLI_LAUNCHER_SHA256_LINUX" || { echo "launcher digest mismatch: $launcher_sha256"; exit 1; }
+          node scripts/probe-native-helper.mjs hooks/scripts/lib/native/linux-x64/grok-linux-pidns-owner "$launcher" "$GROK_CLI_VERSION" "$PROBE_RECORD"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cli-probe-linux
+          path: ${{ runner.temp }}/cli-probe.txt
+          if-no-files-found: ignore
+
+  smoke-windows:
+    needs: [verify-source, build-helpers]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-source.outputs.source_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-candidate
+          path: ${{ runner.temp }}\candidate
+      - name: Extract and verify the candidate outside the worktree
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\extracted" | Out-Null
+          tar -xf "$env:RUNNER_TEMP\candidate\native-candidate.tar" -C "$env:RUNNER_TEMP\extracted"
+          node scripts/verify-native-candidate.mjs "$env:RUNNER_TEMP\extracted" "$env:GITHUB_WORKSPACE"
+      - name: Assemble the candidate tree (three runtime files only)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force hooks\scripts\lib\native\linux-x64, hooks\scripts\lib\native\win32-x64 | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\extracted\linux-x64\grok-linux-pidns-owner" hooks\scripts\lib\native\linux-x64\
+          Copy-Item "$env:RUNNER_TEMP\extracted\win32-x64\grok-win32-job-owner.exe" hooks\scripts\lib\native\win32-x64\
+          Copy-Item "$env:RUNNER_TEMP\extracted\SHA256SUMS" hooks\scripts\lib\native\
+      - name: Run the release-tree oracles
+        shell: pwsh
+        env:
+          DEEP_REVIEW_PACKED_ROOT: ${{ github.workspace }}
+          GROK_NATIVE_OUTPUT_ROOT: ${{ github.workspace }}\hooks\scripts\lib\native
+        run: node --test --test-name-pattern='T-PACK-1|T-PACK-3|T-LIFE-9' tests/native-release-smoke.test.js tests/grok-containment.test.js
+      - name: Probe the pinned Grok CLI inside the helper
+        shell: pwsh
+        env:
+          PROBE_RECORD: ${{ runner.temp }}\cli-probe.txt
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location $env:RUNNER_TEMP
+          Invoke-WebRequest -OutFile install.ps1 https://x.ai/cli/install.ps1
+          $installerSha = (node -e "process.stdout.write(require('node:crypto').createHash('sha256').update(require('node:fs').readFileSync('install.ps1')).digest('hex'))")
+          Add-Content $env:PROBE_RECORD "installer=$installerSha"
+          if (-not $env:GROK_CLI_INSTALLER_SHA256_WINDOWS) { Write-Host "pin_bootstrap_required installer=$installerSha"; exit 1 }
+          if ($installerSha -ne $env:GROK_CLI_INSTALLER_SHA256_WINDOWS) { Write-Host "installer digest mismatch: $installerSha"; exit 1 }
+          $env:GROK_VERSION = $env:GROK_CLI_VERSION
+          & ./install.ps1
+          $env:PATH = "$env:USERPROFILE\.grok\bin;$env:PATH"
+          Set-Location $env:GITHUB_WORKSPACE
+          $launcher = (node --input-type=module -e 'const { prepareSpawnChain } = await import("./hooks/scripts/lib/process.mjs"); const p = prepareSpawnChain("grok", ["--version"], { env: process.env }); if (!p.ok || p.prepared_spawn_chain.prepared_kind !== "direct") { console.error(JSON.stringify(p)); process.exit(1); } process.stdout.write(p.prepared_spawn_chain.launcher.path)')
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Add-Content $env:PROBE_RECORD "launcher_kind=direct launcher=$launcher"
+          $launcherSha = (node -e "process.stdout.write(require('node:crypto').createHash('sha256').update(require('node:fs').readFileSync(process.argv[1])).digest('hex'))" "$launcher")
+          Add-Content $env:PROBE_RECORD "launcher_sha256=$launcherSha"
+          if (-not $env:GROK_CLI_LAUNCHER_SHA256_WINDOWS) { Write-Host "pin_bootstrap_required launcher=$launcherSha"; exit 1 }
+          if ($launcherSha -ne $env:GROK_CLI_LAUNCHER_SHA256_WINDOWS) { Write-Host "launcher digest mismatch: $launcherSha"; exit 1 }
+          node scripts/probe-native-helper.mjs hooks\scripts\lib\native\win32-x64\grok-win32-job-owner.exe "$launcher" $env:GROK_CLI_VERSION $env:PROBE_RECORD
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cli-probe-windows
+          path: ${{ runner.temp }}\cli-probe.txt
+          if-no-files-found: ignore
+
+  gate:
+    needs: [verify-source, smoke-linux, smoke-windows]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Approved by the release environment reviewer
+        run: echo "candidate approved for source ${{ needs.verify-source.outputs.source_sha }}"
+
+  publish:
+    needs: [verify-source, gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-source.outputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Extract and verify the candidate outside the worktree
+        run: |
+          mkdir -p "$RUNNER_TEMP/extracted"
+          tar -xf "$RUNNER_TEMP/candidate/native-candidate.tar" -C "$RUNNER_TEMP/extracted"
+          node scripts/verify-native-candidate.mjs "$RUNNER_TEMP/extracted" "$GITHUB_WORKSPACE"
+      - name: Copy the three runtime files into the worktree
+        run: |
+          mkdir -p hooks/scripts/lib/native/linux-x64 hooks/scripts/lib/native/win32-x64
+          cp "$RUNNER_TEMP/extracted/linux-x64/grok-linux-pidns-owner" hooks/scripts/lib/native/linux-x64/
+          cp "$RUNNER_TEMP/extracted/win32-x64/grok-win32-job-owner.exe" hooks/scripts/lib/native/win32-x64/
+          cp "$RUNNER_TEMP/extracted/SHA256SUMS" hooks/scripts/lib/native/
+          chmod 0755 hooks/scripts/lib/native/linux-x64/grok-linux-pidns-owner
+          (cd hooks/scripts/lib/native && sha256sum --check SHA256SUMS)
+      - name: Commit the release tree
+        env:
+          SOURCE_SHA: ${{ needs.verify-source.outputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          git add hooks/scripts/lib/native/linux-x64/grok-linux-pidns-owner hooks/scripts/lib/native/win32-x64/grok-win32-job-owner.exe hooks/scripts/lib/native/SHA256SUMS
+          git update-index --chmod=+x hooks/scripts/lib/native/linux-x64/grok-linux-pidns-owner
+          printf 'release: v%s native helpers (source %s)\n\n%s\n' "$VERSION" "$SOURCE_SHA" "$(cat "$RUNNER_TEMP/extracted/BUILD-MANIFEST.json")" > "$RUNNER_TEMP/commit-message.txt"
+          git commit -F "$RUNNER_TEMP/commit-message.txt"
+          test "$(git diff --name-only "$SOURCE_SHA" HEAD | sort | tr '\n' ' ')" = "hooks/scripts/lib/native/SHA256SUMS hooks/scripts/lib/native/linux-x64/grok-linux-pidns-owner hooks/scripts/lib/native/win32-x64/grok-win32-job-owner.exe "
+          test -z "$(git status --porcelain)"
+      - name: Write the release notes from the CHANGELOG block
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const text = fs.readFileSync("CHANGELOG.md", "utf8");
+            const start = text.indexOf(`## [${process.env.VERSION}]`);
+            if (start < 0) { console.error("CHANGELOG block missing"); process.exit(1); }
+            const next = text.indexOf("\n## [", start + 1);
+            fs.writeFileSync(process.env.RUNNER_TEMP + "/release-notes.md", text.slice(start, next < 0 ? undefined : next).trim() + "\n");'
+      - name: Pack and verify the release tree
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-bundle"
+          npm pack --pack-destination "$RUNNER_TEMP/release-bundle"
+          listing="$(tar -tzf "$RUNNER_TEMP"/release-bundle/*.tgz)"
+          echo "$listing" | grep -q 'package/hooks/scripts/lib/native/linux-x64/grok-linux-pidns-owner'
+          echo "$listing" | grep -q 'package/hooks/scripts/lib/native/win32-x64/grok-win32-job-owner.exe'
+          echo "$listing" | grep -q 'package/hooks/scripts/lib/native/SHA256SUMS'
+          if echo "$listing" | grep -q 'BUILD-MANIFEST.json'; then echo "manifest leaked into the pack"; exit 1; fi
+          cp "$RUNNER_TEMP/extracted/SHA256SUMS" "$RUNNER_TEMP/extracted/BUILD-MANIFEST.json" "$RUNNER_TEMP/release-bundle/"
+      - name: Tag (idempotent on an identical tree) and push the tag only
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          candidate_tree="$(git rev-parse 'HEAD^{tree}')"
+          if git fetch origin "refs/tags/v$VERSION:refs/tags/v$VERSION" 2>/dev/null; then
+            remote_tree="$(git rev-parse "v$VERSION^{tree}")"
+            test "$remote_tree" = "$candidate_tree" || { echo "tag v$VERSION exists with a different tree"; exit 1; }
+            echo "tag already published with an identical tree; skipping the push"
+          else
+            git tag -a "v$VERSION" -m "deep-review v$VERSION"
+            git push origin "refs/tags/v$VERSION"
+          fi
+      - name: Create or complete the GitHub Release without clobbering
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          expected="deep-review-$VERSION.tgz SHA256SUMS BUILD-MANIFEST.json"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/existing"
+            for asset in $(gh release view "v$VERSION" --json assets --jq '.assets[].name'); do
+              case " $expected " in *" $asset "*) ;; *) echo "unexpected asset $asset"; exit 1;; esac
+              gh release download "v$VERSION" --pattern "$asset" --dir "$RUNNER_TEMP/existing"
+              cmp "$RUNNER_TEMP/existing/$asset" "$RUNNER_TEMP/release-bundle/$asset" || { echo "asset $asset differs"; exit 1; }
+            done
+            for asset in $expected; do
+              gh release view "v$VERSION" --json assets --jq '.assets[].name' | grep -qx "$asset" || gh release upload "v$VERSION" "$RUNNER_TEMP/release-bundle/$asset"
+            done
+          else
+            gh release create "v$VERSION" --title "deep-review v$VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" "$RUNNER_TEMP"/release-bundle/*
+          fi
