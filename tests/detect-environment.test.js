@@ -575,11 +575,15 @@ const coordinatorLibUrl = pathToFileURL(join(
 )).href;
 const standaloneDetectorPath = join(__dirname, '..', 'hooks', 'scripts', 'detect-environment.mjs');
 
-const GROK_HELP_FLAGS = [
+const GROK_HELP_FLAG_LIST = [
   '--single', '--prompt-file', '--model', '--reasoning-effort',
   '--permission-mode', '--sandbox', '--cwd', '--output-format', '--max-turns',
   '--session-id', '--no-memory', '--no-subagents',
-].join(' ');
+];
+function renderHelp(flags) {
+  return flags.join(' ');
+}
+const GROK_HELP_FLAGS = renderHelp(GROK_HELP_FLAG_LIST);
 
 const liveCoordinators = new Set();
 
@@ -589,25 +593,25 @@ test.after(() => {
   }
 });
 
-function grokStubSource(log) {
+function grokStubSource(log, { version = '1.0.4', build = 'd846eb93d94d', helpFlags = GROK_HELP_FLAG_LIST } = {}) {
   return [
     "'use strict';",
     "const fs = require('node:fs');",
     `const log = ${JSON.stringify(log)};`,
     'fs.appendFileSync(log, `${JSON.stringify(process.argv.slice(2))}\\n`);',
-    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
-    `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${GROK_HELP_FLAGS}\n`)});`,
+    `if (process.argv[2] === '--version') process.stdout.write(${JSON.stringify(`grok ${version} (${build}) [stable]\n`)});`,
+    `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${renderHelp(helpFlags)}\n`)});`,
     'else process.exitCode = 2;',
     '',
   ].join('\n');
 }
 
-function makeGrokBin(prefix) {
+function makeGrokBin(prefix, { version = '1.0.4', build = 'd846eb93d94d', helpFlags = GROK_HELP_FLAG_LIST } = {}) {
   const root = makeTemporaryDirectory(prefix);
   const bin = join(root, 'bin');
   const log = join(root, 'grok-calls.ndjson');
   mkdirSync(bin, { recursive: true });
-  const source = grokStubSource(log);
+  const source = grokStubSource(log, { version, build, helpFlags });
   if (process.platform === 'win32') {
     const program = join(root, 'grok-probe.js');
     writeFileSync(program, source);
@@ -1359,16 +1363,30 @@ test('in-process coordinator success stdout has two lines and no ok key (T9)', a
 
 test('detectEnvironment reports unsupported_grok_cli_version without verifying (T10)', async () => {
   const { detectEnvironment } = await loadDetector();
-  const grok = makeGrokBin('t10-version-');
-  const grokFile = process.platform === 'win32' ? join(grok.root, 'grok-probe.js') : join(grok.bin, 'grok');
-  writeFileSync(grokFile, readFileSync(grokFile, 'utf8').replaceAll('1.0.4', '1.0.13'));
+  const grok = makeGrokBin('t10-version-', { version: '1.0.99' });
   const env = pathEnvironment(grok.bin);
   const detected = await detectEnvironment({ cwd: createGitFixture('t10 version'), env, grokCandidate: true });
   assert.equal(detected.grok_cli, false);
   assert.equal(detected.grok_compatibility_verified, false);
-  assert.equal(detected.grok_version, '1.0.13');
+  assert.equal(detected.grok_version, '1.0.99');
   assert.equal(detected.grok_unavailable_reason, 'unsupported_grok_cli_version');
-  assert.deepEqual(detected.grok_supported_versions, ['1.0.4']);
+  assert.deepEqual(detected.grok_supported_versions, ['1.0.4', '1.0.13']);
+});
+
+test('detectEnvironment verifies a 1.0.13 CLI whose help hides --no-memory (T-COMPAT-13)', async () => {
+  const { detectEnvironment } = await loadDetector();
+  const { GROK_CLI_PROFILES } = await import(pathToFileURL(join(
+    __dirname, '..', 'hooks', 'scripts', 'lib', 'grok-compatibility-carrier.mjs',
+  )).href);
+  const grok = makeGrokBin('t13-', { version: '1.0.13', build: '5e9a58528b76', helpFlags: GROK_HELP_FLAG_LIST.filter((f) => f !== '--no-memory') });
+  const detected = await detectEnvironment({ cwd: createGitFixture('t13'), env: pathEnvironment(grok.bin), grokCandidate: true });
+  assert.equal(detected.grok_compatibility_verified, true);
+  assert.equal(detected.grok_version, '1.0.13');
+  assert.deepEqual(
+    detected.grok_compatibility_evidence.required_help_flags,
+    [...GROK_CLI_PROFILES['1.0.13'].required_help_flags],
+  );
+  assert.deepEqual(grokChildren(grok.log), [['--version'], ['--help']]);
 });
 
 test('missing carrier frame with closed-schema stdout becomes containment_refusal (T10)', async () => {
@@ -1403,8 +1421,8 @@ test('missing carrier frame with closed-schema stdout becomes containment_refusa
     `process.stdout.write(${JSON.stringify(`${JSON.stringify({
       ...environment,
       grok_unavailable_reason: 'unsupported_grok_cli_version',
-      grok_version: '1.0.13',
-      grok_supported_versions: ['1.0.4'],
+      grok_version: '1.0.99',
+      grok_supported_versions: ['1.0.4', '1.0.13'],
     })}\n`)});`,
     '',
   ].join('\n'));
@@ -1420,7 +1438,7 @@ test('missing carrier frame with closed-schema stdout becomes containment_refusa
     }),
     (error) => {
       assert.equal(error.containment_refusal.reason, 'unsupported_grok_cli_version');
-      assert.equal(error.containment_refusal.grok_version, '1.0.13');
+      assert.equal(error.containment_refusal.grok_version, '1.0.99');
       return true;
     },
   );
