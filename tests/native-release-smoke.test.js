@@ -1916,6 +1916,8 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
   assert.match(release, /^on:\s*\n\s*workflow_dispatch:/mu);
   assert.match(release, /GROK_CLI_INSTALLER_SHA256_LINUX: '[a-f0-9]{64}'/u, 'linux installer pin is an observed digest, never empty after bootstrap');
   assert.match(release, /GROK_CLI_INSTALLER_SHA256_WINDOWS: '[a-f0-9]{64}'/u, 'windows installer pin is an observed digest, never empty after bootstrap');
+  assert.match(release, /GROK_CLI_LAUNCHER_SHA256_LINUX: '[a-f0-9]{64}'/u, 'linux launcher pin is an observed digest, never empty after bootstrap');
+  assert.match(release, /GROK_CLI_LAUNCHER_SHA256_WINDOWS: '[a-f0-9]{64}'/u, 'windows launcher pin is an observed digest, never empty after bootstrap');
   for (const job of ['verify-source', 'build-helpers', 'smoke-linux', 'smoke-windows', 'gate', 'publish']) workflowJob(release, job);
   assert.match(workflowJob(release, 'build-helpers'), /needs:\s*verify-source/u);
   for (const job of ['smoke-linux', 'smoke-windows']) assert.match(workflowJob(release, job), /needs:\s*\[verify-source, build-helpers\]/u, `${job} lists verify-source directly`);
