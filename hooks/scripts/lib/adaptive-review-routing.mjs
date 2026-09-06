@@ -1,6 +1,7 @@
 import { rubricIdForRole, isDocumentReviewMode } from './assignment-rubrics.mjs';
 import { REVIEWER_IDS, REVIEWER_PROVIDERS } from './reviewer-ids.mjs';
 import { UNSUPPORTED_GROK_CONTAINMENT } from './grok-process-supervisor.mjs';
+import { isValidatedLoopProgress } from './review-loop-decision.mjs';
 
 const DOCUMENT_TARGETS = new Set([
   'design-document',
@@ -204,7 +205,7 @@ function staticAssignments(candidates, maximumReviewers, requiredReviewers, requ
 
 export function planReviewerAssignments(options = {}) {
   const artifacts = Array.isArray(options.artifacts) ? options.artifacts : [];
-  const risk = validateRisk(options.risk || 'low');
+  const risk = validateRisk(maximumRisk(options.risk || 'low', isValidatedLoopProgress(options.progress) ? options.progress.risk : undefined));
   const artifactPhase = classifyArtifactPhase(artifacts);
   const documentReviewMode = classifyDocumentReviewMode(artifacts);
   const reviewerStrategy = options.reviewerStrategy || 'adaptive';
@@ -222,7 +223,8 @@ export function planReviewerAssignments(options = {}) {
   const providerUnavailability = options.providerUnavailability && typeof options.providerUnavailability === 'object'
     ? options.providerUnavailability
     : {};
-  const progressState = options.progress?.state || 'initial';
+  const trustedProgress = isValidatedLoopProgress(options.progress);
+  const progressState = trustedProgress ? options.progress.state : !options.progress || options.progress.state === 'initial' ? 'initial' : 'changed';
   const usedReviewers = new Set(options.progress?.used_reviewers || []);
   const baseFloor = routingFloor({
     artifactPhase,
@@ -237,7 +239,7 @@ export function planReviewerAssignments(options = {}) {
     && !criticalRisk
     ? 1
     : baseFloor.providerFamilyMinimum;
-  const shouldExpand = ['regression', 'stalled'].includes(progressState);
+  const shouldExpand = trustedProgress && progressState === 'regression';
   const tierAdjustment = shouldExpand ? 1 : baseFloor.tierAdjustment;
 
   const missingHardConstraints = [];
@@ -375,6 +377,11 @@ export function planReviewerAssignments(options = {}) {
     }
   }
 
+  const hasConfirmation = assignments.some(assignment => assignment.assignment_role === 'confirmation');
+  if (progressState === 'confirmation' && !hasConfirmation) {
+    const baseline = planReviewerAssignments({ ...options, risk, progress: { state: 'changed', used_reviewers: [...usedReviewers] } });
+    return { ...baseline, ...(options.progress.confirmation_request ? { pending_confirmation: options.progress.confirmation_request } : {}) };
+  }
   const providerFamilies = new Set(assignments.map((assignment) => assignment.provider)).size;
   const shortfalls = [];
   if (assignments.length < baseFloor.minimumReviewers) shortfalls.push('minimum_reviewers');
@@ -424,6 +431,7 @@ export function planReviewerAssignments(options = {}) {
       .filter((assignment) => assignment.required === true)
       .map((assignment) => assignment.reviewer_id),
     assignments,
+    ...(trustedProgress && options.progress.confirmation_request ? { pending_confirmation: options.progress.confirmation_request } : {}),
     shortfalls: uniqueShortfalls,
     confidence_floor: confidenceFloor,
     operational_failure: operationalFailure,

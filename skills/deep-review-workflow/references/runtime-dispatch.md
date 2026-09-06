@@ -87,3 +87,29 @@ classes rather than a total backstop. The Grok seat also captures its
 post-review fingerprint only after confirmed whole-tree termination.
 `{plugin_root}/skills/deep-review-workflow/references/grok-integration.md` states
 each of those limits exactly.
+
+## Prepared launch and attempt evidence
+
+The public prepared pipeline uses
+`{plugin_root}/hooks/scripts/review-evidence.mjs` `build-launch` before each
+call. Native calls pass its exact `payload` string as the host argument and
+record `native-argument` provenance. Bridges pass the same bytes through their
+payload file with `--expected-payload-sha256`; retain the adapter's observed
+`route_payload_sha256`/`route_payload_bytes` as `bridge_observation` and record
+`bridge-read`. Hashes and local attempt/invocation IDs come from Node. Do not
+invent provider session IDs or substitute a file-reference prompt for the
+captured native argument.
+
+Every raw attempt carries the prepared evidence digest and before/after target
+snapshots, in addition to the existing fingerprints and mutation gates. A
+mixed-target round is invalid. Build dispatch from actual captures before
+prepared synthesis and canonical finalization. Preserve failed/time-out calls
+and each observed retry with its own attempt identity; canonical role names
+can recur in later rounds and do not deduplicate those calls. Exposed usage
+requires finite nonnegative input_tokens, output_tokens, cached_tokens,
+wall_time_ms or cost and a named provenance; unknown fields remain null.
+
+Only the verified schema-3 carrier can request confirmation contraction or
+evidenced regression expansion. Legacy progress and report-only new/stalled
+observations use baseline routing. Public selections, path/code/policy/receipt
+risk floors and the critical implementation floor remain effective.

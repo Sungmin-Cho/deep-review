@@ -394,6 +394,16 @@ test('document READY with deferred evidence uses unchanged receipt 2.0 and raw g
       .deferred_findings.length,
     1,
   );
+  const loop = await import('../hooks/scripts/loop-state.mjs');
+  const targetFile = path.join(f.repo, '.deep-review/tmp/document-target.json');
+  fs.writeFileSync(targetFile, JSON.stringify(target));
+  const round = loop.recordRound({ repoRoot: target.scope.repo_root, roundNumber: 1, roundLimit: 2,
+    decisionFile: result.decision_path, reviewReport: result.report_path, postResponseTargetFile: targetFile,
+    stateDir: path.join(f.repo, '.deep-review/tmp') });
+  const finished = await loop.decideRound({ stateFile: round.state_file, roundLimit: 2, currentTargetFile: targetFile, phase: 'after-respond' });
+  assert.equal(finished.stop_reason, 'READY_FOR_IMPLEMENTATION');
+  assert.equal(finished.completion_status, 'verified');
+  assert.deepEqual(loop.readRoundState(round.state_file).verified_closed_ids, []);
   await assert.rejects(
     f.finalizeReviewDecision({
       repo: f.repo,
@@ -401,6 +411,7 @@ test('document READY with deferred evidence uses unchanged receipt 2.0 and raw g
     }),
   );
   fs.writeFileSync(path.join(f.repo, 'plan.md'), '# Plan after authorized Respond\n');
+  assert.equal(loop.readRoundState(round.state_file).pending_findings.length, 1, 'history retains the ledger after a legitimate source change');
   await assert.rejects(
     f.verifyReviewDecision({ repo: f.repo, decisionFile: result.decision_path }),
   );
@@ -811,7 +822,8 @@ test('prepared thin synthesis CLI completes and malformed controls return struct
 
 test('prepared synthesis confirms exact pending IDs and floors missing closure', async t => {
   const f=await fixture(t);const id='prior-pending-1';
-  const prepared=f.prepareReviewRound({routingPlan:plan(),target:f.target,evidenceInputs:f.evidenceInputs,roundId:'confirmation-1',confirmationRequest:{schema_version:1,target_digest:f.target.target_digest,finding_ids:[id]}});
+  const confirmationPlan=plan(); confirmationPlan.routes[0].assignment_role='confirmation'; confirmationPlan.routes[0].rubric_id='confirmation-v1'; confirmationPlan.candidate_reviewers[0].assignment_roles=['confirmation'];
+  const prepared=f.prepareReviewRound({routingPlan:confirmationPlan,target:f.target,evidenceInputs:f.evidenceInputs,roundId:'confirmation-1',confirmationRequest:{schema_version:1,target_digest:f.target.target_digest,finding_ids:[id]}});
   const route={protocol_version:'3.0',...prepared.plan.routes[0]};
   const launches=[{...f.launches[0],execution_route:route,payload:f.buildPreparedReviewerPayload({executionRoute:route,evidenceInputs:f.evidenceInputs})}];
   assert.match(launches[0].payload,/## Confirmation/);assert.match(launches[0].payload,/prior-pending-1/);

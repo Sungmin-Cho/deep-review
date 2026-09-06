@@ -132,3 +132,13 @@ PR 코멘트 게시(`gh api .../replies`)는 rate limit / 네트워크 오류 / 
 | `n/a` | ACCEPT 항목 0건으로 Phase 6 전체 skip |
 
 결정 절차는 `{plugin_root}/skills/receiving-review/references/respond-execution.md` Step 2.5(Phase 6 subagent dispatch) 및 스펙 §5.4 결정표 참조.
+
+## Prepared response evidence
+
+For prepared reviews record the exact source decision path/digest and each
+confirmed finding_id from the Node response-items result. Link every attempted
+Phase 6 group result, verification receipt, commit result when present, and the
+archived response evidence_file. Record failed/ halted/unknown status without
+converting a missing report or receipt to zero changed files. This metadata
+is separate from the legacy human-readable item counts. Loop completion and
+final target attribution come only from the Node decide-round result.

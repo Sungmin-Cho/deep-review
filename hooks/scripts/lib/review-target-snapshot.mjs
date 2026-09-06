@@ -210,6 +210,10 @@ function policies(repo) {
   return rows.sort();
 }
 export async function captureReviewTarget({ scope }) {
+  return captureReviewTargetSync({ scope });
+}
+// The capture core is synchronous; both APIs share exactly the same guards.
+export function captureReviewTargetSync({ scope }) {
   try {
     scope = normalizeScope(scope);
     const repo = scope.repo_root;

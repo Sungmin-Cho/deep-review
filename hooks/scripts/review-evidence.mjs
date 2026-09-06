@@ -10,7 +10,7 @@ import {
   parseArtifactGate,
   evaluateDeferredAcceptance,
 } from './document-readiness.mjs';
-import { verifyPreparedReviewerPayload } from './build-reviewer-payload.mjs';
+import { verifyPreparedReviewerPayload, buildPreparedReviewerPayload } from './build-reviewer-payload.mjs';
 import { evaluateReviewerAttempt, synthesizeReviewRound } from './review-synthesis.mjs';
 import {
   parseExecutionPlanDocument,
@@ -23,6 +23,7 @@ import { extractFindingState } from './lib/finding-identity.mjs';
 import { renderAdjudicatedReport } from './lib/report-contract.mjs';
 import {
   captureReviewTarget,
+  captureReviewTargetSync,
   createTargetScope,
   sameReviewTarget,
   evidenceHash,
@@ -46,12 +47,55 @@ export function validateEvidenceInputs(value) {
     throw new Error('invalid evidence inputs');
   return value;
 }
+
+const USAGE_FIELDS = ['input_tokens', 'output_tokens', 'cached_tokens', 'wall_time_ms', 'cost'];
+export function normalizeObservedUsage(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)
+      || typeof value.provenance !== 'string' || !value.provenance.trim()
+      || Object.keys(value).some(key => ![...USAGE_FIELDS, 'provenance'].includes(key))
+      || USAGE_FIELDS.some(key => value[key] !== undefined && value[key] !== null
+        && (typeof value[key] !== 'number' || !Number.isFinite(value[key]) || value[key] < 0)))
+    throw new Error('invalid observed usage or provenance');
+  return { ...Object.fromEntries(USAGE_FIELDS.map(key => [key, value[key] ?? null])), provenance: value.provenance };
+}
+
+function operationAccounting(input, admitted) {
+  const dispatched = [];
+  const ids = new Set();
+  const invocations = new Set();
+  for (const launch of input.launches) {
+    if (launch.retry_attempts !== undefined && (!Array.isArray(launch.retry_attempts) || launch.retry_attempts.length > 20))
+      throw new Error('invalid retry attempts');
+    const retries = launch.retry_attempts || [];
+    for (const retry of retries) {
+      if (!retry || !['failed', 'timeout', 'cancelled'].includes(retry.status))
+        throw new Error('retry attempts require observed terminal status');
+    }
+    for (const attempt of [...retries, launch]) {
+      if (typeof attempt.attempt_id !== 'string' || !attempt.attempt_id.trim()
+          || typeof attempt.invocation_id !== 'string' || !attempt.invocation_id.trim()
+          || ids.has(attempt.attempt_id) || invocations.has(attempt.invocation_id))
+        throw new Error('invalid dispatched attempt identity');
+      ids.add(attempt.attempt_id); invocations.add(attempt.invocation_id);
+      dispatched.push({ reviewer_id: launch.reviewer_id, attempt_id: attempt.attempt_id,
+        invocation_id: attempt.invocation_id, status: attempt === launch
+          ? (admitted.some(a => a.reviewer_id === launch.reviewer_id && a.included) ? 'admitted' : 'not_admitted')
+          : attempt.status, usage: normalizeObservedUsage(attempt.usage) });
+    }
+  }
+  const planned = input.routing_plan.routes.length;
+  return { dispatched_attempts: dispatched, planned_calls: input.routing_plan.routes.map(route => ({ round_id: input.routing_plan.round_id, reviewer_id: route.reviewer_id })), planned_reviewer_calls: planned,
+    executed_reviewer_calls: dispatched.length,
+    admitted_reviewer_calls: admitted.filter(a => a.included).length,
+    not_run_reviewer_calls: Math.max(0, planned - input.launches.length) };
+}
 export function prepareReviewRound({
   routingPlan,
   target,
   evidenceInputs,
   roundId,
-  confirmationRequest = null,
+  confirmationRequest = routingPlan?.pending_confirmation ?? null,
 }) {
   if (!sameReviewTarget(target, target)) throw new Error('captured review target required');
   validateEvidenceInputs(evidenceInputs);
@@ -64,12 +108,15 @@ export function prepareReviewRound({
   )
     throw new Error('production protocol 3 plan required');
   for (const route of plan.routes) parseExecutionPlanDocument(plan, route.reviewer_id);
+  const designated = confirmationRequest ? plan.routes.filter(route => route.assignment_role === 'confirmation') : [];
+  if (confirmationRequest && !designated.length) designated.push(plan.routes.find(route => route.assignment_role === 'standard') ?? plan.routes[0]);
   const binding = {
     decision_mode: plan.artifact_phase === 'document' ? 'artifact-gate-v1' : 'adjudication-v1',
     review_target: structuredClone(target),
     round_id: roundId,
     evidence_digest: evidenceHash(evidenceInputs),
     confirmation_request: structuredClone(confirmationRequest),
+    confirmation_reviewer_ids: designated.map(route => route.reviewer_id),
   };
   Object.assign(plan, binding);
   plan.routes = plan.routes.map((route) => ({ ...route, ...binding }));
@@ -200,6 +247,103 @@ export function buildDispatchEvidence({ routingPlan, attempts, launches, roundId
     };
   });
   return { round_id: roundId, routing_plan_sha256: evidenceHash(routingPlan), records };
+}
+
+export function buildReviewerLaunch({ executionRoute, evidenceInputs }) {
+  const payload = buildPreparedReviewerPayload({ executionRoute, evidenceInputs });
+  const observed = verifyPreparedReviewerPayload(payload, executionRoute);
+  return { reviewer_id: executionRoute.reviewer_id, attempt_id: randomUUID(), invocation_id: randomUUID(),
+    execution_route: executionRoute, payload, ...observed };
+}
+
+export async function prepareResponseItems({ repo, decisionFile }) {
+  const decision = verifyReviewDecisionSync({ repo, decisionFile });
+  if (!sameReviewTarget(decision.review_target, await captureReviewTarget({ scope: decision.review_target.scope })))
+    throw new Error('response target changed since review');
+  if (decision.decision_mode !== 'adjudication-v1')
+    return { decision_sha256: decision.decision_sha256, decision_mode: decision.decision_mode, readiness: decision.readiness, confirmed_findings: null };
+  const confirmed = (decision.adjudication?.groups ?? []).filter(group => group.disposition === 'confirmed_blocker').map(group => {
+    const state = extractFindingState(renderAdjudicatedReport({ date: decision.date, verdict: 'CONCERN', groups: [group] }), { repoRoot: repo });
+    if (state.status !== 'complete' || state.findings.length !== 1) throw new Error('confirmed response finding lacks complete identity');
+    return { ...state.findings[0], source_refs: group.source_refs, evidence: group.evidence };
+  });
+  return { decision_sha256: decision.decision_sha256, decision_mode: decision.decision_mode,
+    canonical_report_path: decision.canonical_report_path, review_target: decision.review_target, confirmed_findings: confirmed };
+}
+
+const OPERATION_REASONS = new Set(['NO_TRUSTED_REVIEWER', 'REQUIRED_REVIEWER_FAILED', 'TARGET_DRIFT', 'OPERATIONAL_FAILURE', 'SOFT_FLOOR_REPLACED']);
+function replayOperations(repo, input) {
+  const binding = parsePreparedReviewBinding(input.routing_plan);
+  if (!binding || binding.review_target.scope.repo_root !== repo) throw new Error('prepared operations target required');
+  const admitted = input.attempts.map(evaluateReviewerAttempt);
+  for (const launch of input.launches) {
+    const route = input.routing_plan.routes.find(row => row.reviewer_id === launch.reviewer_id);
+    if (!route || evidenceHash({ protocol_version: '3.0', ...route }) !== evidenceHash(launch.execution_route)) throw new Error('operations route mismatch');
+    const observed = verifyPreparedReviewerPayload(launch.payload, launch.execution_route);
+    if (!['native-argument', 'bridge-read'].includes(launch.payload_provenance)
+        || (launch.payload_provenance === 'bridge-read' && (launch.bridge_observation?.route_payload_sha256 !== observed.payload_sha256
+          || launch.bridge_observation?.route_payload_bytes !== observed.payload_bytes))) throw new Error('operations payload provenance mismatch');
+    if (!input.attempts.some(raw => raw.reviewer_id === launch.reviewer_id)) throw new Error('operations launch missing result attempt');
+  }
+  const accounting = operationAccounting(input, admitted);
+  let unknown = false;
+  for (const launch of input.launches) {
+    const result = launch.result_file ? readControlFile(repo, launch.result_file) : null;
+    if (result && evidenceHash(readBoundedFile(repo, launch.result_file)) !== launch.result_sha256) throw new Error('operation result digest mismatch');
+    if (!result || result.launched !== true || typeof result.provenance !== 'string' || !result.provenance.trim()) { unknown = true; continue; }
+    if (!['failed', 'timeout', 'cancelled', 'completed'].includes(result.status)
+        || (result.exit_code !== undefined && result.exit_code !== null && (!Number.isSafeInteger(result.exit_code) || result.exit_code < 0)))
+      throw new Error('invalid actual execution result');
+    const row = accounting.dispatched_attempts.find(attempt => attempt.attempt_id === launch.attempt_id);
+    row.status = result.status;
+  }
+  if (unknown) {
+    accounting.executed_reviewer_calls = null;
+    accounting.not_run_reviewer_calls = null;
+  }
+  // This surface never admits a role, even when captured output is parseable.
+  accounting.admitted_reviewer_calls = 0;
+  return { schema_version: 1, status: 'count_only', phase6_allowed: false,
+    round_id: binding.round_id, review_target: binding.review_target, accounting };
+}
+
+export function recordReviewOperations({ repo, input, reason = 'OPERATIONAL_FAILURE' }) {
+  repo = realpathSync(repo);
+  if (!OPERATION_REASONS.has(reason)) throw new Error('invalid operations reason');
+  input = loadReviewEvidenceInput({ repo, input });
+  const nonce = randomUUID();
+  for (let index = 0; index < input.launches.length; index++) {
+    const launch = input.launches[index];
+    if (!launch.result_file) continue;
+    const bytes = readBoundedFile(repo, launch.result_file);
+    launch.result_file = publish(repo, `.deep-review/receipts/operations/${nonce}-${index}-result.json`, bytes);
+    launch.result_sha256 = evidenceHash(bytes);
+  }
+  const result = replayOperations(repo, input);
+  const current = captureReviewTargetSync({ scope: result.review_target.scope });
+  if (!sameReviewTarget(current, current)) throw new Error('operations current target capture failed');
+  const capture = captureEvidenceSource(repo, input, nonce);
+  capture.artifacts.forEach(artifact => publish(repo, artifact.file, artifact.bytes));
+  const source = publish(repo, `.deep-review/receipts/operations/${nonce}-source.json`, capture.bytes);
+  const body = { ...result, reason, current_target: current, source_input_path: source, source_input_sha256: evidenceHash(capture.bytes) };
+  const receipt = { ...body, operations_sha256: evidenceHash(body) };
+  const file = publish(repo, `.deep-review/receipts/operations/${nonce}-operations.json`, canonicalStringify(receipt));
+  return { operations_file: file, receipt };
+}
+
+export function verifyReviewOperations({ repo, operationsFile }) {
+  repo = realpathSync(repo);
+  const receipt = readControlFile(repo, operationsFile);
+  const { operations_sha256: seal, ...body } = receipt;
+  if (evidenceHash(body) !== seal || !OPERATION_REASONS.has(body.reason) || body.current_target?.scope?.repo_root !== repo
+      || !sameReviewTarget(body.current_target, body.current_target)) throw new Error('invalid operations receipt');
+  const bytes = readBoundedFile(repo, body.source_input_path);
+  if (evidenceHash(bytes) !== body.source_input_sha256) throw new Error('operations source digest mismatch');
+  const input = loadReviewEvidenceInput({ repo, input: readControlFile(repo, body.source_input_path) });
+  const replayed = replayOperations(repo, input);
+  const { reason, current_target, source_input_path, source_input_sha256, ...recorded } = body;
+  if (evidenceHash(replayed) !== evidenceHash(recorded)) throw new Error('operations replay mismatch');
+  return receipt;
 }
 function readSourceReports(repo, input) {
   for (const raw of input.attempts) {
@@ -487,9 +631,10 @@ function recompute(repo, input, date, { historyOnly = false } = {}) {
       synthesis,
       dispatch: input.dispatch,
       admitted_attempts: attempts.map((a) => ({ ...a })),
+      operations: operationAccounting(input, attempts),
       observed_usage: input.attempts.map((raw) => ({
         reviewer_id: raw.reviewer_id,
-        usage: raw.usage ?? null,
+        usage: normalizeObservedUsage(raw.usage),
       })),
     },
   };
@@ -561,7 +706,7 @@ export async function finalizeReviewDecision({
   publish(repo, reportPath, report);
   return { report_path: reportPath, decision_path: decisionPath, decision };
 }
-async function verifyDecisionCapture({ decisionFile, repo, historyOnly = false }) {
+function verifyDecisionCapture({ decisionFile, repo, historyOnly = false }) {
   repo = realpathSync(repo);
   const decision = readControlFile(repo, decisionFile);
   const { decision_sha256: seal, ...body } = decision;
@@ -608,12 +753,16 @@ async function verifyDecisionCapture({ decisionFile, repo, historyOnly = false }
   return decision;
 }
 export async function verifyReviewDecision({ decisionFile, repo }) {
-  return verifyDecisionCapture({ decisionFile, repo });
+  return verifyReviewDecisionSync({ decisionFile, repo });
 }
+export function verifyReviewDecisionSync(options) { return verifyDecisionCapture(options); }
 // This is solely ledger continuity after an authorized change. It deliberately
 // exposes no current verdict/readiness/synthesis permission fields.
 export async function verifyReviewDecisionHistory({ decisionFile, repo }) {
-  const decision = await verifyDecisionCapture({ decisionFile, repo, historyOnly: true });
+  return verifyReviewDecisionHistorySync({ decisionFile, repo });
+}
+export function verifyReviewDecisionHistorySync({ decisionFile, repo }) {
+  const decision = verifyDecisionCapture({ decisionFile, repo, historyOnly: true });
   return {
     schema_version: 1,
     status: 'history_only',
@@ -644,6 +793,16 @@ async function cli(argv) {
   const repo = realpathSync(options.repo || process.cwd());
   const input = options.input ? readControlFile(repo, options.input) : null;
   if (command === 'capture') return captureReviewTarget({ scope: await createTargetScope(input) });
+  if (command === 'build-launch') return buildReviewerLaunch({ ...input,
+    ...(options['evidence-inputs-file'] ? { evidenceInputs: readControlFile(repo, options['evidence-inputs-file']) } : {}) });
+  if (command === 'response-items') return prepareResponseItems({ repo, decisionFile: options.decision });
+  if (command === 'record-operations') return recordReviewOperations({ repo, input, reason: options.reason });
+  if (command === 'verify-operations') return verifyReviewOperations({ repo, operationsFile: options.operations });
+  if (command === 'source-findings') {
+    const hydrated = loadReviewEvidenceInput({ repo, input });
+    return hydrated.attempts.filter(raw => evaluateReviewerAttempt(raw).included)
+      .flatMap(raw => extractSourceFindings(raw.output, raw.reviewer_id));
+  }
   if (command === 'prepare')
     return prepareReviewRound({
       ...input,

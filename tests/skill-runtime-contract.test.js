@@ -118,7 +118,7 @@ test('production route and synthesis helpers own parsing and fail-closed reviewe
   const review = read('skills/deep-review-workflow/references/review-execution.md');
   assert.match(publicSkill, /returned JSON.{0,120}executable route authority/is);
   assert.match(loop, /public-route\.mjs --entry loop/);
-  assert.match(review, /review-synthesis\.mjs --input/);
+  assert.match(review, /review-synthesis\.mjs --prepared-input/);
   assert.match(review, /phase6_allowed/);
   assert.match(review, /operational_failure.{0,160}no later response or Phase 6 commit/is);
 });
@@ -253,7 +253,7 @@ test('Codex native dispatch uses two history-free route-specific leaves with tra
   assert.match(combined, /explicit.{0,120}(?:model|effort).{0,160}(?:unsupported|rejected).{0,160}(?:single|one).{0,80}retry/is);
   assert.match(combined, /--allow-fallback/);
   assert.match(agent, /both.{0,40}`codex-review` and `codex-adversarial`/s);
-  assert.doesNotMatch(combined, /companion/iu);
+  assert.doesNotMatch(combined, /codex-companion|--companion|companion fallback/iu);
 
   for (const dimension of ['model', 'effort']) {
     assert.match(
@@ -352,7 +352,8 @@ test('loop public contract forwards routing controls and codifies document readi
   assert.match(loop, /high\/critical document scope to 3/u);
   assert.match(loop, /READY_FOR_IMPLEMENTATION/u);
   assert.match(loop, /DOCUMENT_BLOCKED/u);
-  assert.match(loop, /routing-metadata-file/u);
+  assert.match(loop, /--decision-file/u);
+  assert.match(loop, /schema-3/u);
 });
 
 test('supported runtime references use Node/direct tools and the runtime-root contract', () => {
@@ -745,13 +746,13 @@ test('the public skill wires --dry-run/--explain-routing to the classifier and n
   assert.match(publicSkill, /(?:dryRun|dry-run|explainRouting|explain-routing)[\s\S]{0,400}(?:without running|no reviewer|리뷰어[^\n]*실행|종료)/i);
 });
 
-test('loop SKILL codifies compare-rounds consumption, no-new-verdict-on-skip, and explicit-flag prior-context handoff', () => {
+test('loop SKILL delegates transitions to decide-round and preserves explicit prior-context handoff', () => {
   const loop = fs.readFileSync(path.join(root, 'skills', 'deep-review-loop', 'SKILL.md'), 'utf8');
 
-  // Condition 3 is re-stated to consume compare-rounds's code output rather
-  // than a natural-language "half of the larger set repeats" judgment.
-  assert.match(loop, /compare-rounds.{0,200}stalled/is);
-  assert.match(loop, /implemented_count.{0,80}0|0.{0,80}implemented_count/is);
+  assert.match(loop, /decide-round[^\n]*--decision-file[^\n]*--phase before-respond/);
+  assert.match(loop, /decide-round[^\n]*--state-file[^\n]*--phase after-respond/);
+  assert.match(loop, /UNVERIFIED_FINAL_TREE/);
+  assert.doesNotMatch(loop, /Two operational failures occur|implemented_count == 0/);
   assert.match(loop, /response halted/i);
 
   // A review-skipped round must never fabricate a new verdict/N_actual.
@@ -776,7 +777,7 @@ test('loop SKILL documents the opt-in --session-doc single per-session review do
   assert.match(loop, /render-session-doc/);
   assert.match(loop, /loop-\{loop_id\}-review\.md/);
   // The end-of-loop summary is absorbed into the session doc to avoid dup.
-  assert.match(loop, /absorb|absorbed|흡수/i);
+  assert.match(loop, /appends the closing summary to the single durable document/i);
   // A FINAL post-stop render pass supplies the closing summary the per-round
   // renders never received, via the explicit --final-summary-file input.
   assert.match(loop, /--final-summary-file/);

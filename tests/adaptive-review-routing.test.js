@@ -140,16 +140,16 @@ test('selection is deterministic across candidate input order', async () => {
   assert.deepEqual(reverse, forward);
 });
 
-test('confirmation contracts and regression expands within the configured maximum', async () => {
+test('legacy confirmation and report-only regression retain the baseline floor', async () => {
   const { planReviewerAssignments } = await import(adaptiveUrl);
   const implementation = [{ path: 'src/app.js', target_kind: 'code-change' }];
   const confirmation = planReviewerAssignments(plan({
     artifacts: implementation,
     progress: { state: 'confirmation', used_reviewers: ['claude-opus'] },
   }));
-  assert.equal(confirmation.assignments.length, 1);
-  assert.equal(confirmation.assignments[0].assignment_role, 'confirmation');
-  assert.equal(confirmation.assignments[0].tier_adjustment, -1);
+  assert.equal(confirmation.assignments.length, 2);
+  assert.equal(confirmation.assignments[0].assignment_role, 'standard');
+  assert.equal(confirmation.assignments[0].tier_adjustment, 0);
   assert.notEqual(confirmation.assignments[0].reviewer_id, 'claude-opus');
 
   const initial = planReviewerAssignments(plan({ artifacts: implementation }));
@@ -157,8 +157,8 @@ test('confirmation contracts and regression expands within the configured maximu
     artifacts: implementation,
     progress: { state: 'regression', used_reviewers: initial.assignments.map((item) => item.reviewer_id) },
   }));
-  assert.equal(regression.assignments.length, initial.assignments.length + 1);
-  assert.ok(regression.assignments.every((item) => item.tier_adjustment === 1));
+  assert.equal(regression.assignments.length, initial.assignments.length);
+  assert.ok(regression.assignments.every((item) => item.tier_adjustment === 0));
 });
 
 test('manual reviewer constraints are required assignments while provider overrides do not add reviewers', async () => {

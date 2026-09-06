@@ -15,6 +15,35 @@ const stamp = `${iso.slice(0, 10)}-${iso.slice(11, 19).replace(/:/gu, '')}`;
 // stamp → 2026-04-17-115156, 즉 2026-04-17-115156-review.md
 ```
 
+Prepared production publication is owned by
+`{plugin_root}/hooks/scripts/review-evidence.mjs` `finalize`. Its returned
+`report_path` uses a unique invocation nonce and `decision_path` is the sibling
+private `*-decision.json`. Preserve both exact returned paths. The timestamp
+example above describes legacy callers; do not hand-render or overwrite a
+prepared canonical report. The decision binds source bytes, routing, targets,
+material findings, confirmation, readiness and observed operations. A companion
+or report alone is unavailable authority.
+
+Implementation Summary counts and verdict come from adjudication-v1. Agreement
+and dissent are provenance, not truth predicates. Refuted/advisory observations
+stay outside the material Critical/Warning sections; unresolved observations
+remain material with missing evidence. A zero-material confidence/deferred
+CONCERN does not require a fabricated issue. The canonical leaf parser is
+unchanged. Extra `## Confirmation` JSON is required only by a prepared designated
+confirmation reviewer; the runtime supplies exact IDs and target digest, requires
+positive evidence for every ID and retains omitted IDs as not re-observed.
+
+Loop summaries distinguish pending, verified_closed and not re-observed.
+Document READY uses scope-level Artifact Gate/receipt 2.0 and does not fabricate
+per-finding closure. Report `final_tree_verified` and `completion_status` from
+Node's fresh `decide-round`; show UNVERIFIED_FINAL_TREE with its actual stop
+reason and the last trusted verdict's reviewed target when needed.
+
+Display planned, dispatched, admitted and not-run reviewer calls separately.
+Retries and failed/time-out launches count as executions, and repeated roles
+across rounds count again. Unknown usage stays null; unused round capacity and
+legacy saved counters are not measured financial savings.
+
 ## 구조
 
 # Deep Review Report — {날짜}

@@ -22,23 +22,31 @@ does not guarantee that writes cannot happen:
 
 ```text
 const codexReviewOptions = {
-  task_name: `codex-review-round-${roundNumber}-${invocationNonce}`,
+  task_name: `codex-review-${codexReviewLaunch.invocation_id}`,
   fork_turns: "none",
-  message: "Read {plugin_root}/agents/code-reviewer.md, then the codex-review route-specific payload; stay read-only and return {plugin_root}/skills/deep-review-workflow/references/report-format.md"
+  message: codexReviewLaunch.payload
 }
 if (codexReviewRoute.resolved.model !== null) codexReviewOptions.model = codexReviewRoute.resolved.model
 if (codexReviewRoute.resolved.effort !== null) codexReviewOptions.reasoning_effort = codexReviewRoute.resolved.effort
 spawn_agent(codexReviewOptions)
 
 const codexAdversarialOptions = {
-  task_name: `codex-adversarial-round-${roundNumber}-${invocationNonce}`,
+  task_name: `codex-adversarial-${codexAdversarialLaunch.invocation_id}`,
   fork_turns: "none",
-  message: "Read {plugin_root}/agents/code-reviewer.md, then the codex-adversarial route-specific payload; stay read-only and return {plugin_root}/skills/deep-review-workflow/references/report-format.md"
+  message: codexAdversarialLaunch.payload
 }
 if (codexAdversarialRoute.resolved.model !== null) codexAdversarialOptions.model = codexAdversarialRoute.resolved.model
 if (codexAdversarialRoute.resolved.effort !== null) codexAdversarialOptions.reasoning_effort = codexAdversarialRoute.resolved.effort
 spawn_agent(codexAdversarialOptions)
 ```
+
+Obtain each launch from `{plugin_root}/hooks/scripts/review-evidence.mjs`
+`build-launch`, using the prepared route and exact evidence inputs. Pass its
+payload bytes verbatim as shown above; the payload includes the role-definition
+read and canonical report instructions. Capture actual native handle and mark
+`payload_provenance: native-argument`. The local invocation ID is not an
+attestation of provider-internal session identity. Capture the prepared target
+before and after every leaf in addition to the fingerprints.
 
 `fork_turns: "none"` is mandatory: neither leaf receives generator history.
 Every attempt, role, and round uses an invocation-unique `task_name`. The
@@ -74,24 +82,23 @@ read-only fingerprint contract as the native leaves.
 
 ## Synthesis
 
-Normalize issues to severity, path, seven-line bucket, and substance. Merge
-only materially identical issues. Preserve each role's agreement and dissent:
+Prepared implementation review uses the evidence adjudication workflow in
+`{plugin_root}/skills/deep-review-workflow/references/review-execution.md`.
+`review-evidence.mjs source-findings` extracts admitted canonical source refs;
+cover every Critical/Warning observation exactly once in adjudication-v1.
+Corroboration is evidence to investigate, not a vote that establishes truth.
+The Node finalizer publishes the canonical report and decision companion.
+Unresolved items stay material, and only the verified confirmed set is eligible
+for implementation Respond. A Node-designated confirmation reviewer also receives the
+exact previous pending IDs; positive closure and current findings are checked
+by the runtime without changing the leaf parser's outer grammar.
 
-- with two trusted voices: unanimous or split;
-- with three: unanimous, majority, or solo;
-- with four: unanimous, majority three of four, split two of four, or solo;
-- with five: unanimous, majority four of five, majority three of five,
-  split two of five, or solo.
+Document Artifact Gate remains the final document authority. Legacy unprepared
+consensus callers preserve their existing role agreement/dissent arrays and
+frozen report admission. Those arrays are descriptive provenance on new
+implementation routes and never override adjudicated disposition.
 
-Dissent is carried by the `dissenters` array defined in
-`{plugin_root}/skills/deep-review-workflow/references/report-format.md` — one entry per
-dissenting reviewer, each with its own `family`. Past four voices the array is
-routinely longer than one: `majority_3_of_5` has two entries, so a dissent
-spanning two vendor families stays distinguishable from two dissenters inside
-one. The singular dissent keys are retired and are never used as a
-first-dissenter shorthand.
-
-`N_actual` is the number of trusted successful roles, not the number requested.
-Apply the N=0/N=1 rules in `{plugin_root}/skills/deep-review-workflow/references/review-execution.md` before ordinary consensus.
-Ultracode's collapsed output remains one Anthropic voice. A failed or untrusted
-role is named in Summary and contributes no vote.
+`N_actual` counts trusted successful canonical roles. Required-role and
+critical-implementation provider floors remain runtime-enforced. Ultracode's
+collapsed output remains one Anthropic role. Failed/time-out and retry attempts
+remain visible in dispatched-call accounting while contributing no admitted role.

@@ -298,17 +298,63 @@ or reviewer flags. Take each route verbatim from `routing_plan.routes` in the
 preflight's JSON result. The emitted `.deep-review/tmp/routing-plan.json` is an
 audit copy that no adapter reads.
 
-After the plan exists, invoke `{plugin_root}/hooks/scripts/build-reviewer-payload.mjs` once per selected
-route:
+After the plan and target/WIP decisions are final, create the actual selected
+manifest with `buildChangeFiles` from
+`{plugin_root}/hooks/scripts/lib/review-target.mjs`, including explicit session
+paths. Write `{repo, changeState, reviewBase, records}` as SCOPE_REQUEST. Capture:
 
 ```text
-node {plugin_root}/hooks/scripts/build-reviewer-payload.mjs --plugin-root PLUGIN_ROOT_ABS --repo PROJECT_ROOT --change-state CHANGE_STATE --review-base REVIEW_BASE --context-file CONTEXT_FILE --diff-file DIFF_FILE --execution-route-json EXECUTION_ROUTE_JSON --reviewer-id REVIEWER_ID
+node {plugin_root}/hooks/scripts/review-evidence.mjs capture --repo PROJECT_ROOT --input SCOPE_REQUEST
 ```
 
-Append the same explicit prior-context and readiness inputs described in Stage
-2. The builder validates the canonical reviewer ID through the routing plan and
-injects only that route's trusted rubric. Never pass raw selection reasons or
-another reviewer's route to the leaf.
+Save the returned TargetSnapshotV1 unchanged as REVIEW_TARGET_FILE and retain
+its resolved immutable `scope.review_base` (null for initial/non-Git scopes).
+Write EVIDENCE_INPUTS_FILE as the exact strings
+`{context,diff,changeFiles,priorRounds,readinessReceipt}`. Optional absent
+sections are empty strings. The receipt string is the actual verified receipt
+projection from the existing readiness verifier. Scope metadata comes from the
+captured manifest; a shorter human-readable changeFiles display cannot narrow it.
+Write PREPARE_INPUT with `{routingPlan,target,evidenceInputs,roundId}`; let Node
+mint `roundId` with `crypto.randomUUID()`. Preserve the classifier's
+`pending_confirmation`, if returned; preparation binds its exact prior IDs.
+
+```text
+node {plugin_root}/hooks/scripts/review-evidence.mjs prepare --repo PROJECT_ROOT --input PREPARE_INPUT --evidence-inputs-file EVIDENCE_INPUTS_FILE
+```
+
+Use returned `plan` as the prepared routing plan for every wave. It carries
+`adjudication-v1` for implementation or `artifact-gate-v1` for documents, the
+reviewed target and common `evidence_digest`. Its `confirmation_reviewer_ids`
+are derived in Node and bound identically through the plan, routes and payload.
+A full high/critical slate keeps its standard/adversarial/security assignments;
+one selected reviewer receives the extra confirmation task. Positive closure
+requires the designated reviewer evidence, while explicit still_open or
+indeterminate claims from any admitted reviewer remain evidence. Ordinary
+unassigned report omission does not prevent closure. Missing prepared evidence is a
+failure, never a fallback into legacy synthesis.
+
+For each selected route, build the file payload with the same verified inputs:
+
+```text
+node {plugin_root}/hooks/scripts/build-reviewer-payload.mjs --plugin-root PLUGIN_ROOT_ABS --repo PROJECT_ROOT --change-state CHANGE_STATE --review-base REVIEW_BASE --context-file CONTEXT_FILE --diff-file DIFF_FILE --execution-route-json EXECUTION_ROUTE_JSON --reviewer-id REVIEWER_ID --evidence-inputs-file EVIDENCE_INPUTS_FILE
+```
+
+Append the same explicit prior-context and readiness arguments from Stage 2.
+The builder injects trusted assignment and prepared confirmation instructions
+only for the Node-designated confirmation reviewers. Save its returned payload path and
+`payload_sha256`/`payload_bytes`; these are Node-computed, never hand-written.
+Build LAUNCH_INPUT as `{executionRoute,evidenceInputs}` and invoke:
+
+```text
+node {plugin_root}/hooks/scripts/review-evidence.mjs build-launch --repo PROJECT_ROOT --input LAUNCH_INPUT --evidence-inputs-file EVIDENCE_INPUTS_FILE
+```
+
+Save the complete returned launch record before dispatch. It mints local
+`attempt_id` and `invocation_id` and contains the exact `payload` argument.
+Native dispatch passes that payload string verbatim; bridge dispatch reads its
+identical file bytes with `--expected-payload-sha256` set to the builder hash.
+Record actual returned native handle or bridge observation after execution.
+No UUID is a claim about provider-internal conversation identity.
 
 ### 3.3 Grok containment preflight
 
@@ -357,6 +403,20 @@ backstop; its observation surface is enumerated in
 capture error is conservative drift. Persist only the digest/mode evidence
 needed by the report; never expose file contents.
 
+For every leaf, including wave 2, capture TargetSnapshotV1 immediately before
+and after execution from the prepared scope via
+`{plugin_root}/hooks/scripts/lib/review-target-snapshot.mjs` `captureReviewTarget`.
+Store these as raw `target_before` and `target_after`, plus the prepared
+`evidence_digest`. A mismatching target invalidates the entire round; do not
+continue to a sibling or Respond. This is additional to the read-only fingerprint.
+For prepared native routes set `payload_provenance: native-argument` and pass the
+runtime-built launch's exact payload as the host message. For every prepared
+bridge add `--expected-payload-sha256 PAYLOAD_SHA256`; store the returned
+`route_payload_sha256` and `route_payload_bytes` in `bridge_observation` with
+`payload_provenance: bridge-read`. Retain failed/time-out launch results and
+observed adapter retries for operation accounting, without counting them as
+admitted reviewers or inventing token/cost usage.
+
 ### 4.1 `claude-opus`
 
 When named-agent capability exists, call `Agent(code-reviewer)` with its
@@ -392,7 +452,7 @@ generator history. Native `spawn_agent` has no enforceable tool allowlist; the
 read-only instruction is paired with fingerprint-based trust rejection:
 
 ```text
-const options = { task_name: `${canonicalReviewerId}-round-${roundNumber}-${invocationNonce}`, fork_turns: "none", message: ROUTE_SPECIFIC_PAYLOAD_INSTRUCTIONS }
+const options = { task_name: `${canonicalReviewerId}-${launch.invocation_id}`, fork_turns: "none", message: launch.payload }
 if (route.resolved.model !== null) options.model = route.resolved.model
 if (route.resolved.effort !== null) options.reasoning_effort = route.resolved.effort
 spawn_agent(options)
@@ -478,40 +538,77 @@ than a vote.
 
 ## 5. Synthesize and report
 
-For every attempted role, serialize `role`, raw `output`, and the pre/post
-fingerprint results to a private `attempts` JSON array. When at least two roles
-remain trusted, perform the issue matching from `{plugin_root}/skills/deep-review-workflow/references/codex-integration.md` and add
-a `consensus.findings` array. Each finding records `severity` (`critical` or
-`warning`) and the unique admitted reviewer `roles` that reported that material
-finding. Include every admitted critical and warning exactly once per reporting
-role. Serialize `{ attempts, consensus, routing_plan, expansion_waves_used }`,
-then invoke:
-
-`role` is the canonical reviewer ID, not the assignment role or a display
-label. Ultracode's single Anthropic voice uses `claude-opus`. Duplicate,
-non-canonical, or plan-absent identities are an operational failure and never
-increase `N_actual`.
+Retain every raw attempt with `reviewer_id`, canonical `role`, `output_file`
+(or exact raw output), pre/post fingerprints, target_before/target_after and
+evidence_digest. Save actual launch records with their captured payloads and
+transport observations. The control input contains `routing_plan`,
+`evidence_inputs` (or its bounded file), `attempts`, `launches`, and the actual
+expansion counter. Run the Node dispatch builder and preserve its result:
 
 ```text
-node {plugin_root}/hooks/scripts/review-synthesis.mjs --input ATTEMPTS_FILE
+node {plugin_root}/hooks/scripts/review-evidence.mjs build-dispatch --repo PROJECT_ROOT --input ATTEMPTS_FILE
 ```
 
-This production helper validates the report contract, excludes fingerprint
-drift or malformed/empty output, and is the executable authority for
-`N_actual`, terminal status, provisional expansion, final verdict, and
-`phase6_allowed`. Its CLI never accepts caller-pre-evaluated attempts: every
-attempt must carry raw output plus pre/post fingerprint evidence and is
-re-evaluated at this boundary. If provisional synthesis returns `needs_expansion`, dispatch
-exactly its one unused wave-2 route against the same original evidence and
-independent rubric, then re-run synthesis once with all trusted attempts. Never
-expand twice and never publish a provisional verdict. Stop when it returns
-`operational_failure`; no later response or Phase 6 commit may proceed. When
-the provisional result requests expansion, pass its `next_assignment` verbatim
-as the added reviewer's `--execution-route-json`; that protocol-3 route already
-contains the trusted rubric and resolved model/effort, so no plan file is
-written or re-read. A
-missing, invalid, or count-inconsistent materialized consensus for two or more
-trusted roles fails closed with `consensus_required`.
+Store that returned `dispatch` in the input. For prepared implementation mode,
+obtain canonical admitted source descriptors with:
+
+```text
+node {plugin_root}/hooks/scripts/review-evidence.mjs source-findings --repo PROJECT_ROOT --input ATTEMPTS_FILE
+```
+
+Investigate each candidate using any appropriate method, then author
+`adjudication: {schema_version:"1.0",groups:[...]}`. Each group covers exact
+`{reviewer_id,report_sha256,severity,ordinal}` refs once and records disposition
+`confirmed_blocker|refuted|advisory|unresolved`, severity, category, rationale,
+and nonempty `{location,observation}` evidence. Unresolved groups also state
+missing_evidence. Evidence prose is an auditable coordinator claim. Reviewer
+agreement and role/provider identity do not establish truth. Do not add legacy
+consensus to an implementation adjudication request. Document routes retain
+the existing Artifact Gate and document consensus contract unchanged.
+
+```text
+node {plugin_root}/hooks/scripts/review-synthesis.mjs --prepared-input ATTEMPTS_FILE
+```
+
+Prepared synthesis re-admits raw leaves and owns terminal status, N_actual,
+expansion and phase6_allowed. When it requests expansion, dispatch exactly its
+`next_assignment` against the same prepared evidence and target, preserving
+read-only gates; rebuild dispatch/adjudication and re-synthesize once. Never
+publish a provisional verdict. `operational_failure` stops on its first result; no later response or Phase 6 commit may proceed.
+The legacy `--input` selector remains only for explicit unprepared callers;
+it cannot admit any prepared decision_mode and grants no schema-3 authority.
+
+Before discarding a failed/time-out leaf for a soft-floor replacement, archive
+its original prepared plan/route/target, raw attempt, actual payload and actual
+execution result with the count-only operations path. Set its launch result_file
+to the retained JSON transport observation (launched, status, provenance,
+optional exit_code/diagnostics); copy actual observations, never infer a launch
+from a planned route. Missing launch evidence remains unknown.
+
+```text
+node {plugin_root}/hooks/scripts/review-evidence.mjs record-operations --repo PROJECT_ROOT --input RETIRED_ATTEMPTS_FILE --reason SOFT_FLOOR_REPLACED
+```
+
+Use the returned operations_file only for accounting. Keep the final admitted
+plan/input strict and omit retired roles from that trusted set. Pass the list
+of retired receipt paths as --operation-receipts-file to record-round and the
+before-Respond decide-round call. Unique attempt IDs join accounting; repeated
+canonical roles across different calls or rounds never collapse into one call.
+
+For a terminal round that cannot produce a decision, archive its attempted
+operations the same way with reason NO_TRUSTED_REVIEWER,
+REQUIRED_REVIEWER_FAILED, TARGET_DRIFT or OPERATIONAL_FAILURE. Capture the
+current target and stop through:
+
+```text
+node {plugin_root}/hooks/scripts/loop-state.mjs decide-operational-stop --operations-file OPERATIONS_FILE --current-target-file CURRENT_TARGET_FILE --round-limit ROUND_LIMIT
+```
+
+An optional --previous-state supplies only attributed historical verdict data.
+This result is count-only and stopped; it creates no successful schema-3 round,
+current verdict or completion authority. Publish its actual operational reason
+and UNVERIFIED_FINAL_TREE without presenting the last trusted review verdict
+as a new approval.
 
 An unavailable explicitly required reviewer/provider is an immediate
 operational failure. An unavailable adaptive floor route may be replaced once:
@@ -540,29 +637,26 @@ replacement atomically removes its failed soft ID from both the route list and
 the initial set. Synthesis rejects route-only wave relabeling, dangling carrier
 IDs, or required-bit clearing before any reviewer or provider-family count.
 
-Count only successful trusted reviewer roles:
+Count only admitted trusted roles toward N_actual. Critical implementation
+requires three trusted reviewers across two provider families. The runtime
+retains the required-role, confidence and expansion floors; follow its exact
+result. Implementation materiality comes from evidence adjudication, not votes.
+Ultracode's six lenses still count as one Anthropic role.
 
-- `N_actual == 0`: no verdict is allowed; report an operational failure.
-- `N_actual == 1`: critical or security findings yield `REQUEST_CHANGES`,
-  warnings alone yield `CONCERN`, and no blocking finding yields `APPROVE`.
-- `N_actual >= 2`: critical findings or agreed warnings yield
-  `REQUEST_CHANGES`; split warnings yield `CONCERN`; otherwise `APPROVE`.
+After final synthesis, including document receipt verification where applicable,
+finalize from the same raw input:
 
-For critical implementation scope, require `N_actual >= 3` and at least two
-provider families; a shortage is operational failure with no verdict. Other
-floor shortages raise only an `APPROVE` to `CONCERN` and never lower a blocking
-verdict. One critical/security finding, split CONCERN, a readiness mismatch, or
-a failed minimum may request the single expansion wave.
+```text
+node {plugin_root}/hooks/scripts/review-evidence.mjs finalize --repo PROJECT_ROOT --input ATTEMPTS_FILE
+```
 
-Ultracode's six lenses are one role. A degraded failed Claude role never
-downgrades a blocking verdict; it raises a low-confidence `APPROVE` to
-`CONCERN` when at most one external role remains.
-
-Use `{plugin_root}/skills/deep-review-workflow/references/codex-integration.md` for issue matching and `{plugin_root}/skills/deep-review-workflow/references/report-format.md` for the
-artifact. Create one unique
-`.deep-review/reports/{YYYY-MM-DD}-{HHmmss}-review.md` through a direct host
-file tool. Record every attempted role, terminal status, `N_actual`, builder
-warning, privacy exclusion, mutation outcome, and fingerprint exclusion.
+The Node helper replays admission, adjudication and receipt gates, re-captures
+the target, and atomically publishes one canonical report with a unique nonce
+and its private decision companion. Store exact returned `report_path` and
+`decision_path`; never hand-render a replacement canonical report or decision.
+Use `{plugin_root}/skills/deep-review-workflow/references/report-format.md` for
+leaf/output contracts and evidence interpretation. Report diagnostics remain
+separate from material findings and never manufacture a blocker.
 
 For pure document scope, require every trusted reviewer report to contain
 exactly one `Artifact Gate` JSON block from `{plugin_root}/skills/deep-review-workflow/references/report-format.md`. Invoke

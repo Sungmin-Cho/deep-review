@@ -70,7 +70,7 @@ function trustedAssignmentSection(options) {
         ]
       : []),
     '',
-    rubricTextForRole(executionPlan.assignmentRole),
+    rubricTextForRole(executionPlan.assignmentRole, { preparedReview: executionPlan.preparedReview, reviewerId: options.reviewerId }),
     ...(executionPlan.artifactPhase === 'document'
       ? ['', documentReviewPolicyText(executionPlan.documentReviewMode || 'full-readiness')]
       : []),
@@ -232,6 +232,8 @@ function contentFromOption(options, valueKey, fileKey) {
 const PREPARED_PLUGIN_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const escapePrepared = text => text.replace(/^(\\*)=====/gmu, '$1\\=====');
 const unescapePrepared = text => text.replace(/^\\(\\*)=====/gmu, '$1=====');
+const confirmationFor = (prepared, reviewerId, role) => (prepared?.confirmation_reviewer_ids
+  ? prepared.confirmation_reviewer_ids.includes(reviewerId) : role === 'confirmation') ? prepared.confirmation_request : null;
 
 export function buildPreparedReviewerPayload({ executionRoute, evidenceInputs, pluginRoot = PREPARED_PLUGIN_ROOT }) {
   validateEvidenceInputs(evidenceInputs);
@@ -239,10 +241,10 @@ export function buildPreparedReviewerPayload({ executionRoute, evidenceInputs, p
   const prepared = assignment.executionPlan.preparedReview;
   if (!prepared || evidenceHash(evidenceInputs) !== prepared.evidence_digest) throw new Error('prepared payload source mismatch');
   const doctrine = extractFalsePositiveDoctrine(readFileSync(join(pluginRoot,'skills/deep-review-workflow/references/review-criteria.md'),'utf8'));
-  return assembleReviewerPayload({assignment:assignment.content, reviewTarget:canonicalStringify(prepared), doctrine,
+  return assembleReviewerPayload({assignment:`First read ${join(pluginRoot, 'agents/code-reviewer.md')}. Stay read-only and return the report contract below.\n${assignment.content}`, reviewTarget:canonicalStringify(prepared), doctrine,
     ...Object.fromEntries(Object.entries(evidenceInputs).map(([key,value])=>[key,escapePrepared(value)])),
     reportContract:buildReportContract({artifactPhase:assignment.executionPlan.artifactPhase,
-      documentReviewMode:assignment.executionPlan.documentReviewMode, confirmationRequest:prepared.confirmation_request})});
+      documentReviewMode:assignment.executionPlan.documentReviewMode, confirmationRequest:confirmationFor(prepared,executionRoute.reviewer_id,assignment.executionPlan.assignmentRole)})});
 }
 
 export function verifyPreparedReviewerPayload(payload, executionRoute) {
@@ -343,7 +345,7 @@ export function buildReviewerPayload(options = {}) {
     ? buildReportContract({
       artifactPhase: assignment.executionPlan?.artifactPhase ?? null,
       documentReviewMode: assignment.executionPlan?.documentReviewMode ?? null,
-      confirmationRequest: prepared?.confirmation_request ?? null,
+      confirmationRequest: confirmationFor(prepared,options.reviewerId,assignment.executionPlan?.assignmentRole),
     })
     : '';
   const legacyPayload = assembleReviewerPayload({

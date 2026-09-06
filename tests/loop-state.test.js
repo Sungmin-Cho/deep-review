@@ -1400,7 +1400,7 @@ test('render-session-doc open vs resolved rollup reuses matchFindings (B resolve
   assert.match(body, /`src\/d\.js:5`/u);
   // C (src/c.js:30) was in round 1 only → resolved. The rollup is cumulative
   // across the whole session; with two rounds it counts exactly 1.
-  assert.match(body, /## Resolved \(cumulative\) — 1/u);
+  assert.match(body, /## Not re-observed \(legacy advisory; not verified resolved\) \(cumulative\) — 1/u);
   assert.match(body, /`src\/c\.js:30`/u);
 });
 
@@ -1417,7 +1417,7 @@ test('render-session-doc resolved rollup is CUMULATIVE — a finding resolved in
   const body = readFileSync(output, 'utf8');
   // Both the 1→2 resolution (C) and the 2→3 resolution (B) are present after
   // round 3; the old adjacent-only rollup would have dropped C entirely.
-  assert.match(body, /## Resolved \(cumulative\) — 2/u);
+  assert.match(body, /## Not re-observed \(legacy advisory; not verified resolved\) \(cumulative\) — 2/u);
   assert.match(body, /`src\/c\.js:30`/u);
   // B drifted src/b.js:20→23 before it was resolved (R2→R3): the cumulative
   // rollup carries the LATEST matched representative forward, so the resolved
@@ -1467,7 +1467,7 @@ const DRIFT_ROUND3 = [
 // a finding that legitimately appears in the Open section cannot satisfy a
 // resolved-section assertion by accident.
 function resolvedSection(body) {
-  const start = body.indexOf('## Resolved (cumulative)');
+  const start = body.indexOf('## Not re-observed (legacy advisory; not verified resolved) (cumulative)');
   assert.notEqual(start, -1, 'resolved section present');
   const end = body.indexOf('## Round reports', start);
   return body.slice(start, end === -1 ? undefined : end);
@@ -1493,7 +1493,7 @@ test('render-session-doc resolved rollup tracks non-transitive line drift: a sti
   assert.equal(resolved.includes('src/drift.js'), false);
   // (b) The genuinely resolved early-round finding still appears.
   assert.match(resolved, /`src\/gone\.js:5`/u);
-  assert.match(body, /## Resolved \(cumulative\) — 1/u);
+  assert.match(body, /## Not re-observed \(legacy advisory; not verified resolved\) \(cumulative\) — 1/u);
 });
 
 test('render-session-doc Progress cell labels any added finding as regression before other states', async () => {

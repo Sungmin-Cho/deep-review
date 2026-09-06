@@ -164,7 +164,7 @@ function normalizeInlineDocumentContext(route) {
 
 export function parsePreparedReviewBinding(value) {
   const fields = ['decision_mode', 'review_target', 'evidence_digest', 'round_id', 'confirmation_request'];
-  if (!fields.some(field => Object.hasOwn(value, field))) return null;
+  if (![...fields, 'confirmation_reviewer_ids'].some(field => Object.hasOwn(value, field))) return null;
   if (!fields.every(field => Object.hasOwn(value, field))) throw new Error('incomplete prepared review binding');
   const expected = value.artifact_phase === 'document' ? 'artifact-gate-v1' : 'adjudication-v1';
   if (value.decision_mode !== expected || !sameReviewTarget(value.review_target, value.review_target)
@@ -176,6 +176,14 @@ export function parsePreparedReviewBinding(value) {
       || !Array.isArray(request.finding_ids) || !request.finding_ids.length
       || request.finding_ids.some(id => typeof id !== 'string' || !id.trim())
       || new Set(request.finding_ids).size !== request.finding_ids.length)) throw new Error('invalid confirmation request');
+  if (Object.hasOwn(value, 'confirmation_reviewer_ids')) {
+    const ids = value.confirmation_reviewer_ids;
+    if (!Array.isArray(ids) || ids.some(id => !isReviewerId(id)) || new Set(ids).size !== ids.length
+        || (request === null ? ids.length !== 0 : ids.length === 0)) throw new Error('invalid confirmation reviewer designation');
+    if (Array.isArray(value.routes) && ids.some(id => !value.routes.some(route => route.reviewer_id === id)))
+      throw new Error('confirmation reviewer designation is outside selected routes');
+    fields.push('confirmation_reviewer_ids');
+  }
   return Object.fromEntries(fields.map(field => [field, value[field]]));
 }
 function validatePreparedJoin(document, route) {

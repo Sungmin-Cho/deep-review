@@ -971,7 +971,8 @@ export function synthesizeReviewRound({
   let confirmation = null;
   if (prepared?.confirmation_request) {
     try {
-      confirmation = verifyConfirmation({attempts, requiredFindings:prepared.confirmation_request.finding_ids,
+      const designated = prepared.confirmation_reviewer_ids ?? routingPlan.routes.filter(route => route.assignment_role === 'confirmation').map(route => route.reviewer_id);
+      confirmation = verifyConfirmation({attempts, requiredReviewerIds:designated, requiredFindings:prepared.confirmation_request.finding_ids,
         target:prepared.review_target, currentFindings:extractFindingState(renderAdjudicatedReport({date:'2000-01-01',verdict:synthesis.verdict,groups:adjudicated?.groups || []}), {repoRoot:prepared.review_target.scope.repo_root}).findings});
     } catch (error) { return invalidEvidence('invalid_confirmation', error.message); }
   }

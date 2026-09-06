@@ -38,7 +38,7 @@ const DEFAULT_SIZE_THRESHOLDS = Object.freeze({
 export function assessRisk(artifacts = [], options = {}) {
   if (!Array.isArray(artifacts)) throw new TypeError('artifacts must be an array');
   const text = artifacts.map((artifact) => [
-    artifact.path, artifact.diff, artifact.content, artifact.signal_summary,
+    artifact.path, artifact.diff, explanatoryRiskText(artifact.content), explanatoryRiskText(artifact.signal_summary),
   ].filter(Boolean).join('\n')).join('\n');
   const highSignal = artifacts.some((artifact) => ['high', 'critical'].includes(artifact.content_risk))
     || HIGH_RISK.some((pattern) => pattern.test(text));
@@ -63,6 +63,14 @@ export function assessRisk(artifacts = [], options = {}) {
     options.policyRisk,
   );
   return assessed;
+}
+
+// Deliberately narrow English explanatory form, not a language classifier.
+// Paths and patches bypass this filter; code, qualifications and mixed claims
+// do not match the complete negated sentence and retain their risk signals.
+function explanatoryRiskText(value) {
+  if (typeof value !== 'string') return value;
+  return value.split(/\r?\n/u).filter(line => !/^\s*(?:[-*]\s+)?No\s+(?:(?:authentication|authorization|payments?|billing|secrets?|cryptography|migration|concurrency|deployment|destructive|irreversible|security boundary|permission boundary|user data)(?:\s*(?:,|or|and)\s*)?)+\s+(?:changes?|impact|involvement)\.\s*$/iu.test(line)).join('\n');
 }
 
 function sizeThresholds(value, name) {
@@ -453,7 +461,7 @@ export function buildRoutingPlan({
   const risk = maximumRisk(
     assessRisk(artifacts, {
       riskFloor,
-      priorRisk,
+      priorRisk: maximumRisk(priorRisk, progress?.risk),
       receiptRisk,
     }),
     ['medium', 'large'].includes(size) ? 'medium' : 'low',
@@ -564,6 +572,7 @@ export function buildRoutingPlan({
     risk,
     size,
     progress: assignmentPlan.progress,
+    ...(assignmentPlan.pending_confirmation ? { pending_confirmation: assignmentPlan.pending_confirmation } : {}),
     candidate_reviewers: candidateReviewers,
     minimum_reviewers: assignmentPlan.minimum_reviewers,
     maximum_reviewers: assignmentPlan.maximum_reviewers,

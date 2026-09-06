@@ -211,7 +211,7 @@ export function parseConfirmation(output) {
   }
   return section;
 }
-export function verifyConfirmation({ attempts, requiredFindings, target, currentFindings }) {
+export function verifyConfirmation({ attempts, requiredFindings, target, currentFindings, requiredReviewerIds }) {
   const ids = (requiredFindings || []).map((row) =>
     typeof row === 'string' ? row : row?.finding_id,
   );
@@ -225,6 +225,9 @@ export function verifyConfirmation({ attempts, requiredFindings, target, current
     (currentFindings || []).map((row) => (typeof row === 'string' ? row : row.finding_id)),
   );
   const reports = [];
+  const required = requiredReviewerIds ?? attempts.filter(attempt => attempt?.included === true).map(attempt => attempt.reviewer_id);
+  if (!Array.isArray(required) || new Set(required).size !== required.length || required.some(id => typeof id !== 'string' || !id))
+    throw new Error('invalid confirmation reviewer designation');
   for (const attempt of attempts || []) {
     if (attempt?.included !== true) continue;
     const raw = getAttemptEvidence(attempt);
@@ -253,11 +256,13 @@ export function verifyConfirmation({ attempts, requiredFindings, target, current
       report_sha256: report.report_sha256,
     }));
     const statuses = new Set(claims.map((row) => row.status));
+    const designatedClaims = claims.filter(row => required.includes(row.reviewer_id));
+    const objections = claims.some(row => row.status !== 'verified_closed');
     const status = current.has(finding_id)
       ? 'still_open'
-      : !claims.length
+      : !designatedClaims.length && !objections
         ? 'not_reobserved'
-        : claims.length !== attempts.filter((attempt) => attempt?.included === true).length ||
+        : !required.length || designatedClaims.length !== required.length ||
             statuses.size > 1
           ? 'indeterminate'
           : claims[0].status;

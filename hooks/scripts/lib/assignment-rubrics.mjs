@@ -98,11 +98,14 @@ const RUBRICS = Object.freeze({
   ],
   confirmation: [
     'Re-verify previously reported findings against the current original evidence.',
-    'Confirm that resolved items are actually closed and look specifically for regressions or newly introduced findings.',
+    'Use the prepared exact pending IDs. Return positive verified_closed, still_open, or indeterminate evidence for each; absence is not closure. Report any current material finding normally.',
   ],
 });
 
-export function rubricTextForRole(role) {
+export function rubricTextForRole(role, { preparedReview, reviewerId } = {}) {
   if (!isAssignmentRole(role)) throw new Error(`unsupported assignment role: ${String(role)}`);
+  if (role === 'confirmation' && (!preparedReview?.confirmation_request || preparedReview.decision_mode !== 'adjudication-v1'
+      || (preparedReview.confirmation_reviewer_ids && !preparedReview.confirmation_reviewer_ids.includes(reviewerId))))
+    throw new Error('confirmation rubric requires prepared implementation confirmation inputs');
   return RUBRICS[role].map((line) => `- ${line}`).join('\n');
 }

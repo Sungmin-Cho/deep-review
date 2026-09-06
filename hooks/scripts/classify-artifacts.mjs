@@ -48,6 +48,9 @@ import {
 import { writeContainedFile } from './lib/runtime-context.mjs';
 import { isReviewerId } from './lib/reviewer-ids.mjs';
 import { verifyReadinessReceipt } from './document-readiness.mjs';
+import { verifyAdaptiveContext } from './lib/review-loop-decision.mjs';
+import { buildChangeFiles } from './lib/review-target.mjs';
+import { createTargetScope, captureReviewTarget } from './lib/review-target-snapshot.mjs';
 
 const SIGNAL_LABELS = {
   frontmatter: 'frontmatter',
@@ -291,6 +294,24 @@ function validateHostAssertions(value) {
 }
 
 function validateAdaptiveContext(value) {
+  if (value?.schema_version === 3) {
+    if (typeof value !== 'object' || Array.isArray(value)
+        || !['low', 'medium', 'high', 'critical'].includes(value.risk)
+        || !['complete', 'indeterminate'].includes(value.observation_status)
+        || typeof value.state_file !== 'string' || !value.state_file
+        || typeof value.current_target_file !== 'string' || !value.current_target_file
+        || !/^[a-f0-9]{64}$/u.test(value.decision_sha256 || '')
+        || !Array.isArray(value.pending_finding_ids) || value.pending_finding_ids.some(id => typeof id !== 'string' || !id)
+        || new Set(value.pending_finding_ids).size !== value.pending_finding_ids.length
+        || Object.keys(value).some(key => !['schema_version', 'risk', 'observation_status', 'state_file',
+          'current_target_file', 'decision_sha256', 'pending_finding_ids', 'regression_evidence'].includes(key)))
+      throw new Error('--adaptive-context-json has invalid schema-3 bindings');
+    if (value.regression_evidence !== undefined && (!value.regression_evidence || typeof value.regression_evidence !== 'object'
+        || Array.isArray(value.regression_evidence)
+        || Object.keys(value.regression_evidence).sort().join(',') !== ['source_ref', 'location', 'observation', 'prior_target_digest', 'current_target_digest'].sort().join(',')))
+      throw new Error('--adaptive-context-json has invalid regression evidence');
+    return value;
+  }
   const states = new Set(['regression', 'confirmation', 'stalled', 'changed']);
   if (!value || typeof value !== 'object' || Array.isArray(value)
       || value.schema_version !== 2
@@ -830,6 +851,14 @@ export async function runClassifyArtifactsCli(argv = process.argv.slice(2), env 
   const verifiedReadiness = overrides.readiness_receipt
     ? verifyReadinessReceipt({ repo, receiptPath: overrides.readiness_receipt })
     : null;
+  let verifiedProgress;
+  if (adaptiveContext) {
+    const currentTarget = adaptiveContext.schema_version === 3 ? await captureReviewTarget({ scope: await createTargetScope({
+      repo, changeState, reviewBase: reviewBase || null,
+      records: buildChangeFiles({ repo, changeState, reviewBase, filesFromZ, includeBinary: true }),
+    }) }) : undefined;
+    verifiedProgress = await verifyAdaptiveContext({ repo, context: adaptiveContext, currentTarget });
+  }
   const routingPlan = buildRoutingPlan({
     artifacts: result.artifacts,
     reviewers: eligibleReviewers,
@@ -839,10 +868,7 @@ export async function runClassifyArtifactsCli(argv = process.argv.slice(2), env 
     riskFloor,
     priorRisk: adaptiveContext?.risk,
     receiptRisk: verifiedReadiness?.risk,
-    progress: adaptiveContext ? {
-      state: adaptiveContext.progress,
-      used_reviewers: adaptiveContext.used_reviewers,
-    } : undefined,
+    progress: verifiedProgress,
   });
   routingPlan.explicit_overrides = explicit;
   routingPlan.apply_automatic = policy.features?.automatic_model_routing !== false
