@@ -134,7 +134,7 @@ function normalizeClaim(rawBullet) {
   const pieces = [];
   let offset = 0;
   for (const match of rawBullet.matchAll(/`([^`\r\n]*)`/gu)) {
-    pieces.push(normalizeProseClaim(rawBullet.slice(offset, match.index)));
+    pieces.push(rawBullet.slice(offset, match.index));
     if (isBacktickedLocation(match[1])) {
       pieces.push(' ');
     } else {
@@ -144,8 +144,8 @@ function normalizeClaim(rawBullet) {
     }
     offset = match.index + match[0].length;
   }
-  pieces.push(normalizeProseClaim(rawBullet.slice(offset)));
-  let claim = pieces.join('')
+  pieces.push(rawBullet.slice(offset));
+  let claim = normalizeProseClaim(pieces.join(''))
     .replace(/^\s*\[(?:[CWI]\d+|(?:critical|warning|info)[-_ ]?\d+)\]\s*[:.)-]?\s*/iu, '')
     .replace(/\s+/gu, ' ')
     .trim();

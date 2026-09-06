@@ -163,6 +163,27 @@ test('inline code is opaque to prose Markdown and Unicode normalization', async 
   }
 });
 
+test('prose Markdown spanning protected inline code does not change claim identity', async () => {
+  const { extractFindingState } = await loadIdentity();
+  for (const code of ['foo()', 'Ａ["①"] ** b']) {
+    const plain = extractFindingState(report({
+      warning: [`Call \`${code}\` safely at \`src/a.js:10\`.`],
+    }));
+    const emphasis = extractFindingState(report({
+      warning: [`**Call \`${code}\` safely** at \`src/a.js:20\`.`],
+    }));
+    const link = extractFindingState(report({
+      warning: [`[Call \`${code}\` safely](https://docs.example.test) at \`src/a.js:30\`.`],
+    }));
+
+    assert.ok(plain.findings[0].claim.includes(code), code);
+    assert.equal(emphasis.findings[0].claim, plain.findings[0].claim);
+    assert.equal(link.findings[0].claim, plain.findings[0].claim);
+    assert.equal(emphasis.findings[0].claim_key, plain.findings[0].claim_key);
+    assert.equal(link.findings[0].claim_key, plain.findings[0].claim_key);
+  }
+});
+
 test('duplicate material severity headings retain every bullet while failing closed', async () => {
   const { extractFindingState } = await loadIdentity();
   const markdown = report({
