@@ -107,24 +107,49 @@ function locationMatches(lineText) {
   return [...quoted, ...bare].sort((left, right) => left.index - right.index);
 }
 
-function normalizeClaim(rawBullet) {
-  if (hasUnpairedSurrogate(rawBullet) || rawBullet.includes('\0')) return null;
-  let claim = rawBullet.normalize('NFKC');
-  claim = claim.replace(QUOTED_LOCATION_STRIP, ' ');
-  claim = claim.replace(BARE_LOCATION, (match, pathText) => {
+function normalizeProseClaim(segment) {
+  let prose = segment.normalize('NFKC');
+  prose = prose.replace(BARE_LOCATION, (match, pathText) => {
     if (!isPathLikeToken(pathText)) return match;
     return /^\s/u.test(match) ? ' ' : match.startsWith('(') ? '(' : '';
   });
-  claim = claim
+  return prose
     .replace(/!\[([^\]]*)\]\([^\r\n)]*\)/gu, '$1')
     .replace(/\[([^\]]+)\]\([^\r\n)]*\)/gu, '$1')
     .replace(/\*\*([^*\r\n]+)\*\*/gu, '$1')
     .replace(/__([^_\r\n]+)__/gu, '$1')
     .replace(/~~([^~\r\n]+)~~/gu, '$1')
-    .replace(/`([^`\r\n]+)`/gu, '$1')
+    .replace(/\s+/gu, ' ');
+}
+
+function isBacktickedLocation(content) {
+  return /^[^`\r\n]+:\d+(?:-\d+)?(?:\s*,\s*\d+(?:-\d+)?)*$/u.test(content);
+}
+
+function normalizeClaim(rawBullet) {
+  if (hasUnpairedSurrogate(rawBullet) || rawBullet.includes('\0')) return null;
+  let sentinel = '\uE000deep-review-code-';
+  while (rawBullet.includes(sentinel)) sentinel = `\uE000${sentinel}`;
+  const protectedCode = [];
+  const pieces = [];
+  let offset = 0;
+  for (const match of rawBullet.matchAll(/`([^`\r\n]*)`/gu)) {
+    pieces.push(normalizeProseClaim(rawBullet.slice(offset, match.index)));
+    if (isBacktickedLocation(match[1])) {
+      pieces.push(' ');
+    } else {
+      const token = `${sentinel}${protectedCode.length}\uE001`;
+      protectedCode.push({ token, content: match[1] });
+      pieces.push(token);
+    }
+    offset = match.index + match[0].length;
+  }
+  pieces.push(normalizeProseClaim(rawBullet.slice(offset)));
+  let claim = pieces.join('')
     .replace(/^\s*\[(?:[CWI]\d+|(?:critical|warning|info)[-_ ]?\d+)\]\s*[:.)-]?\s*/iu, '')
     .replace(/\s+/gu, ' ')
     .trim();
+  for (const entry of protectedCode) claim = claim.split(entry.token).join(entry.content);
   return claim;
 }
 
@@ -165,21 +190,22 @@ function parseMaterialSections(markdown, reasons) {
     const matches = headings.filter((match) => candidatePattern.test(match[0]));
     if (matches.length !== 1) {
       reasons.push(`section_heading_count:${severity}:${matches.length}`);
-      continue;
     }
-    const match = matches[0];
-    if (match[0] !== heading) reasons.push(`malformed_section_heading:${severity}`);
-    const start = match.index + match[0].length;
-    const next = headings.find((candidate) => candidate.index > match.index);
-    const body = region.slice(start, next?.index ?? region.length);
-    const nonempty = body.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
-    const bullets = nonempty.filter((line) => /^- /u.test(line));
-    const noneLines = nonempty.filter((line) => line === 'None.');
-    const malformed = nonempty.filter((line) => !/^- /u.test(line) && line !== 'None.');
-    if (malformed.length > 0 || noneLines.length > 1 || (noneLines.length > 0 && bullets.length > 0)) {
-      reasons.push(`malformed_section:${severity}`);
+    for (const match of matches) {
+      if (match[0] !== heading) addReason(reasons, `malformed_section_heading:${severity}`);
+      const start = match.index + match[0].length;
+      const next = headings.find((candidate) => candidate.index > match.index);
+      const body = region.slice(start, next?.index ?? region.length);
+      const nonempty = body.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+      const bullets = nonempty.filter((line) => /^- /u.test(line));
+      const noneLines = nonempty.filter((line) => line === 'None.');
+      const malformed = nonempty.filter((line) => !/^- /u.test(line) && line !== 'None.');
+      if (nonempty.length === 0 || malformed.length > 0 || noneLines.length > 1
+        || (noneLines.length > 0 && bullets.length > 0)) {
+        addReason(reasons, `malformed_section:${severity}`);
+      }
+      sections[severity].push(...bullets.map((line) => line.slice(2)));
     }
-    sections[severity] = bullets.map((line) => line.slice(2));
   }
   return sections;
 }

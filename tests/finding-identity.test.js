@@ -138,6 +138,81 @@ test('claim normalization preserves substantive inline-code underscores and oper
   assert.notEqual(complement.findings[0].claim_key, bareMask.findings[0].claim_key);
 });
 
+test('inline code is opaque to prose Markdown and Unicode normalization', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const pairs = [
+    ['__proto__', 'proto'],
+    ['a**b**c', 'abc'],
+    ['items[key](arg)', 'itemskey'],
+    ['Ａ["①"]', 'A["1"]'],
+  ];
+
+  for (const [protectedCode, collision] of pairs) {
+    const protectedState = extractFindingState(report({
+      warning: [`\`${protectedCode}\` is mishandled at \`src/a.js:10\`.`],
+    }));
+    const collisionState = extractFindingState(report({
+      warning: [`\`${collision}\` is mishandled at \`src/a.js:10\`.`],
+    }));
+    assert.ok(protectedState.findings[0].claim.includes(protectedCode), protectedCode);
+    assert.notEqual(
+      protectedState.findings[0].claim_key,
+      collisionState.findings[0].claim_key,
+      `${protectedCode} must not collide with ${collision}`,
+    );
+  }
+});
+
+test('duplicate material severity headings retain every bullet while failing closed', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const markdown = report({
+    critical: ['First critical at `src/c1.js:10`.'],
+    warning: ['First warning at `src/w1.js:20`.'],
+  })
+    .replace('🔴 1건, 🟡 1건', '🔴 2건, 🟡 2건')
+    .replace(
+      '### 🟡 Warning',
+      '### 🔴 Critical\n\n- Second critical at `src/c2.js:30`.\n\n### 🟡 Warning',
+    )
+    .replace(
+      '### ℹ️ Info',
+      '### 🟡 Warning\n\n- Second warning at `src/w2.js:40`.\n\n### ℹ️ Info',
+    );
+  const state = extractFindingState(markdown);
+
+  assert.equal(state.status, 'indeterminate');
+  assert.equal(state.expected_count, 4);
+  assert.equal(state.findings.length, 4);
+  assert.deepEqual(state.findings.map((finding) => finding.primary_location.path), [
+    'src/c1.js',
+    'src/c2.js',
+    'src/w1.js',
+    'src/w2.js',
+  ]);
+  assert.ok(state.reasons.includes('section_heading_count:critical:2'));
+  assert.ok(state.reasons.includes('section_heading_count:warning:2'));
+});
+
+test('empty material bodies require an explicit None marker', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const emptyBoth = report()
+    .replace('### 🔴 Critical\n\nNone.', '### 🔴 Critical\n')
+    .replace('### 🟡 Warning\n\nNone.', '### 🟡 Warning\n');
+  const emptyCritical = report({ warning: ['Warning remains at `src/w.js:10`.'] })
+    .replace('### 🔴 Critical\n\nNone.', '### 🔴 Critical\n');
+
+  const allState = extractFindingState(emptyBoth);
+  assert.equal(allState.status, 'indeterminate');
+  assert.equal(allState.findings.length, 0);
+  assert.ok(allState.reasons.includes('malformed_section:critical'));
+  assert.ok(allState.reasons.includes('malformed_section:warning'));
+
+  const partialState = extractFindingState(emptyCritical);
+  assert.equal(partialState.status, 'indeterminate');
+  assert.equal(partialState.findings.length, 1);
+  assert.ok(partialState.reasons.includes('malformed_section:critical'));
+});
+
 test('summary count disagreement and ambiguous raw inputs fail closed without discarding observations', async () => {
   const { compareFindingStates, extractFindingState } = await loadIdentity();
   const incomplete = report({ warning: ['Reachable failure at `src/a.js:20`.'] })
