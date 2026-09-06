@@ -484,11 +484,35 @@ test('init is shell-free and doctrine anchors remain byte-identical under the No
   const doctrineLf = anchoredBody(criteria, 'fp-doctrine');
   const doctrineCrlf = anchoredBody(criteria.replace(/\r\n|\n|\r/gu, '\r\n'), 'fp-doctrine');
   assert.equal(doctrineCrlf, doctrineLf);
-  assert.equal(sha256(doctrineLf), '1cfa74f3e6af65b7d778a476a3faf18d4e780392393ab0251bd1851b4cbf2dbe');
+  assert.equal(sha256(doctrineLf), '881ce12d36e57fbb77c6e7cafcc74862896a7c99e763bc077fcf9b59c3338d6d');
   const conservativeLf = anchoredBody(criteria, 'fp-conservative');
   const conservativeCrlf = anchoredBody(criteria.replace(/\r\n|\n|\r/gu, '\r\n'), 'fp-conservative');
   assert.equal(conservativeCrlf, conservativeLf);
-  assert.equal(sha256(conservativeLf), '14a3f66dc8637dc14bc7a39c349dcc606a208f50c29ba8a934b8e6696ef1ba08');
+  assert.equal(sha256(conservativeLf), '36258751df423aecad77ff47976f418a026a995d84c4a3491cf34f27737e1d31');
+});
+
+test('review and response authorities share one evidence policy without provider or prompt-string shortcuts', () => {
+  const agent = read('agents/code-reviewer.md');
+  const criteria = read('skills/deep-review-workflow/references/review-criteria.md');
+  const receiving = read('skills/receiving-review/SKILL.md');
+  const protocol = read('skills/receiving-review/references/response-protocol.md');
+  const forbidden = read('skills/receiving-review/references/forbidden-patterns.md');
+  const execution = read('skills/deep-review-workflow/references/review-execution.md');
+  const combined = [agent, criteria, receiving, protocol, forbidden, execution].join('\n');
+
+  assert.match(criteria, /same evidence standard.{0,160}(?:provider|role)/isu);
+  assert.match(criteria, /impact.{0,80}reachability.{0,160}uncertainty/isu);
+  assert.match(criteria, /agreement.{0,80}corroboration.{0,80}(?:not|아니)/isu);
+  assert.match(agent, /concrete.{0,120}(?:attack path|exploit path|reachable defect)/isu);
+  assert.match(protocol, /choose.{0,100}(?:method|investigation order|bounded check)/isu);
+  assert.match(execution, /every selected reviewer role.{0,160}(?:same|identical).{0,80}doctrine/isu);
+
+  assert.doesNotMatch(combined, /Codex adversarial(?:은|s+is).{0,80}false positive/iu);
+  assert.doesNotMatch(combined, /Adversarial만 지적.{0,80}기각이 기본/iu);
+  assert.doesNotMatch(combined, /테스트 없으면 🔴/u);
+  assert.doesNotMatch(combined, /300줄 이하/u);
+  assert.doesNotMatch(combined, /Ignore previous instructions.{0,240}🔴 Critical/isu);
+  assert.doesNotMatch(execution, /omits false-positive suppression/iu);
 });
 
 test('loop-state snapshots sets, enforces one-report delta, compares paths, and emits metrics JSON', () => {

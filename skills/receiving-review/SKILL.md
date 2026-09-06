@@ -33,24 +33,13 @@ user-invocable: false
 4. **기술적 반박 권장**: 증거가 있으면 반박한다. 분위기 보다 정확성이 우선
 5. **기록 의무**: 모든 대응을 response 리포트에 기록한다
 
-## Source 신뢰도 매트릭스 (단일 소스)
+## 공통 근거 기준 (단일 소스)
 
-피드백 출처에 따라 기본 신뢰도와 검증 수준이 달라진다. **이 표가 신뢰도의 단일 소스다** — Phase 4(EVALUATE)의 구체적 판단 기준은 `{plugin_root}/skills/receiving-review/references/response-protocol.md`에서 이 표를 전제로 한 행동 규칙을 제시한다. README의 요약 표는 사용자 안내용이며, 상충 시 본 표를 우선한다.
-
-| Source | 기본 신뢰도 | 검증 수준 |
-|--------|-------------|-----------|
-| Human (사용자) | 높음 | 이해 후 구현, 범위 불명확 시만 질문 |
-| deep-review Opus | 중간 | 코드베이스 대조 검증 필수 |
-| Codex review | 중간 | 코드베이스 대조 검증 필수 |
-| Codex adversarial | 낮음 | 철저한 코드 근거 검증 필수 |
-| PR comment (외부) | 낮음 | 5-point 외부 리뷰어 체크리스트 적용 |
-
-### Cross-model Disagreement 처리
-
-- Opus + Codex 일치 → 높은 확신, 수락 우선
-- Opus만 지적 → 코드 검증 후 판단
-- Codex만 지적 → 회의적 검증 (false positive 비율 높음)
-- Adversarial만 지적 → 참고 수준, 근거 불충분하면 기각
+모든 피드백은 source·provider·role에 관계없이 같은 기준으로 검증한다.
+수락·반박은 구체적 트리거, 실제 영향, 도달 가능한 경로, 코드·테스트·계약
+증거로 판단한다. 불확실성은 판정과 별도로 밝힌다. 다른 리뷰어의 agreement는
+corroboration이지 정확성 증명이 아니며, 단독·adversarial 출처에도 자동 승격·강등·
+기각 규칙을 부여하지 않는다.
 
 ## 6단계 대응 프로토콜 (요약)
 
@@ -66,7 +55,7 @@ user-invocable: false
 관련 코드 읽기, 사용처 검색(YAGNI), 기존 테스트 확인, git blame 확인.
 
 ### Phase 4: EVALUATE — 기술적 판단
-Source별 신뢰도 매트릭스에 따라 판단. Cross-model disagreement 처리.
+공통 근거 기준으로 주장을 판단하고, agreement와 disagreement는 보조 증거로만 기록한다.
 
 ### Phase 5: RESPOND — 수락 또는 반박
 수락 시 간결하게, 반박 시 evidence 필수. 반박 철회 시 사과 없이 인정.
@@ -80,11 +69,10 @@ commit을 사용한다. Main은 Node verify를 항상 실행하고 error 또는 
 
 ## 구현 우선순위 (Verdict 연동)
 
-1. 🔴 Critical (전원 일치) → 즉시 수정
-2. 🔴 Critical (부분 일치) → 검증 후 수정
-3. 🟡 Warning (전원 일치) → 수정
-4. 🟡 Warning (부분 일치) → YAGNI 체크 후 판단
-5. ℹ️ Info → 선택적
+1. 🔴 Critical → 검증된 영향·도달 경로를 우선 수정
+2. 🟡 Warning → 실제 영향과 인수 계약을 검증한 후 수정
+3. unresolved → 필요한 증거를 명시하고 보류
+4. ℹ️ Info → 선택적
 
 ## Recurring Findings 연동
 

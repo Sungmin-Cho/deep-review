@@ -12,7 +12,7 @@ mkfix() {
 F=$(mktemp); mkfix "$F" <<'EOF'
 intro
 <!-- fp-conservative:start -->
-**보수적 기본값**: 도달 가능성을 diff만으로 확정할 수 없으면 강등하지 않는다.
+impact reachability uncertainty separately
 <!-- fp-conservative:end -->
 mid
 <!-- fp-doctrine:start -->
@@ -20,13 +20,15 @@ mid
 - 린터/포매터가 자동 수정하는 스타일: ...
 - 근거 없는 추측: ...
 - 단순 취향: ...
+- named important failure: ...
+- concrete attack path: ...
 <!-- fp-doctrine:end -->
 > ⚠️ VOICE-6 note must be excluded
 EOF
 out=$("$SCRIPT" "$F"); rc=$?
 assert_equal "0" "$rc" "happy path exits 0"
 assert_success "printf '%s' \"\$(\"$SCRIPT\" \"$F\")\" | grep -q '근거 없는 추측'" "output contains a doctrine bullet"
-assert_success "printf '%s' \"\$(\"$SCRIPT\" \"$F\")\" | grep -q '강등하지 않는다'" "output contains conservative phrase"
+assert_success "printf '%s' \"\$(\"$SCRIPT\" \"$F\")\" | grep -q 'uncertainty separately'" "output contains common evidence phrase"
 assert_failure "\"$SCRIPT\" \"$F\" | grep -q 'VOICE-6'" "VOICE-6 note is excluded"
 first_section=$(printf '%s' "$("$SCRIPT" "$F")" | grep '^###' | head -1)
 assert_equal "### Severity — conservative default" "$first_section" "conservative-balance block emitted first (W9)"
@@ -41,10 +43,15 @@ assert_equal "" "$("$SCRIPT" "$F2" 2>/dev/null || true)" "fail-closed emits noth
 # 3) duplicate doctrine markers fail closed.
 F3=$(mktemp); mkfix "$F3" <<'EOF'
 <!-- fp-conservative:start -->
-x 강등하지 않는다
+x impact reachability uncertainty separately
 <!-- fp-conservative:end -->
 <!-- fp-doctrine:start -->
 - a
+- b
+- c
+- d
+- named important failure
+- concrete attack path
 <!-- fp-doctrine:end -->
 <!-- fp-doctrine:start -->
 - b
@@ -55,16 +62,18 @@ assert_failure "\"$SCRIPT\" \"$F3\"" "duplicate doctrine markers fail closed"
 # 3b) duplicate conservative markers fail closed symmetrically.
 F3b=$(mktemp); mkfix "$F3b" <<'EOF'
 <!-- fp-conservative:start -->
-강등하지 않는다
+impact reachability uncertainty separately
 <!-- fp-conservative:end -->
 <!-- fp-conservative:start -->
-강등하지 않는다 again
+impact reachability uncertainty separately again
 <!-- fp-conservative:end -->
 <!-- fp-doctrine:start -->
 - pre-existing
 - 린터
 - 추측
 - 취향
+- named important failure
+- concrete attack path
 <!-- fp-doctrine:end -->
 EOF
 assert_failure "\"$SCRIPT\" \"$F3b\"" "duplicate conservative markers fail closed"
@@ -72,7 +81,7 @@ assert_failure "\"$SCRIPT\" \"$F3b\"" "duplicate conservative markers fail close
 # 4) empty doctrine body fails closed.
 F4=$(mktemp); mkfix "$F4" <<'EOF'
 <!-- fp-conservative:start -->
-강등하지 않는다
+impact reachability uncertainty separately
 <!-- fp-conservative:end -->
 <!-- fp-doctrine:start -->
 <!-- fp-doctrine:end -->
@@ -113,9 +122,9 @@ assert_success "awk '
 
 assert_success "grep -q 'route-specific payload' \"$CODEX\"" "Codex generic roles consume route-specific payloads"
 assert_success "grep -q 'read-only instruction' \"$CODEX\" && grep -q 'post-fingerprint' \"$CODEX\"" "Codex native leaves pair read-only instruction with fingerprint trust checks"
-assert_success "grep -q 'omits false-positive suppression' \"$REVEXEC\" && grep -q 'codex-review.*codex-adversarial.*preserving' \"$REVEXEC\"" "Codex routes intentionally omit doctrine through the sole builder"
-assert_success "grep -q 'trusted assignment, verified readiness receipt, changed files, project' \"$REVEXEC\" && grep -q 'context, prior rounds, and diff' \"$REVEXEC\"" "Codex doctrine omission preserves every other payload field"
-assert_failure "grep -Eq 'extract-fp-doctrine|fp-doctrine:start' \"$CODEX\"" "Codex adversarial focus does not receive doctrine injection"
+assert_success "grep -q 'every selected reviewer role' \"$REVEXEC\" && grep -q 'same evidence and suppression doctrine' \"$REVEXEC\"" "all selected roles receive the common doctrine"
+assert_success "grep -q 'assignment, verified readiness receipt, changed files, project context, prior' \"$REVEXEC\" && grep -q 'rounds, and diff' \"$REVEXEC\"" "common doctrine payload preserves every other field"
+assert_failure "grep -Eq 'extract-fp-doctrine|fp-doctrine:start' \"$CODEX\"" "Codex integration does not duplicate doctrine extraction"
 assert_success "grep -q 'identical doctrine' \"$ULTRA\"" "ultracode lenses receive identical doctrine"
 assert_success "grep -q -- '--prompt-file PAYLOAD_FILE' \"$AGY\"" "agy consumes its selected route payload"
 assert_success "grep -q 'Warnings' \"$REPORT\"" "report format preserves operational warnings"

@@ -125,12 +125,14 @@ export function extractFalsePositiveDoctrine(criteriaText) {
   const doctrine = extractAnchoredBlock(criteriaText, 'fp-doctrine');
   const conservative = extractAnchoredBlock(criteriaText, 'fp-conservative');
   const bulletCount = doctrine.split('\n').filter((line) => /^\s*-/.test(line)).length;
-  if (bulletCount < 4) throw new Error(`fp-doctrine requires at least four bullets, got ${bulletCount}`);
-  for (const keyword of ['pre-existing', '린터', '추측', '취향']) {
+  if (bulletCount < 6) throw new Error(`fp-doctrine requires at least six bullets, got ${bulletCount}`);
+  for (const keyword of ['pre-existing', '린터', '추측', '취향', 'named important failure', 'concrete attack path']) {
     if (!doctrine.includes(keyword)) throw new Error(`fp-doctrine missing canonical keyword ${keyword}`);
   }
-  if (!conservative.includes('강등하지 않는다')) {
-    throw new Error('fp-conservative missing reachability phrase');
+  for (const keyword of ['impact', 'reachability', 'uncertainty', 'separately']) {
+    if (!conservative.includes(keyword)) {
+      throw new Error(`fp-conservative missing canonical keyword ${keyword}`);
+    }
   }
   if (/VOICE-6|confidence/.test(`${conservative}\n${doctrine}`)) {
     throw new Error('VOICE-6/confidence text must remain outside doctrine anchors');
@@ -230,21 +232,17 @@ export function buildReviewerPayload(options = {}) {
   const assignment = trustedAssignmentSection(options);
   const readinessReceipt = trustedReadinessReceiptSection(options);
   let doctrine = '';
-  const omitDoctrine = options.reviewerId === 'codex-review'
-    || options.reviewerId === 'codex-adversarial';
-  if (!omitDoctrine) {
-    try {
-      const criteriaPath = join(
-        root,
-        'skills',
-        'deep-review-workflow',
-        'references',
-        'review-criteria.md',
-      );
-      doctrine = extractFalsePositiveDoctrine(readFileSync(criteriaPath, 'utf8'));
-    } catch {
-      warnings.push(DOCTRINE_WARNING);
-    }
+  try {
+    const criteriaPath = join(
+      root,
+      'skills',
+      'deep-review-workflow',
+      'references',
+      'review-criteria.md',
+    );
+    doctrine = extractFalsePositiveDoctrine(readFileSync(criteriaPath, 'utf8'));
+  } catch {
+    warnings.push(DOCTRINE_WARNING);
   }
 
   let changeFiles = '';

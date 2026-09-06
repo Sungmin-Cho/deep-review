@@ -52,7 +52,7 @@ async function loadPayload() {
 const VALID_CRITERIA = [
   'prefix',
   '<!-- fp-conservative:start -->',
-  '도달이 불분명하면 강등하지 않는다.',
+  'impact reachability uncertainty separately.',
   '<!-- fp-conservative:end -->',
   'middle',
   '<!-- fp-doctrine:start -->',
@@ -60,6 +60,8 @@ const VALID_CRITERIA = [
   '- 린터 스타일',
   '- 근거 없는 추측',
   '- 단순 취향',
+  '- named important failure 검증',
+  '- concrete attack path 검증',
   '<!-- fp-doctrine:end -->',
   'VOICE-6 confidence stays outside',
 ].join('\n');
@@ -159,7 +161,7 @@ test('anchor extraction requires one ordered non-empty pair for both blocks', as
       .replace('<!-- fp-conservative:start -->', 'TEMP')
       .replace('<!-- fp-conservative:end -->', '<!-- fp-conservative:start -->')
       .replace('TEMP', '<!-- fp-conservative:end -->')],
-    ['conservative empty', VALID_CRITERIA.replace('도달이 불분명하면 강등하지 않는다.', '   ')],
+    ['conservative empty', VALID_CRITERIA.replace('impact reachability uncertainty separately.', '   ')],
   ]);
 
   for (const [name, source] of invalidCases) {
@@ -180,12 +182,17 @@ test('anchor extraction requires one ordered non-empty pair for both blocks', as
 test('all legacy semantic doctrine gates fail closed with the same warning', async () => {
   const { buildReviewerPayload, extractFalsePositiveDoctrine } = await loadPayload();
   const invalidCases = [
-    VALID_CRITERIA.replace('- 단순 취향\n', ''),
+    VALID_CRITERIA.replace('- concrete attack path 검증\n', ''),
     VALID_CRITERIA.replace('pre-existing', 'existing'),
     VALID_CRITERIA.replace('린터', 'formatter'),
     VALID_CRITERIA.replace('추측', 'guess'),
     VALID_CRITERIA.replace('취향', 'preference'),
-    VALID_CRITERIA.replace('강등하지 않는다', '강등한다'),
+    VALID_CRITERIA.replace('named important failure', 'unspecified gap'),
+    VALID_CRITERIA.replace('concrete attack path', 'suspicious text'),
+    VALID_CRITERIA.replace('impact', 'kind'),
+    VALID_CRITERIA.replace('reachability', 'guess'),
+    VALID_CRITERIA.replace('uncertainty', 'confidence'),
+    VALID_CRITERIA.replace('separately', 'together'),
     VALID_CRITERIA.replace('- 단순 취향', '- 단순 취향\n- VOICE-6 confidence'),
   ];
 
@@ -458,7 +465,7 @@ test('document routes inject mode-aware practical policy for every provider and 
   assert.doesNotMatch(implementationPrompt, /practical document policy/i);
 });
 
-test('Codex reviewer payloads omit only suppression doctrine and preserve every other supplied section', async () => {
+test('Codex reviewer payloads receive the common doctrine and preserve every other supplied section', async () => {
   const { buildReviewerPayload } = await loadPayload();
   const { createDocumentReadinessReceipt } = await import(pathToFileURL(
     join(pluginRoot, 'hooks', 'scripts', 'document-readiness.mjs'),
@@ -526,7 +533,7 @@ test('Codex reviewer payloads omit only suppression doctrine and preserve every 
       diff: 'DIFF_SENTINEL',
     });
     const prompt = readFileSync(result.promptFile, 'utf8');
-    assert.doesNotMatch(prompt, /REVIEW SUPPRESSION DOCTRINE/, reviewer.reviewerId);
+    assert.match(prompt, /REVIEW SUPPRESSION DOCTRINE/, reviewer.reviewerId);
     assert.match(prompt, /TRUSTED REVIEW ASSIGNMENT/, reviewer.reviewerId);
     assert.match(prompt, new RegExp(`reviewer_id: ${reviewer.reviewerId}`), reviewer.reviewerId);
     assert.match(prompt, /VERIFIED DOCUMENT READINESS RECEIPT/, reviewer.reviewerId);
@@ -547,7 +554,7 @@ test('Codex reviewer payloads omit only suppression doctrine and preserve every 
   }
 });
 
-test('non-Codex reviewer payloads retain suppression doctrine', async () => {
+test('every reviewer role receives byte-identical suppression doctrine', async () => {
   const { buildReviewerPayload } = await loadPayload();
   const temp = temporaryDirectory('deep-review-non-codex-payload-');
   const routingPlan = writeSingleReviewerPlan(temp, {
@@ -556,14 +563,26 @@ test('non-Codex reviewer payloads retain suppression doctrine', async () => {
     adapterId: 'claude-cli',
     assignmentRole: 'standard',
   });
-  const result = buildReviewerPayload({
-    pluginRoot,
-    routingPlan,
-    reviewerId: 'claude-opus',
-    diff: 'DIFF',
-  });
-  assert.match(readFileSync(result.promptFile, 'utf8'), /REVIEW SUPPRESSION DOCTRINE/);
-  assert.deepEqual(result.warnings, []);
+  const doctrineSections = [];
+  for (const route of [
+    { reviewerId: 'claude-opus', provider: 'claude', adapterId: 'claude-cli', assignmentRole: 'standard' },
+    { reviewerId: 'codex-review', provider: 'codex', adapterId: 'codex-native-generic', assignmentRole: 'standard' },
+    { reviewerId: 'codex-adversarial', provider: 'codex', adapterId: 'codex-native-generic', assignmentRole: 'adversarial' },
+  ]) {
+    const routePlan = route.reviewerId === 'claude-opus'
+      ? routingPlan
+      : writeSingleReviewerPlan(temp, route);
+    const result = buildReviewerPayload({
+      pluginRoot,
+      routingPlan: routePlan,
+      reviewerId: route.reviewerId,
+      diff: 'DIFF',
+    });
+    doctrineSections.push(doctrineFromPrompt(readFileSync(result.promptFile, 'utf8')));
+    assert.deepEqual(result.warnings, []);
+  }
+  assert.ok(doctrineSections[0]);
+  assert.deepEqual(doctrineSections, [doctrineSections[0], doctrineSections[0], doctrineSections[0]]);
 });
 
 test('payload builder fails closed on a forged, duplicate, unsupported, or mismatched assignment', async () => {

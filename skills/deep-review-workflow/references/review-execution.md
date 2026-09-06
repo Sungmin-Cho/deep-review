@@ -147,10 +147,10 @@ this design replaced. A single-shot review invocation (no loop) never has
 this flag and therefore never sees the section.
 
 Each JSON result contains one absolute route-specific payload path. The Node
-builder is the sole doctrine injector: it omits false-positive suppression
-doctrine only for `codex-review` and `codex-adversarial`, while preserving the
-trusted assignment, verified readiness receipt, changed files, project
-context, prior rounds, and diff. All other reviewers retain the doctrine.
+builder is the sole doctrine injector: every selected reviewer role receives
+the same evidence and suppression doctrine together with its trusted
+assignment, verified readiness receipt, changed files, project context, prior
+rounds, and diff.
 Preserve every builder warning in the final report.
 Each result also carries `changeFilesStatus` and `binaryOmitted`
 (`{count, classifiedBy, omittedAt, records, listed, unlisted, digest}`;

@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { join, resolve } = require('node:path');
 const { pathToFileURL } = require('node:url');
+const { report } = require('./helpers/review-accuracy-fixtures.js');
 
 const pluginRoot = resolve(__dirname, '..');
 const modulePath = join(pluginRoot, 'hooks', 'scripts', 'lib', 'finding-identity.mjs');
@@ -12,6 +13,207 @@ const moduleUrl = pathToFileURL(modulePath).href;
 async function loadIdentity() {
   return import(moduleUrl);
 }
+
+test('extractFindingState treats one bullet with three citations as one observation', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const state = extractFindingState(report({
+    warning: [
+      'Retry exhaustion crosses `src/retry.js:20`, `src/caller.js:44`, and `tests/retry.test.js:71`; preserve 3 attempts.',
+    ],
+  }));
+
+  assert.equal(state.schema_version, 1);
+  assert.equal(state.status, 'complete');
+  assert.equal(state.expected_count, 1);
+  assert.equal(state.findings.length, 1);
+  assert.deepEqual(state.findings[0].locations, [
+    { path: 'src/retry.js', line: 20 },
+    { path: 'src/caller.js', line: 44 },
+    { path: 'tests/retry.test.js', line: 71 },
+  ]);
+  assert.deepEqual(state.findings[0].primary_location, { path: 'src/retry.js', line: 20 });
+  assert.equal(state.findings[0].claim, 'Retry exhaustion crosses , , and ; preserve 3 attempts.');
+  assert.match(state.findings[0].claim_key, /^[0-9a-f]{64}$/u);
+  assert.equal(state.findings[0].finding_id, `F-${state.findings[0].claim_key}`);
+});
+
+test('missing location retains the observation and makes its state indeterminate', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const state = extractFindingState(report({ warning: ['Retry bound; preserve 3 attempts.'] }));
+
+  assert.equal(state.status, 'indeterminate');
+  assert.equal(state.expected_count, 1);
+  assert.equal(state.findings.length, 1);
+  assert.equal(state.findings[0].primary_location, null);
+  assert.ok(state.reasons.includes('missing_location:warning:1'));
+});
+
+test('exact claim identity survives +7 and +100 line moves', async () => {
+  const { extractFindingState, compareFindingStates, reconcileFindingStates } = await loadIdentity();
+  const before = extractFindingState(report({ warning: ['Retry bound at `src/a.js:20`; preserve 3 attempts.'] }));
+  for (const line of [27, 120]) {
+    const after = extractFindingState(report({ warning: [`Retry bound at \`src/a.js:${line}\`; preserve 3 attempts.`] }));
+    const comparison = compareFindingStates(before, after);
+    assert.deepEqual(comparison, {
+      identity_status: 'complete',
+      repeated_count: 1,
+      newly_observed_count: 0,
+      not_reobserved_count: 0,
+      severity_changes: [],
+      progress: 'stalled',
+    });
+    assert.equal(reconcileFindingStates(before, after).findings[0].finding_id, before.findings[0].finding_id);
+  }
+});
+
+test('the same claim retains identity across Critical to Warning and reports the severity change', async () => {
+  const { extractFindingState, compareFindingStates } = await loadIdentity();
+  const before = extractFindingState(report({ critical: ['Unchecked write at `src/store.js:8` corrupts saved state.'] }));
+  const after = extractFindingState(report({ warning: ['Unchecked write at `src/store.js:99` corrupts saved state.'] }));
+  const comparison = compareFindingStates(before, after);
+
+  assert.equal(before.findings[0].finding_id, after.findings[0].finding_id);
+  assert.equal(comparison.repeated_count, 1);
+  assert.deepEqual(comparison.severity_changes, [{
+    finding_id: before.findings[0].finding_id,
+    from: 'critical',
+    to: 'warning',
+  }]);
+  assert.equal(comparison.progress, 'changed');
+});
+
+test('different claims at the same line stay distinct observations', async () => {
+  const { extractFindingState, compareFindingStates } = await loadIdentity();
+  const before = extractFindingState(report({ warning: ['Retry limit is ignored at `src/a.js:20`.'] }));
+  const after = extractFindingState(report({ warning: ['Timeout is swallowed at `src/a.js:20`.'] }));
+  const comparison = compareFindingStates(before, after);
+
+  assert.notEqual(before.findings[0].claim_key, after.findings[0].claim_key);
+  assert.equal(comparison.repeated_count, 0);
+  assert.equal(comparison.newly_observed_count, 1);
+  assert.equal(comparison.not_reobserved_count, 1);
+  assert.equal(comparison.progress, 'changed');
+});
+
+test('duplicate exact claims are retained but make reconciliation indeterminate', async () => {
+  const { extractFindingState, compareFindingStates } = await loadIdentity();
+  const duplicate = extractFindingState(report({ warning: [
+    'Retry limit is ignored at `src/a.js:20`.',
+    'Retry limit is ignored at `src/a.js:80`.',
+  ] }));
+
+  assert.equal(duplicate.findings.length, 2);
+  assert.equal(duplicate.status, 'indeterminate');
+  assert.ok(duplicate.reasons.some((reason) => reason.startsWith('duplicate_claim_key:')));
+  assert.equal(compareFindingStates(duplicate, duplicate).progress, 'indeterminate');
+});
+
+test('claim normalization excludes labels and Markdown while preserving Unicode and numeric constants', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const plain = extractFindingState(report({ warning: ['경계 3회가 ✓ 없이 우회됩니다 at `src/한글.js:10`.'] }));
+  const presented = extractFindingState(report({ warning: ['**[W7]** 경계 **3회**가 `✓` 없이 우회됩니다 at `src/한글.js:999`.'] }));
+  const differentConstant = extractFindingState(report({ warning: ['경계 4회가 ✓ 없이 우회됩니다 at `src/한글.js:10`.'] }));
+
+  assert.equal(plain.status, 'complete');
+  assert.equal(presented.status, 'complete');
+  assert.equal(plain.findings[0].claim_key, presented.findings[0].claim_key);
+  assert.notEqual(plain.findings[0].claim_key, differentConstant.findings[0].claim_key);
+  assert.match(plain.findings[0].claim, /경계 3회/u);
+});
+
+test('claim normalization preserves substantive inline-code underscores and operators', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const underscored = extractFindingState(report({ warning: ['`max_retries` is ignored at `src/a.js:10`.'] }));
+  const collapsed = extractFindingState(report({ warning: ['`maxretries` is ignored at `src/a.js:10`.'] }));
+  const multiply = extractFindingState(report({ warning: ['`a*b` overflows at `src/a.js:10`.'] }));
+  const concatenated = extractFindingState(report({ warning: ['`ab` overflows at `src/a.js:10`.'] }));
+  const complement = extractFindingState(report({ warning: ['`~mask` escapes at `src/a.js:10`.'] }));
+  const bareMask = extractFindingState(report({ warning: ['`mask` escapes at `src/a.js:10`.'] }));
+
+  assert.match(underscored.findings[0].claim, /max_retries/u);
+  assert.notEqual(underscored.findings[0].claim_key, collapsed.findings[0].claim_key);
+  assert.match(multiply.findings[0].claim, /a\*b/u);
+  assert.notEqual(multiply.findings[0].claim_key, concatenated.findings[0].claim_key);
+  assert.match(complement.findings[0].claim, /~mask/u);
+  assert.notEqual(complement.findings[0].claim_key, bareMask.findings[0].claim_key);
+});
+
+test('summary count disagreement and ambiguous raw inputs fail closed without discarding observations', async () => {
+  const { compareFindingStates, extractFindingState } = await loadIdentity();
+  const incomplete = report({ warning: ['Reachable failure at `src/a.js:20`.'] })
+    .replace('🟡 1건', '🟡 2건');
+  const ambiguousPath = report({ warning: ['Escapes the root at `../src/a.js:20`.'] });
+  const uriPath = report({ warning: ['Remote URL is not a repository path at `https://example.test/a.js:20`.'] });
+  const invalidUnicode = report({ warning: [`Invalid raw claim \ud800 at \`src/a.js:20\`.`] });
+  const nulClaim = report({ warning: ['Invalid\0claim at `src/a.js:20`.'] });
+
+  const countState = extractFindingState(incomplete);
+  assert.equal(countState.status, 'indeterminate');
+  assert.equal(countState.findings.length, 1);
+  assert.ok(countState.reasons.includes('summary_count_mismatch:warning:2:1'));
+
+  const pathState = extractFindingState(ambiguousPath);
+  assert.equal(pathState.status, 'indeterminate');
+  assert.equal(pathState.findings.length, 1);
+  assert.ok(pathState.reasons.includes('ambiguous_path:warning:1'));
+
+  const uriState = extractFindingState(uriPath);
+  assert.equal(uriState.status, 'indeterminate');
+  assert.equal(uriState.findings.length, 1);
+  assert.ok(uriState.reasons.includes('ambiguous_path:warning:1'));
+
+  const unicodeState = extractFindingState(invalidUnicode);
+  assert.equal(unicodeState.status, 'indeterminate');
+  assert.equal(unicodeState.findings.length, 1);
+  assert.ok(unicodeState.reasons.includes('ambiguous_claim:warning:1'));
+
+  const nulState = extractFindingState(nulClaim);
+  assert.equal(nulState.status, 'indeterminate');
+  assert.equal(nulState.findings.length, 1);
+  assert.ok(nulState.reasons.includes('ambiguous_claim:warning:1'));
+  assert.equal(compareFindingStates(unicodeState, unicodeState).progress, 'indeterminate');
+});
+
+test('realistic N-way synthesis annotations outside Code Review do not mint findings', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const markdown = `${report({
+    critical: ['Bounded reader follows the symlink at `src/read.js:9`; reject it.'],
+    warning: ['Retry evidence is absent at `src/retry.js:31`; run a bounded check.'],
+  })}\n## Cross-Model Verification\n\n- codex-review cited \`notes.md:40\`.\n- **Issues**: 🔴 9건, 🟡 9건, ℹ️ 9건\n\n## Evidence Adjudication\n\n- source_refs: \`src/fake.js:500\``;
+  const state = extractFindingState(markdown);
+
+  assert.equal(state.status, 'complete');
+  assert.equal(state.findings.length, 2);
+  assert.deepEqual(state.findings.map((finding) => finding.primary_location.path), [
+    'src/read.js',
+    'src/retry.js',
+  ]);
+});
+
+test('a malformed material heading retains its bullets and marks the state indeterminate', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const markdown = report({ warning: ['Retry is unbounded at `src/a.js:10`.'] })
+    .replace('### 🟡 Warning', '### 🟡 Warning ');
+  const state = extractFindingState(markdown);
+
+  assert.equal(state.status, 'indeterminate');
+  assert.equal(state.findings.length, 1);
+  assert.equal(state.findings[0].claim, 'Retry is unbounded at .');
+  assert.ok(state.reasons.includes('malformed_section_heading:warning'));
+});
+
+test('comparison rejects invalid FindingState objects explicitly', async () => {
+  const { compareFindingStates, extractFindingState, reconcileFindingStates } = await loadIdentity();
+  assert.throws(() => compareFindingStates({}, {}), /FindingStateV1/u);
+  assert.throws(() => reconcileFindingStates({ status: 'complete', findings: [] }, null), /FindingStateV1/u);
+  const valid = extractFindingState(report({ warning: ['Failure at `src/a.js:10`.'] }));
+  const forged = structuredClone(valid);
+  forged.findings[0].finding_id = `F-${'0'.repeat(64)}`;
+  assert.throws(() => compareFindingStates(valid, forged), /FindingStateV1/u);
+
+  const indeterminate = extractFindingState(report({ warning: ['Missing location.'] }));
+  assert.equal(compareFindingStates(indeterminate, indeterminate).progress, 'indeterminate');
+});
 
 test('canonicalizeRepoPath normalizes backslashes to forward slashes', async () => {
   const { canonicalizeRepoPath } = await loadIdentity();
