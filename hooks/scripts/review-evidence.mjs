@@ -284,8 +284,37 @@ function captureEvidenceSource(repo, input, nonce) {
   return { bytes, artifacts };
 }
 
-function recompute(repo, input, date) {
+function readRecordedReceipt(repo, input) {
+  const bytes = readBoundedFile(repo, input.readiness_receipt);
+  if (
+    !input.captured_readiness_receipt_sha256 ||
+    evidenceHash(bytes) !== input.captured_readiness_receipt_sha256
+  )
+    throw new Error('recorded receipt bytes changed');
+  const receipt = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  const { receipt_sha256: seal, ...body } = receipt;
+  if (evidenceHash(body) !== seal || receipt.status !== 'READY_FOR_IMPLEMENTATION')
+    throw new Error('recorded receipt seal invalid');
+  const projection = input.evidence_inputs.readinessReceipt
+    ? JSON.parse(input.evidence_inputs.readinessReceipt)
+    : null;
+  return {
+    status: receipt.status,
+    receipt,
+    receipt_path: containedPath(repo, input.readiness_receipt),
+    scope_sha256: receipt.scope_sha256,
+    risk: receipt.risk,
+    deferred_findings: projection?.deferred_findings ?? receipt.deferred_findings,
+  };
+}
+function recompute(repo, input, date, { historyOnly = false } = {}) {
   if (!input || !Array.isArray(input.attempts)) throw new Error('raw synthesis input required');
+  if (
+    input.captured_readiness_receipt_sha256 &&
+    evidenceHash(readBoundedFile(repo, input.readiness_receipt)) !==
+      input.captured_readiness_receipt_sha256
+  )
+    throw new Error('captured receipt bytes changed');
   const binding = parsePreparedReviewBinding(input.routing_plan || {});
   if (!binding) throw new Error('prepared decision mode required');
   validateEvidenceInputs(input.evidence_inputs);
@@ -305,7 +334,9 @@ function recompute(repo, input, date) {
   if (input.evidence_inputs.readinessReceipt) {
     if (!input.readiness_receipt)
       throw new Error('source receipt projection requires actual verified receipt');
-    const verified = verifyReadinessReceipt({ repo, receiptPath: input.readiness_receipt });
+    const verified = historyOnly
+      ? readRecordedReceipt(repo, input)
+      : verifyReadinessReceipt({ repo, receiptPath: input.readiness_receipt });
     const projection = JSON.stringify(
       {
         status: verified.status,
@@ -318,7 +349,7 @@ function recompute(repo, input, date) {
     );
     if (projection !== input.evidence_inputs.readinessReceipt)
       throw new Error('source receipt projection mismatch');
-    if (binding.decision_mode === 'adjudication-v1') {
+    if (binding.decision_mode === 'adjudication-v1' && !historyOnly) {
       deferredAcceptance = evaluateDeferredAcceptance({
         receipt: verified,
         repo,
@@ -371,7 +402,9 @@ function recompute(repo, input, date) {
     });
     if (readiness.status === 'READY_FOR_IMPLEMENTATION') {
       if (!input.readiness_receipt) throw new Error('verified document readiness receipt required');
-      const verified = verifyReadinessReceipt({ repo, receiptPath: input.readiness_receipt });
+      const verified = historyOnly
+        ? readRecordedReceipt(repo, input)
+        : verifyReadinessReceipt({ repo, receiptPath: input.readiness_receipt });
       if (
         verified.receipt.schema_version !== '2.0' ||
         verified.receipt.readiness_admission?.carrier_sha256 !==
@@ -420,6 +453,7 @@ function recompute(repo, input, date) {
   const findingState = extractFindingState(report, { repoRoot: repo });
   return {
     report,
+    deferredAcceptance,
     result: {
       decision_mode: binding.decision_mode,
       round_id: binding.round_id,
@@ -484,7 +518,12 @@ export async function finalizeReviewDecision({
 }) {
   repo = realpathSync(repo);
   input = loadReviewEvidenceInput({ repo, input });
-  const { report, result } = recompute(repo, input, date);
+  if (input.readiness_receipt)
+    input.captured_readiness_receipt_sha256 = evidenceHash(
+      readBoundedFile(repo, input.readiness_receipt),
+    );
+  const { report, result, deferredAcceptance } = recompute(repo, input, date);
+  if (deferredAcceptance !== null) input.deferred_acceptance = deferredAcceptance;
   if (
     result.review_target.scope.repo_root !== repo ||
     !sameReviewTarget(
@@ -522,7 +561,7 @@ export async function finalizeReviewDecision({
   publish(repo, reportPath, report);
   return { report_path: reportPath, decision_path: decisionPath, decision };
 }
-export async function verifyReviewDecision({ decisionFile, repo }) {
+async function verifyDecisionCapture({ decisionFile, repo, historyOnly = false }) {
   repo = realpathSync(repo);
   const decision = readControlFile(repo, decisionFile);
   const { decision_sha256: seal, ...body } = decision;
@@ -549,7 +588,7 @@ export async function verifyReviewDecision({ decisionFile, repo }) {
     repo,
     input: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(source)),
   });
-  const { report, result } = recompute(repo, input, decision.date);
+  const { report, result } = recompute(repo, input, decision.date, { historyOnly });
   const actualReport = readBoundedFile(repo, decision.canonical_report_path, SOURCE_LIMIT);
   if (
     evidenceHash(actualReport) !== decision.canonical_report_sha256 ||
@@ -568,6 +607,33 @@ export async function verifyReviewDecision({ decisionFile, repo }) {
   if (evidenceHash(expected) !== seal) throw new Error('recomputed decision mismatch');
   return decision;
 }
+export async function verifyReviewDecision({ decisionFile, repo }) {
+  return verifyDecisionCapture({ decisionFile, repo });
+}
+// This is solely ledger continuity after an authorized change. It deliberately
+// exposes no current verdict/readiness/synthesis permission fields.
+export async function verifyReviewDecisionHistory({ decisionFile, repo }) {
+  const decision = await verifyDecisionCapture({ decisionFile, repo, historyOnly: true });
+  return {
+    schema_version: 1,
+    status: 'history_only',
+    history_only: true,
+    phase6_allowed: false,
+    decision_sha256: decision.decision_sha256,
+    decision_mode: decision.decision_mode,
+    round_id: decision.round_id,
+    review_target: decision.review_target,
+    material_findings: decision.material_findings,
+    pending_findings: decision.pending_findings,
+    confirmation: decision.confirmation,
+    recorded_verdict: decision.verdict,
+    recorded_counts: decision.counts,
+    recorded_readiness: decision.readiness,
+    canonical_report_path: decision.canonical_report_path,
+    canonical_report_sha256: decision.canonical_report_sha256,
+  };
+}
+
 async function cli(argv) {
   const command = argv.shift();
   const options = {};
@@ -594,8 +660,10 @@ async function cli(argv) {
       reportDir: options['report-dir'],
       date: options.date,
     });
+  if (command === 'verify-history')
+    return verifyReviewDecisionHistory({ repo, decisionFile: options.decision });
   if (command === 'verify') return verifyReviewDecision({ repo, decisionFile: options.decision });
-  throw new Error('expected capture, prepare, build-dispatch, finalize or verify');
+  throw new Error('expected capture, prepare, build-dispatch, finalize, verify or verify-history');
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try {

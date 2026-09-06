@@ -400,6 +400,23 @@ test('document READY with deferred evidence uses unchanged receipt 2.0 and raw g
       input: { ...input, adjudication: { schema_version: '1.0', groups: [] } },
     }),
   );
+  fs.writeFileSync(path.join(f.repo, 'plan.md'), '# Plan after authorized Respond\n');
+  await assert.rejects(
+    f.verifyReviewDecision({ repo: f.repo, decisionFile: result.decision_path }),
+  );
+  const history = await f.verifyReviewDecisionHistory({
+    repo: f.repo,
+    decisionFile: result.decision_path,
+  });
+  assert.equal(history.status, 'history_only');
+  assert.equal(history.phase6_allowed, false);
+  assert.equal(history.recorded_verdict, 'CONCERN');
+  assert.equal(Object.hasOwn(history, 'readiness'), false);
+  assert.equal(Object.hasOwn(history, 'verdict'), false);
+  fs.appendFileSync(result.report_path, 'tampered');
+  await assert.rejects(
+    f.verifyReviewDecisionHistory({ repo: f.repo, decisionFile: result.decision_path }),
+  );
 });
 test('unanimous raw warnings can be refuted without expansion; expanded adjudication must cover all sources', async (t) => {
   const f = await fixture(t);
