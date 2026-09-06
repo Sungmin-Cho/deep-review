@@ -1013,12 +1013,26 @@ export function synthesizeReviewRound({
 }
 
 const invoked = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
-if (invoked) {
+async function runSynthesisCli() {
   try {
     const inputIndex = process.argv.indexOf('--input');
     if (inputIndex < 0 || !process.argv[inputIndex + 1]) throw new Error('--input FILE is required');
     const inputPath = resolve(process.argv[inputIndex + 1]);
-    let input = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(readBoundedFile(dirname(inputPath),inputPath)));
+    let input;
+    try {
+      input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+        readBoundedFile(dirname(inputPath), inputPath),
+      ));
+    } catch (boundedError) {
+      // The explicit legacy carrier predates bounded/no-follow control reads.
+      // This compatibility probe cannot admit a prepared decision-mode input:
+      // every prepared input must have succeeded through the bounded read.
+      const legacy = JSON.parse(readFileSync(inputPath, 'utf8'));
+      if (legacy?.routing_plan && Object.hasOwn(legacy.routing_plan, 'decision_mode')) {
+        throw boundedError;
+      }
+      input = legacy;
+    }
     if (input?.routing_plan?.decision_mode && input.attempts?.some(attempt=>!Object.hasOwn(attempt,'output'))) {
       const {loadReviewEvidenceInput} = await import('./review-evidence.mjs');
       input = loadReviewEvidenceInput({repo:input.routing_plan.review_target.scope.repo_root,input});
@@ -1048,3 +1062,8 @@ if (invoked) {
     process.exitCode = 2;
   }
 }
+
+// Do not top-level-await a dynamic import of review-evidence: that module
+// imports this synthesis authority, so waiting during evaluation deadlocks the
+// thin-input CLI. The async entry runs after this module can finish evaluating.
+if (invoked) void runSynthesisCli();

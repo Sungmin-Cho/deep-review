@@ -157,3 +157,23 @@ test('confirmation requires exact positive raw claims and conflicts stay open', 
   );
 });
 module.exports = { report, adjudication };
+
+test('canonical source descriptors ignore Summary heading substrings and reconcile admitted counts', async () => {
+  const {extractSourceFindings}=await import('../hooks/scripts/lib/review-adjudication.mjs');
+  const {parseReviewerReport}=await import('../hooks/scripts/review-synthesis.mjs');
+  for (const severity of ['critical','warning']) {
+    const heading=severity==='critical'?'### 🔴 Critical':'### 🟡 Warning';
+    for (const decoy of [`Metadata quotes ${heading}\nNone.`,`${heading}\nNone.`]) {
+      for (const newline of ['\n','\r\n']) {
+        const output=report(severity).replace('\n\n## Code Review',`\n${decoy}\n\n## Code Review`).replaceAll('\n',newline);
+        const parsed=parseReviewerReport(output,{strict:true});assert.ok(parsed);
+        const rows=extractSourceFindings(output,'codex-review');
+        assert.equal(rows.filter(row=>row.severity===severity).length,parsed.issues[severity]);
+        assert.equal(rows[0].ordinal,1);assert.match(rows[0].bullet,/src\/a\.js:14/);
+      }
+    }
+    const lenient=report(severity).replace('## Code Review\n','');
+    assert.ok(parseReviewerReport(lenient,{strict:true}));
+    assert.equal(extractSourceFindings(lenient,'codex-review').length,1);
+  }
+});

@@ -30,23 +30,49 @@ export function getAttemptEvidence(attempt) {
   return raw ? structuredClone(raw) : null;
 }
 export function extractSourceFindings(output, reviewerId) {
-  if (!parseReviewerReport(output, { strict: true }) || !nonempty(reviewerId))
-    fail('unadmitted raw report');
+  const parsed = parseReviewerReport(output, { strict: true });
+  if (!parsed || !nonempty(reviewerId)) fail('unadmitted raw report');
+
+  // Only canonical heading positions establish source ordinals. Summary prose
+  // may quote heading text and must never shadow a material severity section.
+  const codeHeading = /^## Code Review$/mu.exec(output);
+  const summaryHeading = /^## Summary$/mu.exec(output);
+  let region = output.slice(
+    codeHeading
+      ? codeHeading.index + codeHeading[0].length
+      : summaryHeading.index + summaryHeading[0].length,
+  );
+  if (!codeHeading) {
+    // Preserve the existing admitted missing-Code-Review-heading tolerance.
+    // The strict parser has already established the unique canonical sequence.
+    const firstSection = /^###\s+\S.*$/mu.exec(region);
+    if (!firstSection) fail('missing canonical material sections');
+    region = region.slice(firstSection.index);
+  }
+  const nextRegion = /^##\s+\S.*$/mu.exec(region);
+  if (nextRegion) region = region.slice(0, nextRegion.index);
+
   const report_sha256 = evidenceHash(output);
   const rows = [];
   for (const severity of severities) {
     const heading = severity === 'critical' ? '### 🔴 Critical' : '### 🟡 Warning';
-    const start = output.indexOf(heading) + heading.length;
-    const rest = output.slice(start);
-    const next = /^#{2,3} /mu.exec(rest);
-    const region = next ? rest.slice(0, next.index) : rest;
-    const bullets = region.split(/\r?\n/).filter((line) => line.startsWith('- '));
+    const headings = [...region.matchAll(new RegExp(`^${heading}$`, 'gmu'))];
+    if (headings.length !== 1) fail('ambiguous canonical severity section');
+    const [position] = headings;
+    const rest = region.slice(position.index + position[0].length);
+    const nextSection = /^###\s+\S.*$/mu.exec(rest);
+    const section = nextSection ? rest.slice(0, nextSection.index) : rest;
+    const bullets = section.split(/\r?\n/u).filter((line) => line.startsWith('- '));
+    if (bullets.length !== parsed.issues[severity]) {
+      fail(`source count mismatch: ${severity}`);
+    }
     bullets.forEach((bullet, index) =>
       rows.push({ reviewer_id: reviewerId, report_sha256, severity, ordinal: index + 1, bullet }),
     );
   }
   return rows;
 }
+
 function refKey(ref) {
   if (
     !object(ref) ||

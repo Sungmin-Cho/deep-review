@@ -780,3 +780,51 @@ test('220 KiB common diff across four reviewers stays file-backed under control 
   );
   assert.equal(cli.decision.verdict, 'APPROVE');
 });
+
+test('Summary severity-heading collision cannot finalize a Critical as empty APPROVE', async t => {
+  const f=await fixture(t);
+  const output=cleanReport.replace('Verdict**: APPROVE','Verdict**: REQUEST_CHANGES')
+    .replace('🔴 0건','🔴 1건')
+    .replace('### 🔴 Critical\nNone.','### 🔴 Critical\n- `a.js:1` a failed write drops persisted records.')
+    .replace('\n\n## Code Review','\nMetadata mentions ### 🔴 Critical\nNone.\n\n## Code Review');
+  assert.equal(f.parseReviewerReport(output,{strict:true}).issues.critical,1);
+  const raw={...f.raw,output};
+  const dispatch=f.buildDispatchEvidence({routingPlan:f.prepared.plan,attempts:[raw],launches:f.launches,roundId:'round-1'});
+  const input={...f.input,attempts:[raw],dispatch};
+  await assert.rejects(f.finalizeReviewDecision({repo:f.repo,input}),/invalid_adjudication/);
+  const {extractSourceFindings}=await import('../hooks/scripts/lib/review-adjudication.mjs');
+  const refs=extractSourceFindings(output,'codex-review').map(({bullet,...ref})=>ref);
+  input.adjudication={schema_version:'1.0',groups:[{source_refs:refs,disposition:'unresolved',severity:'critical',category:'error-handling',rationale:'The interrupted write may discard the stored record.',evidence:[{location:'a.js:1',observation:'The reported write failure path remains unresolved.'}],missing_evidence:'A storage interruption reproduction is not available.'}]};
+  const result=await f.finalizeReviewDecision({repo:f.repo,input});
+  assert.equal(result.decision.verdict,'REQUEST_CHANGES');assert.equal(result.decision.counts.critical,1);
+  assert.equal((await f.verifyReviewDecision({repo:f.repo,decisionFile:result.decision_path})).counts.critical,1);
+});
+
+test('prepared thin synthesis CLI completes and malformed controls return structured exit 2', async t => {
+  const f=await fixture(t);const {spawnSync}=require('node:child_process');
+  const result=await f.finalizeReviewDecision({repo:f.repo,input:f.input});
+  const run=file=>spawnSync(process.execPath,[path.join(root,'hooks/scripts/review-synthesis.mjs'),'--input',file],{encoding:'utf8',timeout:10000});
+  const valid=run(result.decision.source_input_path);assert.equal(valid.status,0,valid.stderr);assert.equal(JSON.parse(valid.stdout).verdict,'APPROVE');
+  const malformed=path.join(f.repo,'malformed.json');fs.writeFileSync(malformed,JSON.stringify({routing_plan:{decision_mode:'adjudication-v1'},attempts:[{}]}));
+  const invalid=run(malformed);assert.equal(invalid.status,2,invalid.stderr);assert.equal(JSON.parse(invalid.stderr).status,'error');assert.doesNotMatch(invalid.stderr,/unsettled top-level await/);
+});
+
+test('prepared synthesis confirms exact pending IDs and floors missing closure', async t => {
+  const f=await fixture(t);const id='prior-pending-1';
+  const prepared=f.prepareReviewRound({routingPlan:plan(),target:f.target,evidenceInputs:f.evidenceInputs,roundId:'confirmation-1',confirmationRequest:{schema_version:1,target_digest:f.target.target_digest,finding_ids:[id]}});
+  const route={protocol_version:'3.0',...prepared.plan.routes[0]};
+  const launches=[{...f.launches[0],execution_route:route,payload:f.buildPreparedReviewerPayload({executionRoute:route,evidenceInputs:f.evidenceInputs})}];
+  assert.match(launches[0].payload,/## Confirmation/);assert.match(launches[0].payload,/prior-pending-1/);
+  const section={schema_version:1,target_digest:f.target.target_digest,items:[{finding_id:id,status:'verified_closed',evidence:[{location:'a.js:1',observation:'The persisted record survives the named write failure.'}]}]};
+  const synthesize=confirmation=>{
+    const output=cleanReport+(confirmation===null?'':`\n## Confirmation\n\`\`\`json\n${JSON.stringify(confirmation)}\n\`\`\`\n`);
+    const raw={...f.raw,output,evidence_digest:prepared.plan.evidence_digest};
+    const dispatch=f.buildDispatchEvidence({routingPlan:prepared.plan,attempts:[raw],launches,roundId:'confirmation-1'});
+    return f.synthesizeReviewRound({routingPlan:prepared.plan,attempts:[f.evaluateReviewerAttempt(raw)],dispatch,adjudication:{schema_version:'1.0',groups:[]}});
+  };
+  const valid=synthesize(section);assert.equal(valid.verdict,'APPROVE');assert.equal(valid.confirmation.complete,true);
+  const missing=synthesize(null);assert.equal(missing.verdict,'CONCERN');assert.equal(missing.confirmation_floor_applied,true);assert.equal(missing.confirmation.items[0].status,'not_reobserved');
+  for(const broken of [{...section,target_digest:'f'.repeat(64)},{...section,items:[{...section.items[0],finding_id:'foreign-id'}]}]){
+    const invalid=synthesize(broken);assert.equal(invalid.status,'operational_failure');assert.equal(invalid.error,'invalid_confirmation');assert.equal(invalid.verdict,null);
+  }
+});

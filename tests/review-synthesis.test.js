@@ -2112,3 +2112,18 @@ test('report-format Provenance documents exclusion_detail and leaf D16 skeleton 
   assert.match(format, /D16 OUTPUT CONTRACT/u);
   assert.match(format, /synthesis-only sections\s+are not leaf requirements/u);
 });
+
+test('legacy synthesis CLI retains large and symlinked input compatibility while prepared controls are bounded',async t=>{
+  const fs=require('node:fs');const repo=fs.mkdtempSync(path.join(tmpdir(),'synthesis-compat-'));t.after(()=>fs.rmSync(repo,{recursive:true,force:true}));
+  const report=canonicalReviewerReport()+`\n## Legacy Metadata\n${'x'.repeat(1024*1024)}\n`;
+  const raw={reviewer_id:'codex-review',role:'codex-review',output:report,beforeFingerprint:{mode:'git',digest:'a'},afterFingerprint:{mode:'git',digest:'a'}};
+  const file=path.join(repo,'large.json');fs.writeFileSync(file,JSON.stringify({attempts:[raw]}));
+  const run=input=>spawnSync(process.execPath,[path.join(root,'hooks/scripts/review-synthesis.mjs'),'--input',input],{encoding:'utf8',timeout:10000});
+  const legacy=run(file);assert.equal(legacy.status,0,legacy.stderr);assert.equal(JSON.parse(legacy.stdout).verdict,'APPROVE');
+  const link=path.join(repo,'input-link.json');fs.symlinkSync(file,link);
+  const linked=run(link);assert.equal(linked.status,0,linked.stderr);assert.equal(JSON.parse(linked.stdout).verdict,'APPROVE');
+  fs.writeFileSync(file,JSON.stringify({routing_plan:{decision_mode:'adjudication-v1'},attempts:[raw]}));
+  const oversized=run(file);assert.equal(oversized.status,2);assert.match(JSON.parse(oversized.stderr).error,/byte limit/);
+  fs.writeFileSync(file,JSON.stringify({routing_plan:{decision_mode:'adjudication-v1'},attempts:[]}));
+  const unsafe=run(link);assert.equal(unsafe.status,2);assert.match(JSON.parse(unsafe.stderr).error,/symlink/);
+});
