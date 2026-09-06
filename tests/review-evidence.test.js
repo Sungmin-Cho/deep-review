@@ -223,7 +223,7 @@ test('CLI synthesis forwards dispatch and adjudication; evidence CLI prepare/fin
         encoding: 'utf8',
       }),
     );
-  assert.equal(run('review-synthesis.mjs', '--input', inputFile).verdict, 'APPROVE');
+  assert.equal(run('review-synthesis.mjs', '--prepared-input', inputFile).verdict, 'APPROVE');
   const result = run(
     'review-evidence.mjs',
     'finalize',
@@ -612,7 +612,7 @@ test('CLI capture, prepare and build-dispatch compute joins and reject tampered 
   const result = JSON.parse(
     execFileSync(
       process.execPath,
-      [path.join(root, 'hooks/scripts/review-synthesis.mjs'), '--input', file],
+      [path.join(root, 'hooks/scripts/review-synthesis.mjs'), '--prepared-input', file],
       { encoding: 'utf8' },
     ),
   );
@@ -803,7 +803,7 @@ test('Summary severity-heading collision cannot finalize a Critical as empty APP
 test('prepared thin synthesis CLI completes and malformed controls return structured exit 2', async t => {
   const f=await fixture(t);const {spawnSync}=require('node:child_process');
   const result=await f.finalizeReviewDecision({repo:f.repo,input:f.input});
-  const run=file=>spawnSync(process.execPath,[path.join(root,'hooks/scripts/review-synthesis.mjs'),'--input',file],{encoding:'utf8',timeout:10000});
+  const run=file=>spawnSync(process.execPath,[path.join(root,'hooks/scripts/review-synthesis.mjs'),'--prepared-input',file],{encoding:'utf8',timeout:10000});
   const valid=run(result.decision.source_input_path);assert.equal(valid.status,0,valid.stderr);assert.equal(JSON.parse(valid.stdout).verdict,'APPROVE');
   const malformed=path.join(f.repo,'malformed.json');fs.writeFileSync(malformed,JSON.stringify({routing_plan:{decision_mode:'adjudication-v1'},attempts:[{}]}));
   const invalid=run(malformed);assert.equal(invalid.status,2,invalid.stderr);assert.equal(JSON.parse(invalid.stderr).status,'error');assert.doesNotMatch(invalid.stderr,/unsettled top-level await/);

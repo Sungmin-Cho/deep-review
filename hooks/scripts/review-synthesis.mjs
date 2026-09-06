@@ -1015,23 +1015,31 @@ export function synthesizeReviewRound({
 const invoked = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 async function runSynthesisCli() {
   try {
-    const inputIndex = process.argv.indexOf('--input');
-    if (inputIndex < 0 || !process.argv[inputIndex + 1]) throw new Error('--input FILE is required');
-    const inputPath = resolve(process.argv[inputIndex + 1]);
-    let input;
-    try {
-      input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+    const selectors = process.argv.flatMap((value, index) => (
+      ['--input', '--prepared-input'].includes(value) ? [{ value, index }] : []
+    ));
+    if (selectors.length !== 1) {
+      throw new Error('exactly one --input FILE or --prepared-input FILE is required');
+    }
+    const [selector] = selectors;
+    const file = process.argv[selector.index + 1];
+    if (!file || file.startsWith('--')) throw new Error(`${selector.value} FILE is required`);
+    const inputPath = resolve(file);
+    const preparedInput = selector.value === '--prepared-input';
+    // The argv selector is the authority for the read boundary. Prepared input
+    // never enters the unrestricted legacy reader, including on read failure.
+    let input = preparedInput
+      ? JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
         readBoundedFile(dirname(inputPath), inputPath),
-      ));
-    } catch (boundedError) {
-      // The explicit legacy carrier predates bounded/no-follow control reads.
-      // This compatibility probe cannot admit a prepared decision-mode input:
-      // every prepared input must have succeeded through the bounded read.
-      const legacy = JSON.parse(readFileSync(inputPath, 'utf8'));
-      if (legacy?.routing_plan && Object.hasOwn(legacy.routing_plan, 'decision_mode')) {
-        throw boundedError;
-      }
-      input = legacy;
+      ))
+      : JSON.parse(readFileSync(inputPath, 'utf8'));
+    const hasDecisionMode = Boolean(input?.routing_plan)
+      && Object.hasOwn(input.routing_plan, 'decision_mode');
+    if (!preparedInput && hasDecisionMode) {
+      throw new Error('decision_mode requires --prepared-input FILE; --input is legacy-only');
+    }
+    if (preparedInput && !hasDecisionMode) {
+      throw new Error('--prepared-input requires a routing_plan.decision_mode carrier');
     }
     if (input?.routing_plan?.decision_mode && input.attempts?.some(attempt=>!Object.hasOwn(attempt,'output'))) {
       const {loadReviewEvidenceInput} = await import('./review-evidence.mjs');

@@ -2118,12 +2118,65 @@ test('legacy synthesis CLI retains large and symlinked input compatibility while
   const report=canonicalReviewerReport()+`\n## Legacy Metadata\n${'x'.repeat(1024*1024)}\n`;
   const raw={reviewer_id:'codex-review',role:'codex-review',output:report,beforeFingerprint:{mode:'git',digest:'a'},afterFingerprint:{mode:'git',digest:'a'}};
   const file=path.join(repo,'large.json');fs.writeFileSync(file,JSON.stringify({attempts:[raw]}));
-  const run=input=>spawnSync(process.execPath,[path.join(root,'hooks/scripts/review-synthesis.mjs'),'--input',input],{encoding:'utf8',timeout:10000});
+  const run=(input,flag='--input')=>spawnSync(process.execPath,[path.join(root,'hooks/scripts/review-synthesis.mjs'),flag,input],{encoding:'utf8',timeout:10000});
   const legacy=run(file);assert.equal(legacy.status,0,legacy.stderr);assert.equal(JSON.parse(legacy.stdout).verdict,'APPROVE');
   const link=path.join(repo,'input-link.json');fs.symlinkSync(file,link);
   const linked=run(link);assert.equal(linked.status,0,linked.stderr);assert.equal(JSON.parse(linked.stdout).verdict,'APPROVE');
   fs.writeFileSync(file,JSON.stringify({routing_plan:{decision_mode:'adjudication-v1'},attempts:[raw]}));
-  const oversized=run(file);assert.equal(oversized.status,2);assert.match(JSON.parse(oversized.stderr).error,/byte limit/);
+  const oversized=run(file,'--prepared-input');assert.equal(oversized.status,2);assert.match(JSON.parse(oversized.stderr).error,/byte limit/);
   fs.writeFileSync(file,JSON.stringify({routing_plan:{decision_mode:'adjudication-v1'},attempts:[]}));
-  const unsafe=run(link);assert.equal(unsafe.status,2);assert.match(JSON.parse(unsafe.stderr).error,/symlink/);
+  const unsafe=run(link,'--prepared-input');assert.equal(unsafe.status,2);assert.match(JSON.parse(unsafe.stderr).error,/symlink/);
+});
+
+test('synthesis CLI selects its read boundary before bytes and has no prepared fallback', async t => {
+  const fs = require('node:fs');
+  const repo = fs.mkdtempSync(path.join(tmpdir(), 'synthesis-read-boundary-'));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  const target = path.join(repo, 'prepared.json');
+  const link = path.join(repo, 'prepared-link.json');
+  const marker = path.join(repo, 'unsafe-read-observed');
+  const guard = path.join(repo, 'read-guard.cjs');
+  fs.symlinkSync(target, link);
+  fs.writeFileSync(guard, `
+const fs = require('node:fs');
+const path = require('node:path');
+const original = fs.readFileSync;
+fs.readFileSync = function(file, ...args) {
+  if (typeof file === 'string' && [process.env.TEST_INPUT, process.env.TEST_LINK].includes(path.resolve(file))) {
+    fs.writeFileSync(process.env.TEST_MARKER, 'unsafe path read');
+    throw new Error('UNSAFE_FALLBACK_READ');
+  }
+  return original.call(this, file, ...args);
+};
+require('node:module').syncBuiltinESMExports();
+`);
+  const run = args => spawnSync(process.execPath, ['--require', guard,
+    path.join(root, 'hooks/scripts/review-synthesis.mjs'), ...args], {
+      encoding: 'utf8', timeout: 10000,
+      env: {...process.env, TEST_INPUT: target, TEST_LINK: link, TEST_MARKER: marker},
+    });
+  fs.writeFileSync(target, JSON.stringify({routing_plan:{decision_mode:'adjudication-v1'}, padding:'x'.repeat(1024*1024)}));
+  const oversized = run(['--prepared-input',target]);
+  assert.equal(oversized.status,2);assert.match(JSON.parse(oversized.stderr).error,/byte limit/);
+  assert.equal(fs.existsSync(marker),false,'oversized prepared input must never fall back to a path read');
+  fs.writeFileSync(target,JSON.stringify({routing_plan:{decision_mode:'adjudication-v1'},attempts:[]}));
+  const symlink = run(['--prepared-input',link]);
+  assert.equal(symlink.status,2);assert.match(JSON.parse(symlink.stderr).error,/symlink/);
+  assert.equal(fs.existsSync(marker),false,'prepared symlink must never be followed by a fallback read');
+  for (const args of [['--input',target,'--prepared-input',target],['--prepared-input',target,'--prepared-input',target]]) {
+    const ambiguous=run(args);assert.equal(ambiguous.status,2);assert.match(JSON.parse(ambiguous.stderr).error,/exactly one/);
+    assert.equal(fs.existsSync(marker),false,'ambiguous mode must be rejected before any input read');
+  }
+});
+
+test('legacy and prepared synthesis carriers cannot be admitted through the wrong selector', async t => {
+  const fs=require('node:fs');const repo=fs.mkdtempSync(path.join(tmpdir(),'synthesis-selector-'));
+  t.after(()=>fs.rmSync(repo,{recursive:true,force:true}));const input=path.join(repo,'input.json');
+  const run=flag=>spawnSync(process.execPath,[path.join(root,'hooks/scripts/review-synthesis.mjs'),flag,input],{encoding:'utf8',timeout:10000});
+  for(const mode of ['adjudication-v1','artifact-gate-v1',null,false,'']) {
+    fs.writeFileSync(input,JSON.stringify({routing_plan:{decision_mode:mode},attempts:[]}));
+    const legacy=run('--input');assert.equal(legacy.status,2);assert.match(JSON.parse(legacy.stderr).error,/--prepared-input/);
+  }
+  fs.writeFileSync(input,JSON.stringify({attempts:[]}));
+  const wrong=run('--prepared-input');assert.equal(wrong.status,2);assert.match(JSON.parse(wrong.stderr).error,/decision_mode/);
 });
