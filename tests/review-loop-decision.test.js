@@ -394,3 +394,99 @@ test('critical full-slate confirmation preserves all roles and provider floors t
   assert.equal(f.loop.readRoundState(r2.state_file).pending_findings.length, 0);
   assert.equal((await f.loop.decideRound({ stateFile: r2.state_file, currentTargetFile: (await f.capture()).file, roundLimit: 5, phase: 'after-respond' })).completion_status, 'verified');
 });
+
+test('recomputed clean and expanded scopes carry pending closure through classifier and prepared CLI flow', async t => {
+  for (const expanded of [false, true]) await t.test(expanded ? 'expanded scope' : 'unstaged to clean', async t => {
+    const f = await fixture(t, { git: true });
+    const d1 = await f.decision({ bullet: '`a.js:1` — Return violates the contract.' });
+    const p = await import('../hooks/scripts/phase6-protocol.mjs');
+    let group;
+    if (!expanded) group = await runGroup(f, 'warning', 'export const a = 2;\n');
+    else {
+      const snapshot = p.snapshotPhase6({ repo: f.repo, severity: 'warning', targetScope: f.scope,
+        acceptedItems: [{ item_id: 'ITEM-1', target_location: 'a.js', modifiable_paths: ['b.js'] }] });
+      f.write('a.js', 'export const a = 2;\n'); f.write('b.js', 'export const b = 3;\n');
+      await p.runLoggedTest({ repo: f.repo, itemId: 'ITEM-1', command: process.execPath,
+        args: ['-e', "require('node:assert/strict').equal(require('node:fs').readFileSync('b.js','utf8'),'export const b = 3;\\n')"], logPath: snapshot.log_path });
+      const text = '## Group Result\n- execution_status: completed\n- items_total: 1\n- items_passed: 1\n- items_failed: 0\n- items_skipped: 0\n\n## Items\n### ITEM-1\n- status: passed\n- files_changed:\n  - "a.js"\n  - "b.js"\n- test_command: node fixture\n- test_exit_code: 0\n- log_range: ITEM-1\n- action_summary: applied\n';
+      const verified = p.verifyPhase6({ repo: f.repo, snapshotPath: snapshot.snapshot_path, groupResult: text });
+      const committed = p.commitPhase6({ repo: f.repo, snapshotPath: snapshot.snapshot_path, severity: 'warning' });
+      group = { snapshot_file: snapshot.snapshot_path, group_result_file: f.write('.deep-review/tmp/expanded-group.md', text),
+        verification_result_file: f.write('.deep-review/tmp/expanded-verify.json', verified), commit_result_file: f.write('.deep-review/tmp/expanded-commit.json', committed) };
+    }
+    const targetApi = await import('../hooks/scripts/lib/review-target-snapshot.mjs');
+    const filesFromZ = Buffer.from(expanded ? 'a.js\0b.js\0' : 'a.js\0');
+    const records = (await import('../hooks/scripts/lib/review-target.mjs')).buildChangeFiles({ repo: f.repo, changeState: 'clean', reviewBase: f.scope.review_base, filesFromZ, includeBinary: true });
+    const scope = await targetApi.createTargetScope({ repo: f.repo, changeState: 'clean', reviewBase: f.scope.review_base, records });
+    const target = await targetApi.captureReviewTarget({ scope });
+    const targetFile = f.write('.deep-review/tmp/recomputed-target.json', target);
+    const proof = await f.loop.buildResponseEvidence({ repo: f.repo, decisionFile: d1.decision_path, postResponseTargetFile: targetFile, groups: [group], status: 'completed', halted: false });
+    assert.equal(proof.response.status, 'verified');
+    const r1 = f.record(d1, { responseEvidenceFile: proof.evidence_file, postResponseTargetFile: targetFile });
+    const cli = (script, args) => JSON.parse(execFileSync(process.execPath, [path.join(root, 'hooks/scripts', script), ...args], { encoding: 'utf8' }));
+    const context = cli('loop-state.mjs', ['adaptive-context', '--state-file', r1.state_file, '--current-target-file', targetFile]);
+    assert.equal(context.ok, true);
+    delete context.ok; // Strip only the loop CLI transport envelope for the strict carrier.
+    const { runClassifyArtifactsCli } = await import('../hooks/scripts/classify-artifacts.mjs');
+    const runtime = { capabilities: ['claude', 'codex'].map(provider => ({ protocol_version: '2.0', adapter_id: provider === 'claude' ? 'claude-native-agent' : 'codex-native-generic', provider, available: true,
+      roles: ['standard', 'adversarial'], assignment_roles: ['standard', 'adversarial', 'security', 'confirmation'], model_selection: { supported: false, aliases: [] }, effort_selection: { supported: false, levels: [] }, read_only_enforcement: 'instruction-only' })) };
+    const targetList = f.write('.deep-review/tmp/recomputed-targets.z', filesFromZ.toString());
+    const classified = await runClassifyArtifactsCli(['--repo', f.repo, '--change-state', 'clean', '--review-base', f.scope.review_base,
+      '--files-from0', targetList, '--adaptive-context-json', JSON.stringify(context)], {}, runtime);
+    const pendingId = d1.decision.material_findings.findings[0].finding_id;
+    assert.ok(classified.routing_plan.routes.length >= 2, 'changed scopes keep the full slate');
+    assert.notEqual(classified.routing_plan.progress, 'confirmation');
+    assert.deepEqual(classified.routing_plan.pending_confirmation?.finding_ids, [pendingId]);
+    const evidenceInputs = { ...d1.input.evidence_inputs, changeFiles: records.map(row => row.path).join('\n'), priorRounds: f.loop.readRoundState(r1.state_file).pending_findings.map(row => row.claim).join('\n') };
+    const prepared = cli('review-evidence.mjs', ['prepare', '--repo', f.repo, '--input', f.write('.deep-review/tmp/recomputed-prepare.json', { routingPlan: classified.routing_plan, target, evidenceInputs, roundId: 'recomputed-round-2' })]);
+    assert.deepEqual(prepared.plan.confirmation_request.finding_ids, [pendingId]);
+    assert.ok(prepared.plan.confirmation_reviewer_ids.length > 0);
+    const launches = prepared.plan.routes.map(route => ({ ...cli('review-evidence.mjs', ['build-launch', '--repo', f.repo, '--input', f.write(`.deep-review/tmp/${route.reviewer_id}-launch-input.json`, { executionRoute: { protocol_version: '3.0', ...route }, evidenceInputs })]), payload_provenance: 'native-argument' }));
+    const attempts = prepared.plan.routes.map(route => {
+      const designated = prepared.plan.confirmation_reviewer_ids.includes(route.reviewer_id);
+      const confirmation = '\n## Confirmation\n```json\n' + JSON.stringify({ schema_version: 1, target_digest: target.target_digest, items: [{ finding_id: pendingId, status: 'verified_closed', evidence: [{ location: 'a.js:1', observation: 'The committed return meets the contract.' }] }] }) + '\n```\n';
+      return { ...d1.input.attempts[0], reviewer_id: route.reviewer_id, role: route.reviewer_id, output: report() + (designated ? confirmation : ''), target_before: target, target_after: target, evidence_digest: prepared.plan.evidence_digest };
+    });
+    const input = { routing_plan: prepared.plan, evidence_inputs: evidenceInputs, attempts, launches, adjudication: { schema_version: '1.0', groups: [] } };
+    input.dispatch = cli('review-evidence.mjs', ['build-dispatch', '--repo', f.repo, '--input', f.write('.deep-review/tmp/recomputed-dispatch.json', { routingPlan: prepared.plan, attempts, launches, roundId: prepared.plan.round_id })]);
+    const d2 = cli('review-evidence.mjs', ['finalize', '--repo', f.repo, '--input', f.write('.deep-review/tmp/recomputed-finalize.json', input)]);
+    assert.equal(d2.decision.confirmation.complete, true);
+    const r2 = cli('loop-state.mjs', ['record-round', '--repo-root', f.repo, '--state-dir', path.join(f.repo, '.deep-review/tmp'), '--round-number', '2', '--round-limit', '5', '--base-commit', f.scope.review_base,
+      '--decision-file', d2.decision_path, '--previous-state', r1.state_file, '--post-response-target-file', targetFile]);
+    const completed = cli('loop-state.mjs', ['decide-round', '--state-file', r2.state_file, '--round-limit', '5', '--current-target-file', targetFile, '--phase', 'after-respond']);
+    assert.equal(completed.completion_status, 'verified');
+    assert.equal(f.loop.readRoundState(r2.state_file).pending_findings.length, 0);
+  });
+});
+
+test('unresolved-only implementation decisions stop before an empty Respond', async t => {
+  const f = await fixture(t);
+  const d = await f.decision({ bullet: '`a.js:1` — Return may violate the contract.', disposition: 'unresolved' });
+  const items = await f.e.prepareResponseItems({ repo: f.repo, decisionFile: d.decision_path });
+  assert.deepEqual(items.confirmed_findings, []);
+  const result = JSON.parse(execFileSync(process.execPath, [path.join(root, 'hooks/scripts/loop-state.mjs'), 'decide-round', '--decision-file', d.decision_path,
+    '--round-number', '1', '--round-limit', '5', '--current-target-file', d.targetFile, '--phase', 'before-respond'], { encoding: 'utf8' }));
+  assert.equal(result.action, 'stop'); assert.equal(result.stop_reason, 'UNRESOLVED_WORK');
+  assert.equal(result.completion_status, 'unresolved');
+  const decisionApi = await import('../hooks/scripts/lib/review-loop-decision.mjs');
+  const document = decisionApi.transitionRound({ phase: 'before-respond', round: 1, limit: 2, artifactPhase: 'document', readiness: { status: 'DOCUMENT_BLOCKED' },
+    verdict: 'REQUEST_CHANGES', observations: d.decision.material_findings, pending: d.decision.pending_findings, reviewed: d.target, current: d.target, currentAuthority: true, actionableCount: 0 });
+  assert.equal(document.action, 'respond');
+});
+
+test('prepared file builder, launch and verifier share the physical plugin root across aliases', async t => {
+  const f = await fixture(t); const d = await f.decision();
+  const builder = await import('../hooks/scripts/build-reviewer-payload.mjs');
+  const alias = path.join(f.repo, 'plugin-alias'); fs.symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const executionRoute = d.input.launches[0].execution_route;
+  const built = JSON.parse(execFileSync(process.execPath, [path.join(root, 'hooks/scripts/build-reviewer-payload.mjs'), '--plugin-root', alias, '--repo', f.repo,
+    '--execution-route-json', JSON.stringify(executionRoute), '--reviewer-id', executionRoute.reviewer_id, '--evidence-inputs-file', f.write('.deep-review/tmp/alias-inputs.json', d.input.evidence_inputs)], { encoding: 'utf8' }));
+  t.after(() => fs.rmSync(built.promptFile, { force: true }));
+  const payload = fs.readFileSync(built.promptFile, 'utf8');
+  assert.equal(payload, f.e.buildReviewerLaunch({ executionRoute, evidenceInputs: d.input.evidence_inputs }).payload);
+  assert.equal(builder.verifyPreparedReviewerPayload(payload, executionRoute).payload_sha256, built.payload_sha256);
+  const wrongRoot = path.join(f.repo, 'different-plugin');
+  fs.mkdirSync(path.join(wrongRoot, 'skills/deep-review-workflow/references'), { recursive: true });
+  fs.copyFileSync(path.join(root, 'skills/deep-review-workflow/references/review-criteria.md'), path.join(wrongRoot, 'skills/deep-review-workflow/references/review-criteria.md'));
+  assert.throws(() => builder.buildPreparedReviewerPayload({ executionRoute, evidenceInputs: d.input.evidence_inputs, pluginRoot: wrongRoot }), /plugin root/);
+});

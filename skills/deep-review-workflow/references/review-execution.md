@@ -545,8 +545,13 @@ transport observations. The control input contains `routing_plan`,
 `evidence_inputs` (or its bounded file), `attempts`, `launches`, and the actual
 expansion counter. Run the Node dispatch builder and preserve its result:
 
+For this helper, write DISPATCH_INPUT with the camelCase keys
+`{routingPlan,attempts,launches,roundId}` copied from the prepared plan and the
+same captured attempts/launches. The synthesis/finalize input retains its
+snake_case `routing_plan`; do not pass it as an implicit dispatch-builder alias.
+
 ```text
-node {plugin_root}/hooks/scripts/review-evidence.mjs build-dispatch --repo PROJECT_ROOT --input ATTEMPTS_FILE
+node {plugin_root}/hooks/scripts/review-evidence.mjs build-dispatch --repo PROJECT_ROOT --input DISPATCH_INPUT
 ```
 
 Store that returned `dispatch` in the input. For prepared implementation mode,

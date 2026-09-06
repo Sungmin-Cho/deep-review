@@ -120,7 +120,8 @@ assert_success "awk '
   END { exit !(builder && enumeration && builder < enumeration) }
 ' \"$WFSK\"" "route-specific payload construction precedes dispatch-role enumeration in the pipeline map"
 
-assert_success "grep -q 'route-specific payload' \"$CODEX\"" "Codex generic roles consume route-specific payloads"
+assert_success "grep -qF 'message: codexReviewLaunch.payload' \"$CODEX\" && grep -qF 'message: codexAdversarialLaunch.payload' \"$CODEX\"" "Codex generic roles consume the exact runtime-built payload arguments"
+assert_success "grep -q 'build-launch' \"$CODEX\"" "Codex launch payloads come from the Node builder"
 assert_success "grep -q 'read-only instruction' \"$CODEX\" && grep -q 'post-fingerprint' \"$CODEX\"" "Codex native leaves pair read-only instruction with fingerprint trust checks"
 assert_success "grep -q 'every selected reviewer role' \"$REVEXEC\" && grep -q 'same evidence and suppression doctrine' \"$REVEXEC\"" "all selected roles receive the common doctrine"
 assert_success "grep -q 'assignment, verified readiness receipt, changed files, project context, prior' \"$REVEXEC\" && grep -q 'rounds, and diff' \"$REVEXEC\"" "common doctrine payload preserves every other field"
@@ -142,5 +143,10 @@ mutant_owner=$(mktemp)
 sed 's/sole doctrine injector/non-authoritative helper/' "$REVEXEC" > "$mutant_owner"
 assert_failure "grep -q 'sole doctrine injector' \"$mutant_owner\"" "doctrine-owner mutant loses fail-closed authority"
 rm -f "$mutant_shell" "$mutant_owner"
+
+mutant_argument=$(mktemp)
+sed 's/message: codexReviewLaunch.payload/message: legacyFileReference/' "$CODEX" > "$mutant_argument"
+assert_failure "grep -qF 'message: codexReviewLaunch.payload' \"$mutant_argument\"" "file-reference native argument mutant loses captured payload authority"
+rm -f "$mutant_argument"
 
 test_summary

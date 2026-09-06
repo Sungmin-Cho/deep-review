@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { lstatSync, readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -229,13 +229,15 @@ function contentFromOption(options, valueKey, fileKey) {
   return readFileSync(options[fileKey], 'utf8');
 }
 
-const PREPARED_PLUGIN_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const PREPARED_PLUGIN_ROOT = realpathSync(fileURLToPath(new URL('../..', import.meta.url)));
 const escapePrepared = text => text.replace(/^(\\*)=====/gmu, '$1\\=====');
 const unescapePrepared = text => text.replace(/^\\(\\*)=====/gmu, '$1=====');
 const confirmationFor = (prepared, reviewerId, role) => (prepared?.confirmation_reviewer_ids
   ? prepared.confirmation_reviewer_ids.includes(reviewerId) : role === 'confirmation') ? prepared.confirmation_request : null;
 
 export function buildPreparedReviewerPayload({ executionRoute, evidenceInputs, pluginRoot = PREPARED_PLUGIN_ROOT }) {
+  pluginRoot = realpathSync(resolve(pluginRoot));
+  if (pluginRoot !== PREPARED_PLUGIN_ROOT) throw new Error('prepared plugin root must resolve to the installed module root');
   validateEvidenceInputs(evidenceInputs);
   const assignment = trustedAssignmentSection({executionRouteJson:JSON.stringify(executionRoute), reviewerId:executionRoute.reviewer_id});
   const prepared = assignment.executionPlan.preparedReview;

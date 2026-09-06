@@ -179,10 +179,13 @@ and before planning a later round, generate the schema-3 carrier with:
 node {plugin_root}/hooks/scripts/loop-state.mjs adaptive-context --state-file PREVIOUS_STATE_FILE --current-target-file CURRENT_TARGET_FILE
 ```
 
-Pass that returned object verbatim to the classifier's
+Require the CLI result's `ok: true`, then remove only the transport `ok` key.
+Pass the remaining schema-3 carrier verbatim to the classifier's
 `--adaptive-context-json`. The classifier re-captures its actual selected scope
 and validates the previous decision, observations, pending ledger and Phase 6
-proof. Schema 1/2 history remains advisory. Only runtime-verified confirmation
+proof. A full review after a changed view or expanded scope still receives the
+exact pending IDs, bound to the fresh current target; this does not permit a
+smaller reviewer slate. Schema 1/2 history remains advisory. Only runtime-verified confirmation
 can contract; report-only new or stalled observations do not add cost. Explicit
 regression evidence uses the source/target-bound carrier accepted by the Node
 runtime. Public constraints and risk floors still apply.

@@ -239,7 +239,7 @@ export function loopCapDecision({ round, limit, artifactPhase, readiness }) {
 
 // One pure transition authority; no skill prose computes a competing verdict.
 export function transitionRound({ phase, round, limit, artifactPhase, readiness, verdict, observations,
-  pending, reviewed, current, response, currentAuthority, operationalFailure, userStop, deferStop, halted, stalled }) {
+  pending, reviewed, current, response, currentAuthority, actionableCount = 0, operationalFailure, userStop, deferStop, halted, stalled }) {
   const verifiedTree = sameReviewTarget(reviewed, current);
   const expectedChange = phase === 'after-respond' && response?.status === 'verified';
   const complete = observations.status === 'complete';
@@ -254,9 +254,9 @@ export function transitionRound({ phase, round, limit, artifactPhase, readiness,
   else if (halted || response?.halted) reason = 'RESPONSE_HALTED';
   else if (!complete) reason = 'INDETERMINATE_OBSERVATIONS';
   else if (expectedChange && !verifiedTree) action = 'review';
-  else if (verdict === 'CONCERN' && observations.findings.length === 0) reason = 'UNRESOLVED_WORK';
+  else if (verdict === 'CONCERN' && (artifactPhase === 'implementation' ? actionableCount === 0 : observations.findings.length === 0)) reason = 'UNRESOLVED_WORK';
   else if (stalled) reason = 'STALLED';
-  else if (phase === 'before-respond' && artifactPhase === 'implementation' && observations.findings.length) action = 'respond';
+  else if (phase === 'before-respond' && artifactPhase === 'implementation' && actionableCount > 0) action = 'respond';
   else if (phase === 'before-respond' && artifactPhase === 'document') action = 'respond';
   else reason = 'NO_ACTIONABLE_WORK';
   return { action, stop_reason: reason, final_tree_verified: verifiedTree && currentAuthority && complete,
@@ -297,6 +297,7 @@ export async function decideRound(options = {}) {
   const result = transitionRound({ phase, round, limit, artifactPhase: history.decision_mode === 'artifact-gate-v1' ? 'document' : 'implementation',
     readiness: history.recorded_readiness, verdict: history.recorded_verdict, observations: history.material_findings,
     pending, reviewed: history.review_target, current, response, currentAuthority,
+    actionableCount: decision.adjudication?.groups.filter(group => group.disposition === 'confirmed_blocker').length ?? 0,
     ...Object.fromEntries(['operationalFailure', 'userStop', 'deferStop', 'halted', 'stalled'].map(k => [k, options[k]])) });
   const rounds = [];
   let cursor = state ?? previous;
@@ -339,12 +340,15 @@ export async function verifyAdaptiveContext({ repo, context, currentTarget }) {
   if (!sameReviewTarget(current, await captureReviewTarget({ scope: current.scope }))
       || (currentTarget && !sameReviewTarget(currentTarget, current))) throw new Error('adaptive current target is stale or different from selected scope');
   const prior = readSchema3Round(context.state_file);
-  if (prior.repo_root !== repo || prior.decision_sha256 !== context.decision_sha256
+  if (prior.repo_root !== repo || prior.base_commit !== current.scope.review_base || prior.decision_sha256 !== context.decision_sha256
       || !same(context.pending_finding_ids, prior.pending_findings.map(f => f.finding_id))
       || context.observation_status !== prior.observations.status || context.risk !== prior.risk)
     throw new Error('adaptive state binding mismatch');
-  const confirmation = prior.artifact_phase === 'implementation' && prior.response.status === 'verified'
-    && prior.observations.status === 'complete' && prior.pending_findings.length > 0
+  // Full-scope reviews still need the bound pending work. Only reducing the
+  // slate requires a verified Respond and identical reviewed/current scope.
+  const pendingConfirmation = prior.artifact_phase === 'implementation'
+    && prior.observations.status === 'complete' && prior.pending_findings.length > 0;
+  const confirmation = pendingConfirmation && prior.response.status === 'verified'
     && sameReviewTarget(current, prior.post_response_target)
     && prior.reviewed_target.scope_digest === current.scope_digest;
   let regression = false;
@@ -360,7 +364,7 @@ export async function verifyAdaptiveContext({ repo, context, currentTarget }) {
   }
   const result = { state: regression ? 'regression' : confirmation ? 'confirmation' : 'changed', risk: prior.risk,
     used_reviewers: prior.dispatched_attempts.map(row => row.reviewer_id),
-    confirmation_request: confirmation ? { schema_version: 1, target_digest: current.target_digest, finding_ids: prior.pending_findings.map(f => f.finding_id) } : null,
+    confirmation_request: pendingConfirmation ? { schema_version: 1, target_digest: current.target_digest, finding_ids: prior.pending_findings.map(f => f.finding_id) } : null,
     pending_findings: prior.pending_findings };
   progressAuthority.add(result);
   return result;
