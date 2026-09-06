@@ -254,7 +254,8 @@ export function transitionRound({ phase, round, limit, artifactPhase, readiness,
   else if (halted || response?.halted) reason = 'RESPONSE_HALTED';
   else if (!complete) reason = 'INDETERMINATE_OBSERVATIONS';
   else if (expectedChange && !verifiedTree) action = 'review';
-  else if (verdict === 'CONCERN' && (artifactPhase === 'implementation' ? actionableCount === 0 : observations.findings.length === 0)) reason = 'UNRESOLVED_WORK';
+  else if (artifactPhase === 'implementation' && actionableCount === 0 && pending.length > 0) reason = 'UNRESOLVED_WORK';
+  else if (verdict === 'CONCERN' && artifactPhase !== 'implementation' && observations.findings.length === 0) reason = 'UNRESOLVED_WORK';
   else if (stalled) reason = 'STALLED';
   else if (phase === 'before-respond' && artifactPhase === 'implementation' && actionableCount > 0) action = 'respond';
   else if (phase === 'before-respond' && artifactPhase === 'document') action = 'respond';

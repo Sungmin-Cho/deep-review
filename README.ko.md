@@ -209,6 +209,30 @@ opt-in `agy`(Google Antigravity) CLI는 cross-vendor-family reviewer로 합류�
 
 `staged`, `unstaged`, `mixed` 상태에서는 교차 모델 검증이 실제 커밋 베이스에 대해 실행되도록 WIP 커밋 생성을 제안합니다. 제안은 파일 목록을 미리 보여주고 민감 패턴을 경고하며 `git add -A`를 사용하지 않습니다; `git reset --soft HEAD~1`로 원복합니다. shallow clone은 감지되어 `git fetch --unshallow` 권장이 표시됩니다.
 
+## Evidence와 completion
+
+prepared 구현 리뷰는 reviewer 역할과 provider에 공통된 하나의 evidence
+기준을 사용합니다. 캡처한 target, 실제 dispatch payload, admit된 raw report,
+독립 adjudication을 decision에 결합합니다. reviewer 합의, provider 이름,
+candidate가 스스로 선언한 defect match만으로 정확성이 성립하지 않습니다.
+`decision_mode`가 없는 입력은 명시적 legacy 호환 경로에서 계속 처리하지만
+schema-3 completion 권한을 만들지 않습니다.
+
+구현 finding은 Node가 지정한 confirmation reviewer가 결합된
+`verified_closed` 확인을 낼 때만 닫힙니다. 누락은 finding을 닫지 않으며,
+admit된 `still_open` 또는 `indeterminate` 확인은 계속 evidence로 남습니다.
+허용된 마지막 리뷰 슬롯은 리뷰 전용이며 자동 response를 시작하지 않습니다.
+출력 누락, 불완전한 observation, stale target, 검증되지 않은 final tree는
+completion으로 바뀌지 않고 unknown 또는 unresolved로 남습니다.
+
+문서 리뷰는 기존 Artifact Gate와 변경되지 않은 receipt schema 2.0을 readiness
+권한으로 유지합니다. 런타임 계상은 planned, executed, admitted reviewer call을
+구분합니다. token과 cost는 provider가 실제로 노출한 metadata만 보고하며,
+알 수 없는 필드는 추정하지 않고 `null`로 둡니다. 저장소에는 bounded
+prompt-policy 비교용 blinded toy corpus와 오프라인 evaluator도 포함됩니다.
+그 score는 저장소 전체 accuracy, severity calibration 또는 보편적인 비용
+절감을 입증하지 않습니다.
+
 ## Receiving Review (Stage 5)
 
 Stage 4가 `REQUEST_CHANGES`를 반환하면 deep-review는 증거 기반 대응(`/deep-review --respond`) 또는 수동 처리를 제공합니다. `--respond` 플래그가 6단계 프로토콜을 활성화합니다:

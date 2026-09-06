@@ -730,3 +730,21 @@ Preserve the payload and return a visible nonzero result if wrapping fails.
 When `--entropy` is present, read `{plugin_root}/skills/deep-review-workflow/references/entropy-scan.md` and append its evidence.
 Patch `last_review` only after the report and optional export complete, while
 preserving every unrelated config field.
+
+## Offline review-quality evaluation
+
+Use the shipped evaluator only on stored predictions; it performs no model or
+network calls. Keep candidate input in
+`{plugin_root}/tests/fixtures/review-quality/cases.json` separate from
+`gold-cases.json` and independently authored adjudication labels. A prediction
+file is either an array of completed per-case records or
+`{schema_version:1,predictions:[...],usage:null|USAGE}`. Run:
+
+```text
+node {plugin_root}/scripts/evaluate-review-quality.mjs --cases {plugin_root}/tests/fixtures/review-quality/gold-cases.json --predictions PREDICTIONS_FILE --adjudicated-labels LABELS_FILE
+```
+
+The result states every denominator, missing case, unassessed prediction and
+missed defect. Duplicate matches count once for recall. False-block rate uses
+completed clean cases. Unknown usage stays `null`; malformed or incomplete
+execution records fail nonzero.

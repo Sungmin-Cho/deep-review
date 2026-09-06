@@ -4,6 +4,31 @@
 
 deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)와 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)을 따릅니다.
 
+## [2.11.0] — 2026-09-06
+
+### 추가
+- 명시적 coverage, 독립 판정 precision, defect 단위로 중복 제거한 recall,
+  완료된 clean case 기준 false-block rate, 미판정 finding, provenance를
+  보존한 usage를 내는 오프라인 리뷰 품질 evaluator.
+- gold defect를 분리한 공개 6-case blinded toy corpus와 호환성, confirmation,
+  completion, final-slot 동작용 transition fixture.
+
+### 변경
+- prepared 구현 리뷰는 target, 실제 dispatch payload, raw observation,
+  evidence adjudication을 저장된 decision에 함께 결합한다. legacy 입력은
+  schema-3 권한이 없는 명시적 호환 경로로 유지한다.
+- 지정된 positive confirmation만 구현 finding을 닫을 수 있다. 마지막 리뷰
+  슬롯은 자동 response를 시작하지 않으며, unresolved-only 구현 작업은
+  `UNRESOLVED_WORK`를 일관되게 보고한다.
+- 문서 readiness는 변경되지 않은 Artifact Gate receipt schema 2.0이 계속 소유한다.
+  planned/executed/admitted call을 분리하고 provider가 노출한 usage만 보고한다.
+
+### 보안
+- 누락, malformed, mixed-target, stale 또는 불완전한 prepared evidence는
+  신뢰 verdict나 verified completion을 만들 수 없다.
+- 알 수 없는 call, usage와 미판정 prediction을 성공, 비용 0,
+  true positive 또는 false positive로 추론하지 않는다.
+
 ## [2.10.0] — 2026-09-02
 
 ### 추가

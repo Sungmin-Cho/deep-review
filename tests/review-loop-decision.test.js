@@ -472,6 +472,10 @@ test('unresolved-only implementation decisions stop before an empty Respond', as
   const document = decisionApi.transitionRound({ phase: 'before-respond', round: 1, limit: 2, artifactPhase: 'document', readiness: { status: 'DOCUMENT_BLOCKED' },
     verdict: 'REQUEST_CHANGES', observations: d.decision.material_findings, pending: d.decision.pending_findings, reviewed: d.target, current: d.target, currentAuthority: true, actionableCount: 0 });
   assert.equal(document.action, 'respond');
+  const unresolvedCritical = decisionApi.transitionRound({ phase: 'before-respond', round: 1, limit: 2, artifactPhase: 'implementation', readiness: null,
+    verdict: 'REQUEST_CHANGES', observations: d.decision.material_findings, pending: d.decision.pending_findings, reviewed: d.target, current: d.target, currentAuthority: true, actionableCount: 0 });
+  assert.equal(unresolvedCritical.action, 'stop');
+  assert.equal(unresolvedCritical.stop_reason, 'UNRESOLVED_WORK');
 });
 
 test('prepared file builder, launch and verifier share the physical plugin root across aliases', async t => {
