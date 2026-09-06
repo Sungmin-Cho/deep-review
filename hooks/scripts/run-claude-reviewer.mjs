@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { observeRoutePayload } from './lib/review-target-snapshot.mjs';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -113,6 +114,7 @@ export async function runClaudeReviewer(options = {}) {
     ? requiredString(options.binary, 'binary')
     : (resolveExecutable('claude', env) || 'claude');
   const prompt = readFileSync(promptFile);
+  const payloadObservation = observeRoutePayload(prompt, options.expectedPayloadSha256, Boolean(executionPlan?.preparedReview));
 
   const args = [
     '-p',
@@ -190,6 +192,7 @@ export async function runClaudeReviewer(options = {}) {
     stdout: processResult.stdout.toString('utf8'),
     stderr: processResult.stderr.toString('utf8'),
     outputFile,
+    ...payloadObservation,
     requested_model: executionPlan?.requestedModel ?? executionPlan?.model ?? (model || null),
     resolved_model: modelFallback ? null : (model || null),
     applied_model: null,
@@ -210,6 +213,7 @@ export function parseCli(argv) {
       '--project-root': 'projectRoot',
       '--plugin-root': 'pluginRoot',
       '--prompt-file': 'promptFile',
+      '--expected-payload-sha256': 'expectedPayloadSha256',
       '--output': 'outputFile',
       '--model': 'model',
       '--agent': 'agent',
@@ -255,6 +259,7 @@ async function main() {
     options.executionPlan = loadExecutionPlan(options.routingPlan, options.reviewerId);
   }
   const result = await runClaudeReviewer(options);
+  if (options.expectedPayloadSha256) process.stdout.write(JSON.stringify({status:result.status, route_payload_sha256:result.route_payload_sha256, route_payload_bytes:result.route_payload_bytes, outputFile:result.outputFile}) + '\n');
   process.exitCode = result.code;
 }
 

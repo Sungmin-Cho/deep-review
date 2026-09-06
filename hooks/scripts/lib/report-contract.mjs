@@ -1,3 +1,4 @@
+import { canonicalStringify } from '../document-readiness.mjs';
 // D16 — the single canonical source of the outer report contract.
 //
 // `buildReportContract` returns the phase-independent outer contract text for
@@ -87,12 +88,42 @@ export function buildReportContract({
   artifactPhase = null,
   documentReviewMode = null,
   reviewMode = 'N-way',
+  confirmationRequest = null,
 } = {}) {
   const contract = BASE_CONTRACT.replace('{{REVIEW_MODE}}', reviewMode);
-  if (artifactPhase !== 'document') return contract;
+  if (artifactPhase !== 'document') {
+    if (!confirmationRequest) return contract;
+    return contract + `Emit exactly one additional ## Confirmation section immediately followed by a json fence.
+The object must be {"schema_version":1,"target_digest":${JSON.stringify(confirmationRequest.target_digest)},"items":[...]}.
+Cover each requested finding ID exactly once: ${JSON.stringify(confirmationRequest.finding_ids)}.
+Each item has finding_id, status (verified_closed|still_open|indeterminate), and nonempty evidence [{location,observation}].
+Only positive code/test evidence permits verified_closed; absence from this report is not closure. Keep new material findings in the canonical sections.\n`;
+  }
   // `documentReviewMode` ('full-readiness' | 'design-validation') does not
   // change the gate schema itself — report-format.md:53-75 is invariant
   // across both document review modes.
   void documentReviewMode;
   return contract + DOCUMENT_ARTIFACT_GATE_SECTION;
+}
+
+// Runtime-owned material renderer. Evidence annotations are deliberately outside
+// the canonical severity sections, so suggestions cannot become material issues.
+export function renderAdjudicatedReport({ date, verdict, groups = [], annotations = null }) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('invalid report date');
+  const line = value => String(value).replace(/[\r\n\0]+/g, ' ').trim();
+  const material = groups.filter(group => ['confirmed_blocker', 'unresolved'].includes(group.disposition));
+  const bullets = severity => material.filter(group => group.severity === severity).map(group => {
+    const source = group.source_findings?.find(row => row.severity === severity) || group.source_findings?.[0];
+    return source?.bullet ? source.bullet : `- ${line(group.rationale)} (${line(group.evidence?.[0]?.location || 'unknown')})`;
+  });
+  const critical = bullets('critical');
+  const warning = bullets('warning');
+  return [`# Deep Review Report — ${date}`, '', '## Summary', '',
+    `- **Verdict**: ${verdict}`, '- **Review Mode**: Evidence adjudication',
+    `- **Issues**: 🔴 ${critical.length}건, 🟡 ${warning.length}건, ℹ️ 0건`, '',
+    '## Code Review', '', '### 🔴 Critical', ...(critical.length ? critical : ['None.']), '',
+    '### 🟡 Warning', ...(warning.length ? warning : ['None.']), '',
+    '### ℹ️ Info', 'None.', '', '### 🟢 Passed', 'None.', '',
+    '## Evidence Adjudication', '', '```json', JSON.stringify(JSON.parse(canonicalStringify({ groups, ...annotations })), null, 2), '```', '',
+  ].join('\n');
 }

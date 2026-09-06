@@ -33,6 +33,7 @@
 // dispatch are blocked until the retained owner proves zero live members, and
 // missing or false evidence is round-terminal with no retry or resume.
 
+import { observeRoutePayload } from './lib/review-target-snapshot.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -638,8 +639,10 @@ export async function runGrokReviewer(options = {}) {
 
   // Prompt integrity precedes session creation (D12): one exact Buffer, its
   // byte length and its digest, before `randomUUID` is called at all.
+  const routePayload = readFileSync(promptFile);
+  const payloadObservation = observeRoutePayload(routePayload, options.expectedPayloadSha256, Boolean(plan.preparedReview));
   const promptBytes = composeGrokPrompt({
-    body: readFileSync(promptFile),
+    body: routePayload,
     reportContract: options.reportContract ?? buildReportContract({
       artifactPhase: plan.artifactPhase ?? null,
       documentReviewMode: plan.documentReviewMode ?? null,
@@ -716,6 +719,7 @@ export async function runGrokReviewer(options = {}) {
         prompt_transport: construction.transport,
         prompt_bytes: promptBytes.length,
         prompt_sha256: promptSha256,
+        ...payloadObservation,
         truncated: construction.truncated,
         session_isolation: {
           session_id: sessionId, fresh: true, memory: 'disabled', subagents: 'disabled',
@@ -781,6 +785,7 @@ export async function runGrokReviewer(options = {}) {
       prompt_transport: construction.transport,
       prompt_bytes: promptBytes.length,
       prompt_sha256: promptSha256,
+      ...payloadObservation,
       truncated: construction.truncated,
       session_isolation: {
         session_id: sessionId,
@@ -828,6 +833,7 @@ export function parseCli(argv) {
       '--plugin-root': 'pluginRoot',
       '--config': 'configPath',
       '--prompt-file': 'promptFile',
+      '--expected-payload-sha256': 'expectedPayloadSha256',
       '--output': 'outputFile',
       '--mode': 'mode',
       '--approval': 'approval',

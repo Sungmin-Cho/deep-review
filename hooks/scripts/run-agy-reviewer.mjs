@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { observeRoutePayload } from './lib/review-target-snapshot.mjs';
 import { readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -253,6 +254,7 @@ export async function runAgyReviewer(options = {}) {
     : (resolveExecutable('agy', env) || 'agy');
   const body = readFileSync(promptFile);
   const executionPlan = options.executionPlan || null;
+  const payloadObservation = observeRoutePayload(body, options.expectedPayloadSha256, Boolean(executionPlan?.preparedReview));
   // H4: when an execution plan is supplied, its resolved model is
   // authoritative — including null (provider default, the normal outcome for
   // agy since its adapter has no tier aliases). The legacy options.model only
@@ -409,6 +411,7 @@ export async function runAgyReviewer(options = {}) {
     truncated,
     before,
     after,
+    ...payloadObservation,
     requested_model: executionPlan?.requestedModel ?? executionPlan?.model ?? (model || null),
     resolved_model: executionFallback ? null : (model || null),
     applied_model: null,
@@ -432,6 +435,7 @@ export function parseCli(argv) {
       '--plugin-root': 'pluginRoot',
       '--config': 'configPath',
       '--prompt-file': 'promptFile',
+      '--expected-payload-sha256': 'expectedPayloadSha256',
       '--output': 'outputFile',
       '--mode': 'mode',
       '--model': 'model',

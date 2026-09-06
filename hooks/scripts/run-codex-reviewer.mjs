@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { observeRoutePayload } from './lib/review-target-snapshot.mjs';
 import { createHash } from 'node:crypto';
 import {
   closeSync,
@@ -494,6 +495,7 @@ export async function runCodexReviewer(options = {}) {
   const env = options.env ?? process.env;
   const processRunner = options.processRunner ?? runProcess;
   const routePayload = readPromptFile(promptFile);
+  const payloadObservation = observeRoutePayload(routePayload, options.expectedPayloadSha256, Boolean(executionPlan?.preparedReview));
   const input = trustedPrompt({
     pluginRoot,
     projectRoot,
@@ -575,6 +577,7 @@ export async function runCodexReviewer(options = {}) {
       stdout: finalResult.stdout.toString('utf8'),
       stderr: finalResult.stderr.toString('utf8'),
       outputFile,
+      ...payloadObservation,
       requested_model: requested.model,
       resolved_model: resolved.model,
       applied_model: finalApplied.model,
@@ -602,6 +605,7 @@ export function parseCli(argv) {
       '--project-root': 'projectRoot',
       '--plugin-root': 'pluginRoot',
       '--prompt-file': 'promptFile',
+      '--expected-payload-sha256': 'expectedPayloadSha256',
       '--output': 'outputFile',
       '--routing-plan': 'routingPlan',
       '--execution-route-json': 'executionRouteJson',
@@ -641,6 +645,7 @@ async function main() {
     return;
   }
   const result = await runCodexReviewer(options);
+  if (options.expectedPayloadSha256) process.stdout.write(JSON.stringify({status:result.status, route_payload_sha256:result.route_payload_sha256, route_payload_bytes:result.route_payload_bytes, outputFile:result.outputFile}) + '\n');
   process.exitCode = result.status === 'success'
     ? 0
     : result.code !== 0

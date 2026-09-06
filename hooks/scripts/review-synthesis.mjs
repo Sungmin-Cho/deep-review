@@ -2,13 +2,18 @@
 
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { canonicalStringify, isFindingRef } from './document-readiness.mjs';
 import { rubricIdForRole } from './lib/assignment-rubrics.mjs';
-import { parseExecutionPlanDocument, parseExecutionRoute } from './lib/execution-plan.mjs';
+import { parseExecutionPlanDocument, parseExecutionRoute, parsePreparedReviewBinding } from './lib/execution-plan.mjs';
 import { REVIEWER_IDS, REVIEWER_PROVIDERS } from './lib/reviewer-ids.mjs';
 import { UNSUPPORTED_GROK_CONTAINMENT } from './lib/grok-process-supervisor.mjs';
+
+import { registerAttemptEvidence, getAttemptEvidence, evaluateAdjudication, verifyConfirmation } from './lib/review-adjudication.mjs';
+import { extractFindingState } from './lib/finding-identity.mjs';
+import { renderAdjudicatedReport } from './lib/report-contract.mjs';
+import { sameReviewTarget, readBoundedFile } from './lib/review-target-snapshot.mjs';
 
 const VERDICTS = new Set(['APPROVE', 'CONCERN', 'REQUEST_CHANGES']);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
@@ -223,7 +228,7 @@ function fingerprintFailure(before, after) {
   return null;
 }
 
-export function evaluateReviewerAttempt({
+function evaluateReviewerAttemptBase({
   reviewer_id: reviewerId,
   role,
   output,
@@ -271,6 +276,10 @@ export function evaluateReviewerAttempt({
       ? { tolerances: diagnosed.tolerances }
       : {}),
   };
+}
+
+export function evaluateReviewerAttempt(raw) {
+  return registerAttemptEvidence(evaluateReviewerAttemptBase(raw), raw);
 }
 
 function consensusVerdict(consensus, included) {
@@ -675,9 +684,29 @@ export function synthesizeReviewRound({
   readinessMismatch = false,
   deferredAcceptance = null,
   dispatch = null,
+  adjudication,
 } = {}) {
   if (!Array.isArray(attempts)) throw new TypeError('attempts must be an array');
   const toleranceProvenance = admittedWithTolerancesProvenance(attempts);
+  const invalidEvidence = (error, detail) => ({status:'operational_failure', needs_expansion:false,
+    n_actual:0, verdict:null, phase6_allowed:false, exclusions:[], error, ...(detail ? {detail} : {})});
+  let prepared;
+  try { prepared = parsePreparedReviewBinding(routingPlan || {}); }
+  catch (error) { return invalidEvidence('invalid_prepared_review', error.message); }
+  if (adjudication !== undefined && consensus !== undefined) return invalidEvidence('invalid_adjudication', 'both authorities supplied');
+  if (routingPlan?.artifact_phase === 'document' && adjudication !== undefined) return invalidEvidence('invalid_adjudication', 'document route');
+  if (prepared) {
+    if (routingPlan.shadow_mode || (prepared.decision_mode === 'adjudication-v1' && adjudication === undefined)) return invalidEvidence('invalid_adjudication', 'prepared implementation requires adjudication');
+    for (const attempt of attempts) {
+      const raw = getAttemptEvidence(attempt);
+      if (!raw || JSON.stringify(evaluateReviewerAttemptBase(raw)) !== JSON.stringify(attempt)
+          || raw.evidence_digest !== prepared.evidence_digest
+          || !sameReviewTarget(raw.target_before, prepared.review_target)
+          || !sameReviewTarget(raw.target_after, prepared.review_target)) return invalidEvidence('review_target_mismatch');
+    }
+    if (!dispatch || dispatch.round_id !== prepared.round_id) return invalidEvidence('invalid_readiness_admission', 'prepared dispatch required');
+  }
+
   if (!routingPlan || routingPlan.protocol_version !== '3.0') {
     throw new Error('adaptive synthesis requires routing plan protocol 3.0');
   }
@@ -804,7 +833,17 @@ export function synthesizeReviewRound({
       };
     }
   }
-  const synthesis = synthesizeReviewAttempts(attempts, consensus);
+  let adjudicated = null;
+  if (adjudication !== undefined) {
+    try { adjudicated = evaluateAdjudication({adjudication, attempts, routingPlan}); }
+    catch (error) { return invalidEvidence('invalid_adjudication', error.message); }
+  }
+  const synthesis = adjudicated && included.length > 0
+    ? {status:'reviewed', n_actual:included.length, verdict:adjudicated.verdict, phase6_allowed:true,
+       exclusions:attempts.filter(a=>!a.included).map(a=>({role:a.role,reason:a.exclusion})),
+       adjudication:adjudicated, counts:adjudicated.counts, material_groups:adjudicated.material_groups,
+       source_findings:adjudicated.source_findings}
+    : synthesizeReviewAttempts(attempts, consensus);
   const includedIds = new Set(included.map(attemptReviewerId));
   const missingSelectedRoutes = (routingPlan.routes || [])
     .filter((route) => !includedIds.has(route.reviewer_id));
@@ -827,12 +866,16 @@ export function synthesizeReviewRound({
       ...toleranceProvenance,
     };
   }
-  const reasons = shadowMode ? [] : expansionReasons({
+  let reasons = shadowMode ? [] : expansionReasons({
     included,
     synthesis,
     routingPlan,
     readinessMismatch,
   });
+  if (adjudicated && !shadowMode) {
+    reasons = reasons.filter(reason => ['reviewer_minimum_broken', 'readiness_mismatch'].includes(reason));
+    if (adjudicated.unresolved_sensitive) reasons.push('single_critical_or_security');
+  }
   const maxExpansionWaves = Number.isInteger(routingPlan.max_expansion_waves)
     ? routingPlan.max_expansion_waves
     : 1;
@@ -925,7 +968,15 @@ export function synthesizeReviewRound({
   const deferredAcceptanceFloor = routingPlan.artifact_phase === 'implementation'
     && deferredAcceptance?.complete === false
     && synthesis.verdict === 'APPROVE';
-  const verdict = confidenceFloorApplied || deferredAcceptanceFloor
+  let confirmation = null;
+  if (prepared?.confirmation_request) {
+    try {
+      confirmation = verifyConfirmation({attempts, requiredFindings:prepared.confirmation_request.finding_ids,
+        target:prepared.review_target, currentFindings:extractFindingState(renderAdjudicatedReport({date:'2000-01-01',verdict:synthesis.verdict,groups:adjudicated?.groups || []}), {repoRoot:prepared.review_target.scope.repo_root}).findings});
+    } catch (error) { return invalidEvidence('invalid_confirmation', error.message); }
+  }
+  const confirmationFloor = confirmation !== null && !confirmation.complete && synthesis.verdict === 'APPROVE';
+  const verdict = confidenceFloorApplied || deferredAcceptanceFloor || confirmationFloor
     ? 'CONCERN'
     : synthesis.verdict;
   const documentBlocked = routingPlan.artifact_phase === 'document'
@@ -935,6 +986,8 @@ export function synthesizeReviewRound({
     ...synthesis,
     needs_expansion: false,
     verdict,
+    ...(prepared ? {decision_mode:prepared.decision_mode, round_id:prepared.round_id, review_target:prepared.review_target} : {}),
+    ...(confirmation ? {confirmation, confirmation_floor_applied:confirmationFloor} : {}),
     confidence_floor_applied: confidenceFloorApplied,
     deferred_acceptance_floor: deferredAcceptanceFloor,
     provider_families: providerFamilies,
@@ -964,7 +1017,12 @@ if (invoked) {
   try {
     const inputIndex = process.argv.indexOf('--input');
     if (inputIndex < 0 || !process.argv[inputIndex + 1]) throw new Error('--input FILE is required');
-    const input = JSON.parse(readFileSync(resolve(process.argv[inputIndex + 1]), 'utf8'));
+    const inputPath = resolve(process.argv[inputIndex + 1]);
+    let input = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(readBoundedFile(dirname(inputPath),inputPath)));
+    if (input?.routing_plan?.decision_mode && input.attempts?.some(attempt=>!Object.hasOwn(attempt,'output'))) {
+      const {loadReviewEvidenceInput} = await import('./review-evidence.mjs');
+      input = loadReviewEvidenceInput({repo:input.routing_plan.review_target.scope.repo_root,input});
+    }
     const attemptInput = Array.isArray(input) ? input : input?.attempts;
     if (!Array.isArray(attemptInput)) throw new TypeError('input must contain an attempt array');
     if (attemptInput.some((attempt) => !Object.hasOwn(attempt || {}, 'output'))) {
@@ -980,6 +1038,8 @@ if (invoked) {
         expansionWavesUsed: input.expansion_waves_used || 0,
         readinessMismatch: input.readiness_mismatch === true,
         deferredAcceptance: input.deferred_acceptance || null,
+        dispatch: input.dispatch ?? null,
+        adjudication: input.adjudication,
       })
       : synthesizeReviewAttempts(attempts, consensus);
     process.stdout.write(`${JSON.stringify(result)}\n`);

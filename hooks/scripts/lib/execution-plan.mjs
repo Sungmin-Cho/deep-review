@@ -1,3 +1,4 @@
+import { evidenceHash, sameReviewTarget } from './review-target-snapshot.mjs';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -161,6 +162,28 @@ function normalizeInlineDocumentContext(route) {
   );
 }
 
+export function parsePreparedReviewBinding(value) {
+  const fields = ['decision_mode', 'review_target', 'evidence_digest', 'round_id', 'confirmation_request'];
+  if (!fields.some(field => Object.hasOwn(value, field))) return null;
+  if (!fields.every(field => Object.hasOwn(value, field))) throw new Error('incomplete prepared review binding');
+  const expected = value.artifact_phase === 'document' ? 'artifact-gate-v1' : 'adjudication-v1';
+  if (value.decision_mode !== expected || !sameReviewTarget(value.review_target, value.review_target)
+      || !/^[a-f0-9]{64}$/.test(value.evidence_digest || '')
+      || typeof value.round_id !== 'string' || !value.round_id.trim()) throw new Error('invalid prepared review binding');
+  const request = value.confirmation_request;
+  if (request !== null && (value.artifact_phase !== 'implementation' || !request
+      || request.schema_version !== 1 || request.target_digest !== value.review_target.target_digest
+      || !Array.isArray(request.finding_ids) || !request.finding_ids.length
+      || request.finding_ids.some(id => typeof id !== 'string' || !id.trim())
+      || new Set(request.finding_ids).size !== request.finding_ids.length)) throw new Error('invalid confirmation request');
+  return Object.fromEntries(fields.map(field => [field, value[field]]));
+}
+function validatePreparedJoin(document, route) {
+  const parent = parsePreparedReviewBinding(document);
+  const child = parsePreparedReviewBinding(route);
+  if (evidenceHash(parent) !== evidenceHash(child)) throw new Error('prepared plan/route binding mismatch');
+}
+
 export function parseExecutionPlanDocument(document, reviewerId) {
   requiredReviewerId(reviewerId);
   if (!document || typeof document !== 'object' || Array.isArray(document)) throw new Error('routing plan must be a JSON object');
@@ -208,6 +231,7 @@ export function parseExecutionPlanDocument(document, reviewerId) {
           if (!template || typeof template !== 'object' || Array.isArray(template)) {
             throw new Error(`routing plan expansion route template must be an object for ${candidate.reviewer_id}`);
           }
+          validatePreparedJoin(document, template);
           const templateContext = normalizeInlineDocumentContext(template);
           if (templateContext.artifactPhase !== planContext.artifactPhase
               || templateContext.risk !== planContext.risk
@@ -270,6 +294,7 @@ export function parseExecutionPlanDocument(document, reviewerId) {
           || !Object.hasOwn(candidate.resolved, 'model') || !Object.hasOwn(candidate.resolved, 'effort')) {
         throw new Error(`routing plan resolved model/effort is invalid for ${candidate.reviewer_id}`);
       }
+      validatePreparedJoin(document, candidate);
       const routeContext = normalizeInlineDocumentContext(candidate);
       if (routeContext.artifactPhase !== planContext.artifactPhase
           || routeContext.risk !== planContext.risk
@@ -298,6 +323,7 @@ export function parseExecutionPlanDocument(document, reviewerId) {
   const assignmentRole = document.protocol_version === '3.0' ? route.assignment_role : 'standard';
   const rubricId = document.protocol_version === '3.0' ? route.rubric_id : rubricIdForRole(assignmentRole);
   return {
+    preparedReview: parsePreparedReviewBinding(document),
     model: resolved.model ?? null,
     effort: resolved.effort ?? null,
     requestedModel: requested.model ?? null,
@@ -368,6 +394,7 @@ export function parseExecutionRoute(route, reviewerId) {
   const resolved = route.resolved;
   const source = requested.source || route.source || 'auto';
   return {
+    preparedReview: parsePreparedReviewBinding(route),
     model: resolved.model ?? null,
     effort: resolved.effort ?? null,
     requestedModel: requested.model ?? null,
