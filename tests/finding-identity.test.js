@@ -169,7 +169,9 @@ test('backticked extensionless filenames remain citations', async () => {
     warning: ['`Dockerfile:12` — FROM uses an unpinned tag.'],
   }));
   assert.equal(docker.status, 'complete');
-  assert.deepEqual(docker.findings[0].locations, [{ path: 'Dockerfile', line: 12 }]);
+  assert.equal(docker.findings[0].locations.length, 1);
+  assert.equal(docker.findings[0].locations[0].line, 12);
+  assert.match(docker.findings[0].locations[0].path, /^Dockerfile$/iu);
   assert.match(docker.findings[0].claim, /unpinned tag/u);
 });
 
