@@ -163,6 +163,16 @@ test('colon-number inline code is not stripped as a citation', async () => {
   });
 });
 
+test('backticked extensionless filenames remain citations', async () => {
+  const { extractFindingState } = await loadIdentity();
+  const docker = extractFindingState(report({
+    warning: ['`Dockerfile:12` — FROM uses an unpinned tag.'],
+  }));
+  assert.equal(docker.status, 'complete');
+  assert.deepEqual(docker.findings[0].locations, [{ path: 'Dockerfile', line: 12 }]);
+  assert.match(docker.findings[0].claim, /unpinned tag/u);
+});
+
 test('inline code is opaque to prose Markdown and Unicode normalization', async () => {
   const { extractFindingState } = await loadIdentity();
   const pairs = [

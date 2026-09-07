@@ -360,7 +360,44 @@ test('soft-floor replacement rebinds confirmation onto the remaining selected ro
   assert.ok(synthesis.expanded_routing_plan.confirmation_reviewer_ids.every(
     (id) => synthesis.expanded_routing_plan.routes.some((route) => route.reviewer_id === id),
   ));
+  const retained = prepared.plan.routes.find((route) => route.reviewer_id === 'codex-adversarial');
+  const expandedRetained = synthesis.expanded_routing_plan.routes.find((route) => route.reviewer_id === 'codex-adversarial');
+  assert.deepEqual(expandedRetained, retained);
   assert.doesNotThrow(() => parsePreparedReviewBinding(synthesis.expanded_routing_plan));
+  const replacement = synthesis.expanded_routing_plan.routes.find((route) => route.reviewer_id === 'claude-opus');
+  const replacementLaunch = {
+    ...f.e.buildReviewerLaunch({ executionRoute: { protocol_version: '3.0', ...replacement }, evidenceInputs }),
+    payload_provenance: 'native-argument',
+  };
+  const confirmation = '\n## Confirmation\n```json\n' + JSON.stringify({
+    schema_version: 1, target_digest: target.target_digest,
+    items: [{ finding_id: 'F-pending', status: 'verified_closed', evidence: [{ location: 'a.js:1', observation: 'Closed.' }] }],
+  }) + '\n```\n';
+  const rawClaude = {
+    reviewer_id: 'claude-opus', role: 'claude-opus', output: report() + confirmation,
+    beforeFingerprint: fingerprint, afterFingerprint: fingerprint,
+    target_before: target, target_after: target, evidence_digest: prepared.plan.evidence_digest,
+  };
+  const wave2Launches = [launches.find((row) => row.reviewer_id === 'codex-adversarial'), replacementLaunch];
+  const dispatch = f.e.buildDispatchEvidence({
+    routingPlan: synthesis.expanded_routing_plan,
+    attempts: [rawAdversarial, rawClaude],
+    launches: wave2Launches,
+    roundId: prepared.plan.round_id,
+  });
+  assert.equal(dispatch.records.length, 2);
+  const finalized = await f.e.finalizeReviewDecision({
+    repo: f.repo,
+    input: {
+      routing_plan: synthesis.expanded_routing_plan,
+      evidence_inputs: evidenceInputs,
+      attempts: [rawAdversarial, rawClaude],
+      launches: wave2Launches,
+      dispatch,
+      adjudication: { schema_version: '1.0', groups: [] },
+    },
+  });
+  assert.equal(finalized.decision.confirmation.complete, true);
 });
 
 test('unparsable citations do not throw response-items; complete identity still starts Respond', async t => {
@@ -384,6 +421,33 @@ test('unparsable citations do not throw response-items; complete identity still 
   const complete = await f.e.prepareResponseItems({ repo: f.repo, decisionFile: ready.decision_path });
   assert.equal(complete.confirmed_findings.length, 1);
   assert.equal(complete.incomplete_findings.length, 0);
+});
+
+test('verified respond with remaining budget reviews even if observations were incomplete', async t => {
+  const { transitionRound } = await import('../hooks/scripts/lib/review-loop-decision.mjs');
+  const f = await fixture(t, { git: true });
+  const first = await f.capture();
+  f.write('a.js', 'export const a = 2;\n');
+  const second = await f.capture();
+  const result = transitionRound({
+    phase: 'after-respond', round: 1, limit: 5, artifactPhase: 'implementation',
+    verdict: 'REQUEST_CHANGES', observations: { status: 'indeterminate', findings: [] },
+    pending: [], reviewed: first.target, current: second.target,
+    response: { status: 'verified' }, currentAuthority: false, actionableCount: 1,
+  });
+  assert.equal(result.action, 'review');
+  assert.equal(result.completion_status, 'verification_pending');
+});
+
+test('bridge retry_attempts join executed-call accounting', async t => {
+  const f = await fixture(t);
+  const retry = { attempt_id: 'retry-1', invocation_id: 'inv-retry-1', status: 'failed' };
+  const d = await f.decision({ retryAttempts: [retry] });
+  const r = f.record(d);
+  assert.equal(f.loop.readRoundState(r.state_file).accounting.executed_reviewer_calls, 2);
+  const attached = f.e.attachBridgeObservation(d.input.launches[0], { retry_attempts: [retry] });
+  assert.equal(attached.retry_attempts.length, 1);
+  assert.equal(attached.retry_attempts[0].status, 'failed');
 });
 
 test('max=1 with a confirmed defect is review-only and never permits automatic Respond', async t => {

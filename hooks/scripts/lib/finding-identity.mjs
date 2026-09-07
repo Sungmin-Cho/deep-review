@@ -23,9 +23,14 @@ const MATERIAL_HEADINGS = Object.freeze({
  * in a filename-shaped extension. This rejects unquoted prose like
  * 'backoff at 3:30' (path='3') from registering as a phantom finding.
  */
+const EXTENSIONLESS_FILENAMES = new Set([
+  'makefile', 'dockerfile', 'containerfile', 'gemfile', 'rakefile', 'procfile',
+  'justfile', 'vagrantfile', 'brewfile', 'podfile', 'license', 'codeowners',
+]);
 function isPathLikeToken(pathText) {
   if (/[\\/]/u.test(pathText)) return true;
-  return /\.[A-Za-z][A-Za-z0-9]*$/u.test(pathText);
+  if (/\.[A-Za-z][A-Za-z0-9]*$/u.test(pathText)) return true;
+  return EXTENSIONLESS_FILENAMES.has(pathText.toLowerCase());
 }
 
 function assertNonEmptyString(value, label) {

@@ -189,7 +189,12 @@ export function parsePreparedReviewBinding(value) {
 function validatePreparedJoin(document, route) {
   const parent = parsePreparedReviewBinding(document);
   const child = parsePreparedReviewBinding(route);
-  if (evidenceHash(parent) !== evidenceHash(child)) throw new Error('prepared plan/route binding mismatch');
+  const core = (binding) => {
+    if (!binding) return binding;
+    const { confirmation_reviewer_ids: _ids, ...rest } = binding;
+    return rest;
+  };
+  if (evidenceHash(core(parent)) !== evidenceHash(core(child))) throw new Error('prepared plan/route binding mismatch');
 }
 
 export function parseExecutionPlanDocument(document, reviewerId) {

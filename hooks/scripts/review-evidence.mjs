@@ -256,6 +256,21 @@ export function buildReviewerLaunch({ executionRoute, evidenceInputs }) {
     execution_route: executionRoute, payload, ...observed };
 }
 
+export function attachBridgeObservation(launch, observation) {
+  if (!launch || typeof launch !== 'object' || !observation || typeof observation !== 'object')
+    throw new Error('bridge observation required');
+  const next = { ...launch };
+  if (observation.route_payload_sha256 || observation.route_payload_bytes !== undefined) {
+    next.payload_provenance = launch.payload_provenance === 'native-argument' ? launch.payload_provenance : 'bridge-read';
+    next.bridge_observation = {
+      route_payload_sha256: observation.route_payload_sha256,
+      route_payload_bytes: observation.route_payload_bytes,
+    };
+  }
+  if (Array.isArray(observation.retry_attempts)) next.retry_attempts = observation.retry_attempts;
+  return next;
+}
+
 export async function prepareResponseItems({ repo, decisionFile }) {
   const decision = verifyReviewDecisionSync({ repo, decisionFile });
   if (!sameReviewTarget(decision.review_target, await captureReviewTarget({ scope: decision.review_target.scope })))

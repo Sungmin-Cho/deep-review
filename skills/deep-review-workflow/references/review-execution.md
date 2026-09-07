@@ -358,6 +358,10 @@ Native dispatch passes that payload string verbatim; bridge dispatch reads its
 identical file bytes with `--expected-payload-sha256` set to the builder hash.
 Record actual returned native handle or bridge observation after execution.
 No UUID is a claim about provider-internal conversation identity.
+After a prepared bridge returns JSON, copy its `retry_attempts` array (and
+`route_payload_sha256` / `route_payload_bytes`) onto that saved launch with
+`{plugin_root}/hooks/scripts/review-evidence.mjs` `attachBridgeObservation`
+before `build-dispatch` or `record-operations`. Absent retries stay omitted.
 
 ### 3.3 Grok containment preflight
 

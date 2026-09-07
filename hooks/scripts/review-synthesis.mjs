@@ -678,6 +678,9 @@ function admittedWithTolerancesProvenance(attempts) {
 
 function rebindPreparedConfirmation(plan) {
   if (!plan?.confirmation_request) return plan;
+  const selected = new Set((plan.routes || []).map((route) => route.reviewer_id));
+  const current = plan.confirmation_reviewer_ids || [];
+  if (current.length && current.every((id) => selected.has(id))) return plan;
   const designated = (plan.routes || []).filter((route) => route.assignment_role === 'confirmation');
   if (!designated.length) {
     const fallback = (plan.routes || []).find((route) => route.assignment_role === 'standard')
@@ -686,7 +689,8 @@ function rebindPreparedConfirmation(plan) {
   }
   const ids = designated.map((route) => route.reviewer_id).filter(Boolean);
   if (!ids.length) return plan;
-  const binding = {
+  const replacementIndex = (plan.routes || []).length - 1;
+  const replacementBinding = {
     decision_mode: plan.decision_mode,
     review_target: plan.review_target,
     round_id: plan.round_id,
@@ -696,18 +700,9 @@ function rebindPreparedConfirmation(plan) {
   };
   return {
     ...plan,
-    ...binding,
-    routes: (plan.routes || []).map((route) => ({ ...route, ...binding })),
-    candidate_reviewers: (plan.candidate_reviewers || []).map((candidate) => (
-      Array.isArray(candidate.expansion_route_templates)
-        ? {
-          ...candidate,
-          expansion_route_templates: candidate.expansion_route_templates.map((route) => ({
-            ...route,
-            ...binding,
-          })),
-        }
-        : candidate
+    confirmation_reviewer_ids: ids,
+    routes: (plan.routes || []).map((route, index) => (
+      index === replacementIndex ? { ...route, ...replacementBinding } : route
     )),
   };
 }
