@@ -91,12 +91,16 @@ function normalizeFindingPath(rawPath, options) {
 }
 
 function locationMatches(lineText) {
-  const quoted = [...lineText.matchAll(BACKTICKED_LOCATION)].map((match) => ({
-    rawPath: match[1],
-    line: Number(match[2]),
-    index: match.index,
-  }));
-  const withoutQuotedPaths = lineText.replace(QUOTED_LOCATION_STRIP, (match) => ' '.repeat(match.length));
+  const quoted = [...lineText.matchAll(BACKTICKED_LOCATION)]
+    .filter((match) => isPathLikeToken(match[1]))
+    .map((match) => ({
+      rawPath: match[1],
+      line: Number(match[2]),
+      index: match.index,
+    }));
+  const withoutQuotedPaths = lineText.replace(QUOTED_LOCATION_STRIP, (match) => (
+    isPathLikeToken(match.slice(1, match.lastIndexOf(':'))) ? ' '.repeat(match.length) : match
+  ));
   const bare = [...withoutQuotedPaths.matchAll(BARE_LOCATION)]
     .filter((match) => isPathLikeToken(match[1]))
     .map((match) => ({
@@ -123,7 +127,8 @@ function normalizeProseClaim(segment) {
 }
 
 function isBacktickedLocation(content) {
-  return /^[^`\r\n]+:\d+(?:-\d+)?(?:\s*,\s*\d+(?:-\d+)?)*$/u.test(content);
+  const match = /^([^`\r\n]+):(\d+)(?:-\d+)?(?:\s*,\s*\d+(?:-\d+)?)*$/u.exec(content);
+  return Boolean(match && isPathLikeToken(match[1]));
 }
 
 function normalizeClaim(rawBullet) {

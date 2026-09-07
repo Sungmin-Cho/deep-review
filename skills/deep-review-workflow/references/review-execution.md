@@ -301,7 +301,10 @@ audit copy that no adapter reads.
 After the plan and target/WIP decisions are final, create the actual selected
 manifest with `buildChangeFiles` from
 `{plugin_root}/hooks/scripts/lib/review-target.mjs`, including explicit session
-paths. Write `{repo, changeState, reviewBase, records}` as SCOPE_REQUEST. Capture:
+paths, using `includeBinary: true` so the host manifest matches the classifier
+scope. Prefer writing `{repo, changeState, reviewBase, filesFromZ}` as
+SCOPE_REQUEST and let capture build those records in Node; `{records}` remains
+accepted when already built with the same flag. Capture:
 
 ```text
 node {plugin_root}/hooks/scripts/review-evidence.mjs capture --repo PROJECT_ROOT --input SCOPE_REQUEST
@@ -576,7 +579,8 @@ node {plugin_root}/hooks/scripts/review-synthesis.mjs --prepared-input ATTEMPTS_
 ```
 
 Prepared synthesis re-admits raw leaves and owns terminal status, N_actual,
-expansion and phase6_allowed. When it requests expansion, dispatch exactly its
+expansion and phase6_allowed. When `needs_expansion` is true (it requests
+expansion), dispatch exactly its
 `next_assignment` against the same prepared evidence and target, preserving
 read-only gates; rebuild dispatch/adjudication and re-synthesize once. Never
 publish a provisional verdict. `operational_failure` stops on its first result; no later response or Phase 6 commit may proceed.

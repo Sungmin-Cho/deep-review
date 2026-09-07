@@ -262,13 +262,20 @@ export async function prepareResponseItems({ repo, decisionFile }) {
     throw new Error('response target changed since review');
   if (decision.decision_mode !== 'adjudication-v1')
     return { decision_sha256: decision.decision_sha256, decision_mode: decision.decision_mode, readiness: decision.readiness, confirmed_findings: null };
-  const confirmed = (decision.adjudication?.groups ?? []).filter(group => group.disposition === 'confirmed_blocker').map(group => {
+  const complete = [];
+  const incomplete = [];
+  for (const group of (decision.adjudication?.groups ?? []).filter(row => row.disposition === 'confirmed_blocker')) {
     const state = extractFindingState(renderAdjudicatedReport({ date: decision.date, verdict: 'CONCERN', groups: [group] }), { repoRoot: repo });
-    if (state.status !== 'complete' || state.findings.length !== 1) throw new Error('confirmed response finding lacks complete identity');
-    return { ...state.findings[0], source_refs: group.source_refs, evidence: group.evidence };
-  });
+    const row = { source_refs: group.source_refs, evidence: group.evidence, identity_status: state.status, reasons: state.reasons };
+    if (state.status === 'complete' && state.findings.length === 1) {
+      complete.push({ ...state.findings[0], ...row, identity_status: 'complete' });
+    } else {
+      incomplete.push(row);
+    }
+  }
   return { decision_sha256: decision.decision_sha256, decision_mode: decision.decision_mode,
-    canonical_report_path: decision.canonical_report_path, review_target: decision.review_target, confirmed_findings: confirmed };
+    canonical_report_path: decision.canonical_report_path, review_target: decision.review_target,
+    confirmed_findings: complete, incomplete_findings: incomplete };
 }
 
 const OPERATION_REASONS = new Set(['NO_TRUSTED_REVIEWER', 'REQUIRED_REVIEWER_FAILED', 'TARGET_DRIFT', 'OPERATIONAL_FAILURE', 'SOFT_FLOOR_REPLACED']);
@@ -792,7 +799,23 @@ async function cli(argv) {
   }
   const repo = realpathSync(options.repo || process.cwd());
   const input = options.input ? readControlFile(repo, options.input) : null;
-  if (command === 'capture') return captureReviewTarget({ scope: await createTargetScope(input) });
+  if (command === 'capture') {
+    const scopeInput = { ...input, repo: input.repo || repo };
+    if (!scopeInput.records && scopeInput.filesFromZ !== undefined) {
+      const { buildChangeFiles } = await import('./lib/review-target.mjs');
+      const filesFromZ = Buffer.isBuffer(scopeInput.filesFromZ)
+        ? scopeInput.filesFromZ
+        : Buffer.from(String(scopeInput.filesFromZ), 'utf8');
+      scopeInput.records = buildChangeFiles({
+        repo: scopeInput.repo,
+        changeState: scopeInput.changeState,
+        reviewBase: scopeInput.reviewBase,
+        filesFromZ,
+        includeBinary: true,
+      });
+    }
+    return captureReviewTarget({ scope: await createTargetScope(scopeInput) });
+  }
   if (command === 'build-launch') return buildReviewerLaunch({ ...input,
     ...(options['evidence-inputs-file'] ? { evidenceInputs: readControlFile(repo, options['evidence-inputs-file']) } : {}) });
   if (command === 'response-items') return prepareResponseItems({ repo, decisionFile: options.decision });

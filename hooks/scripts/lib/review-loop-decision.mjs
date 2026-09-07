@@ -3,7 +3,8 @@ import { dirname, resolve, join } from 'node:path';
 import { realpathSync, mkdirSync, writeFileSync } from 'node:fs';
 import { verifyReviewDecisionSync, verifyReviewDecisionHistorySync, verifyReviewOperations } from '../review-evidence.mjs';
 import { verifyPhase6History } from '../phase6-protocol.mjs';
-import { compareFindingStates } from './finding-identity.mjs';
+import { compareFindingStates, extractFindingState } from './finding-identity.mjs';
+import { renderAdjudicatedReport } from './report-contract.mjs';
 import { captureReviewTarget, sameReviewTarget, evidenceHash, readControlFile, readBoundedFile, containedPath } from './review-target-snapshot.mjs';
 
 const progressAuthority = new WeakSet();
@@ -18,6 +19,19 @@ function targetFile(file, repo) {
   const value = repo ? readControlFile(repo, file) : bounded(file);
   if (!sameReviewTarget(value, value) || (repo && value.scope.repo_root !== repo)) throw new Error('invalid current target snapshot');
   return value;
+}
+function completeConfirmedCount(decision, repo) {
+  const groups = decision.adjudication?.groups?.filter(group => group.disposition === 'confirmed_blocker') ?? [];
+  let count = 0;
+  for (const group of groups) {
+    const state = extractFindingState(renderAdjudicatedReport({
+      date: decision.date || '1970-01-01',
+      verdict: 'CONCERN',
+      groups: [group],
+    }), { repoRoot: repo });
+    if (state.status === 'complete' && state.findings.length === 1) count += 1;
+  }
+  return count;
 }
 function historyDecision(repo, file) {
   const history = verifyReviewDecisionHistorySync({ repo, decisionFile: file });
@@ -252,7 +266,8 @@ export function transitionRound({ phase, round, limit, artifactPhase, readiness,
   else if (clean) reason = artifactPhase === 'document' ? 'READY_FOR_IMPLEMENTATION' : 'APPROVE';
   else if (cap) reason = cap;
   else if (halted || response?.halted) reason = 'RESPONSE_HALTED';
-  else if (!complete) reason = 'INDETERMINATE_OBSERVATIONS';
+  else if (!complete && !(phase === 'before-respond' && artifactPhase === 'implementation' && actionableCount > 0))
+    reason = 'INDETERMINATE_OBSERVATIONS';
   else if (expectedChange && !verifiedTree) action = 'review';
   else if (artifactPhase === 'implementation' && actionableCount === 0 && pending.length > 0) reason = 'UNRESOLVED_WORK';
   else if (verdict === 'CONCERN' && artifactPhase !== 'implementation' && observations.findings.length === 0) reason = 'UNRESOLVED_WORK';
@@ -298,7 +313,7 @@ export async function decideRound(options = {}) {
   const result = transitionRound({ phase, round, limit, artifactPhase: history.decision_mode === 'artifact-gate-v1' ? 'document' : 'implementation',
     readiness: history.recorded_readiness, verdict: history.recorded_verdict, observations: history.material_findings,
     pending, reviewed: history.review_target, current, response, currentAuthority,
-    actionableCount: decision.adjudication?.groups.filter(group => group.disposition === 'confirmed_blocker').length ?? 0,
+    actionableCount: completeConfirmedCount(decision, repo),
     ...Object.fromEntries(['operationalFailure', 'userStop', 'deferStop', 'halted', 'stalled'].map(k => [k, options[k]])) });
   const rounds = [];
   let cursor = state ?? previous;

@@ -547,7 +547,7 @@ test('schema-2 adaptive context carries prior risk, progress, and used reviewers
     reviewers: g3Reviewers,
   });
   assert.equal(result.routing_plan.risk, 'high');
-  assert.equal(result.routing_plan.progress, 'regression');
+  assert.equal(result.routing_plan.progress, 'changed');
   await assert.rejects(() => runClassifyArtifactsCli([
     '--repo', repo,
     '--change-state', 'non-git',

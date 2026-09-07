@@ -38,6 +38,9 @@ function normalizeCases(cases) {
       const key = `${id}\0${defectId}`;
       if (defectKeys.has(key)) throw new Error(`duplicate defect id in case ${id}: ${defectId}`);
       defectKeys.add(key);
+      if (defect.severity === undefined || defect.severity === null) {
+        return { case_id: id, defect_id: defectId, severity: 'unknown' };
+      }
       if (!['critical', 'warning'].includes(defect.severity)) {
         throw new Error(`invalid defect severity in case ${id}: ${defectId}`);
       }

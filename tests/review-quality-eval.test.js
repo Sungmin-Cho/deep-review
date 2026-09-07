@@ -17,7 +17,7 @@ async function evaluator() {
 test('computes independently adjudicated precision, recall, false-block rate, and unknown usage', async () => {
   const { evaluateReviewQuality } = await evaluator();
   const result = evaluateReviewQuality({
-    cases: [{ id: 'A', defects: [{ id: 'A1', severity: 'warning' }] }, { id: 'B', defects: [] }],
+    cases: [{ id: 'A', defects: [{ id: 'A1' }] }, { id: 'B', defects: [] }],
     predictions: [
       { case_id: 'A', status: 'completed', findings: [{ finding_id: 'p1', blocking: true }] },
       { case_id: 'B', status: 'completed', findings: [{ finding_id: 'p2', blocking: true }] },

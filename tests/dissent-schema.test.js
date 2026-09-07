@@ -680,26 +680,26 @@ test('the report filename example is Node-expressible on every supported platfor
 });
 
 test('every reference that carries dissent points at the dissenters array', () => {
+  const report = read(REPORT_FORMAT);
   const codex = read(CODEX_INTEGRATION);
   const agy = read(AGY_INTEGRATION);
   const response = read(RESPONSE_PROTOCOL);
   const phase6 = read(PHASE6_PROMPT);
 
-  // Codex owns the synthesis vocabulary: the five-voice case has to exist there
-  // or a composing agent has no authority to write `majority_3_of_5` at all.
-  assert.match(codex, /with five: unanimous, majority four of five, majority three of five,\s+split two of\s+five, or solo/u);
-  assert.match(codex, /`dissenters`/u, 'codex-integration.md never names the dissenters array');
-  assert.match(codex, /`majority_3_of_5` has two entries/u, 'codex-integration.md omits the multi-dissenter shape');
+  // Prepared implementation uses adjudication, not vote-derived truth. Legacy
+  // unprepared callers still render the dissenters array from report-format.md.
+  assert.match(codex, /Legacy unprepared/u);
+  assert.match(codex, /agreement\/dissent arrays/u);
+  assert.match(codex, /never override adjudicated disposition/u);
+  assert.match(report, /`dissenters`/u, 'report-format.md never names the dissenters array');
+  assert.match(report, /`majority_3_of_5` \| 2 entries/u, 'report-format.md omits the multi-dissenter shape');
 
   assert.match(agy, /`dissenters`/u, 'agy-integration.md still describes a singular dissent');
 
-  // The respond side has to be able to weigh a two-family dissent differently
-  // from a lone-vendor one, which means its confidence table has to name both.
-  assert.match(response, /Grok/u, 'the response confidence matrix has no Grok row');
-  assert.match(response, /`majority_K_of_N`/u, 'the response matrix is still pinned to 3/4');
+  // Respond treats provider/role as provenance, not a confidence matrix.
+  assert.match(response, /정확성의 대리 지표가 아니다/u);
+  assert.match(response, /provider family 분포로 자동 결정하지 않/u);
   assert.doesNotMatch(response, /3\/4 이상 일치/u, 'the hardcoded 3/4 row survives');
-  assert.match(response, /`dissenters\.length` ≥ 2/u, 'no row covers a multi-dissenter dissent');
-  assert.match(response, /2개 이상[^|]*family/u, 'no row covers a dissent spanning two provider families');
 
   assert.match(phase6, /^- source: .*\bGrok\b.*$/mu, 'the Phase 6 source enumeration cannot name Grok');
 });

@@ -304,6 +304,88 @@ test('terminal failures have count-only receipts and an operational stop without
   assert.throws(() => f.e.verifyReviewOperations({ repo: f.repo, operationsFile: receipt.operations_file }), /source|digest/);
 });
 
+test('soft-floor replacement rebinds confirmation onto the remaining selected routes', async t => {
+  const f = await fixture(t);
+  const { target } = await f.capture();
+  const evidenceInputs = { context: 'export returns one', diff: 'selected a.js', changeFiles: 'a.js', priorRounds: '', readinessReceipt: '' };
+  const standard = {
+    reviewer_id: 'codex-review', provider: 'codex', adapter_id: 'codex-native-generic',
+    assignment_role: 'standard', rubric_id: 'standard-v1', wave: 1, required: false,
+    selection_reason: 'soft floor', resolved: { model: null, effort: 'high' },
+    artifact_phase: 'implementation', risk: 'low', document_review_mode: 'full-readiness',
+  };
+  const adversarial = { ...standard, reviewer_id: 'codex-adversarial', assignment_role: 'adversarial', rubric_id: 'adversarial-v1' };
+  const prepared = f.e.prepareReviewRound({
+    routingPlan: {
+      protocol_version: '3.0', artifact_phase: 'implementation', risk: 'low', document_review_mode: 'full-readiness',
+      reviewer_strategy: 'adaptive', shadow_mode: false, progress: 'confirmation',
+      minimum_reviewers: 2, planned_reviewers: 2, provider_family_minimum: 1, maximum_reviewers: 3, max_expansion_waves: 1,
+      initial_reviewer_ids: ['codex-review', 'codex-adversarial'], required_reviewer_ids: [],
+      candidate_reviewers: [
+        { reviewer_id: 'codex-review', provider: 'codex', adapter_id: 'codex-native-generic', assignment_roles: ['standard', 'confirmation'], last_status: 'success' },
+        { reviewer_id: 'codex-adversarial', provider: 'codex', adapter_id: 'codex-native-generic', assignment_roles: ['adversarial'], last_status: 'success' },
+        {
+          reviewer_id: 'claude-opus', provider: 'claude', adapter_id: 'claude-cli', assignment_roles: ['standard', 'confirmation'], last_status: 'success',
+          expansion_route_templates: [{
+            reviewer_id: 'claude-opus', provider: 'claude', adapter_id: 'claude-cli', assignment_role: 'standard',
+            rubric_id: 'standard-v1', wave: 2, required: false, selection_reason: 'unused replacement',
+            resolved: { model: null, effort: 'high' }, artifact_phase: 'implementation', risk: 'low', document_review_mode: 'full-readiness',
+          }],
+        },
+      ],
+      routes: [standard, adversarial],
+    },
+    target,
+    evidenceInputs,
+    roundId: 'confirm-round',
+    confirmationRequest: { schema_version: 1, target_digest: target.target_digest, finding_ids: ['F-pending'] },
+  });
+  const { synthesizeReviewRound, evaluateReviewerAttempt } = await import('../hooks/scripts/review-synthesis.mjs');
+  const { parsePreparedReviewBinding } = await import('../hooks/scripts/lib/execution-plan.mjs');
+  const fingerprint = { mode: 'hybrid', digest: 'unchanged', error: null };
+  const rawStandard = { reviewer_id: 'codex-review', role: 'codex-review', output: '', beforeFingerprint: fingerprint, afterFingerprint: fingerprint, target_before: target, target_after: target, evidence_digest: prepared.plan.evidence_digest };
+  const rawAdversarial = { reviewer_id: 'codex-adversarial', role: 'codex-adversarial', output: report(), beforeFingerprint: fingerprint, afterFingerprint: fingerprint, target_before: target, target_after: target, evidence_digest: prepared.plan.evidence_digest };
+  const launches = prepared.plan.routes.map((route) => ({
+    ...f.e.buildReviewerLaunch({ executionRoute: { protocol_version: '3.0', ...route }, evidenceInputs }),
+    payload_provenance: 'native-argument',
+  }));
+  const synthesis = synthesizeReviewRound({
+    attempts: [evaluateReviewerAttempt(rawStandard), evaluateReviewerAttempt(rawAdversarial)],
+    routingPlan: prepared.plan,
+    dispatch: f.e.buildDispatchEvidence({ routingPlan: prepared.plan, attempts: [rawStandard, rawAdversarial], launches, roundId: prepared.plan.round_id }),
+    adjudication: { schema_version: '1.0', groups: [] },
+  });
+  assert.equal(synthesis.status, 'needs_expansion');
+  assert.ok(!synthesis.expanded_routing_plan.routes.some((route) => route.reviewer_id === 'codex-review'));
+  assert.ok(synthesis.expanded_routing_plan.confirmation_reviewer_ids.every(
+    (id) => synthesis.expanded_routing_plan.routes.some((route) => route.reviewer_id === id),
+  ));
+  assert.doesNotThrow(() => parsePreparedReviewBinding(synthesis.expanded_routing_plan));
+});
+
+test('unparsable citations do not throw response-items; complete identity still starts Respond', async t => {
+  const f = await fixture(t);
+  const broken = await f.decision({ bullet: '`src/a.js` line 12 — Return violates the contract.' });
+  const stopped = await f.loop.decideRound({
+    decisionFile: broken.decision_path, roundNumber: 1, roundLimit: 5,
+    currentTargetFile: broken.targetFile, phase: 'before-respond',
+  });
+  assert.equal(stopped.action, 'stop');
+  assert.equal(stopped.stop_reason, 'INDETERMINATE_OBSERVATIONS');
+  const items = await f.e.prepareResponseItems({ repo: f.repo, decisionFile: broken.decision_path });
+  assert.equal(items.confirmed_findings.length, 0);
+  assert.equal(items.incomplete_findings.length, 1);
+  const ready = await f.decision({ bullet: '`a.js:1` — Return violates the contract.' });
+  const next = await f.loop.decideRound({
+    decisionFile: ready.decision_path, roundNumber: 1, roundLimit: 5,
+    currentTargetFile: ready.targetFile, phase: 'before-respond',
+  });
+  assert.equal(next.action, 'respond');
+  const complete = await f.e.prepareResponseItems({ repo: f.repo, decisionFile: ready.decision_path });
+  assert.equal(complete.confirmed_findings.length, 1);
+  assert.equal(complete.incomplete_findings.length, 0);
+});
+
 test('max=1 with a confirmed defect is review-only and never permits automatic Respond', async t => {
   const f = await fixture(t); const d = await f.decision({ bullet: '`a.js:1` — Return violates the contract.' });
   const before = fs.readFileSync(path.join(f.repo, 'a.js'));

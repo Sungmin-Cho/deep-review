@@ -530,6 +530,29 @@ test('Claude execution plan forwards verified effort transport and normalizes un
   assert.equal(result.verification_status, 'provider-did-not-report');
 });
 
+test('Claude unsupported-model retry emits retry_attempts for executed-call accounting', async () => {
+  const { runClaudeReviewer } = await import(claudeUrl);
+  const fixture = workspace();
+  let calls = 0;
+  const result = await runClaudeReviewer({
+    ...fixture, pluginRoot: root, binary: '/fake/claude', timeoutSeconds: 5,
+    executionPlan: { model: 'claude-bad', effort: null, source: 'cli-provider', allowFallback: true },
+    processRunner: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return { code: 1, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.from('error: unsupported model claude-bad\n') };
+      }
+      return processResult();
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.status, 'success');
+  assert.equal(result.retry_attempts.length, 1);
+  assert.equal(result.retry_attempts[0].status, 'failed');
+  assert.equal(typeof result.retry_attempts[0].attempt_id, 'string');
+  assert.equal(typeof result.retry_attempts[0].invocation_id, 'string');
+});
+
 test('Claude explicit effort fails closed without transport; allow-fallback omits it with provenance', async () => {
   const { runClaudeReviewer } = await import(claudeUrl);
   const fixture = workspace();

@@ -171,3 +171,44 @@ test('explicit runtime paths remain source and malformed UTF-8 git names fail ca
     assert.equal((await captureReviewTarget({ scope })).status, 'indeterminate');
   }
 });
+test('capture from filesFromZ includes binaries so host and classifier scopes match', async (t) => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.repo, 'icon.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]));
+  f.run('add', '.');
+  f.run('commit', '-qm', 'binary');
+  const input = path.join(f.repo, '.deep-review/tmp/scope.json');
+  fs.mkdirSync(path.dirname(input), { recursive: true });
+  fs.writeFileSync(input, JSON.stringify({
+    repo: f.repo,
+    changeState: 'unstaged',
+    reviewBase: f.run('rev-parse', 'HEAD'),
+    filesFromZ: 'a.js\0icon.png\0',
+  }));
+  const captured = JSON.parse(execFileSync(process.execPath, [
+    path.join(__dirname, '..', 'hooks/scripts/review-evidence.mjs'),
+    'capture', '--repo', f.repo, '--input', input,
+  ], { encoding: 'utf8' }));
+  assert.equal(captured.status, 'captured');
+  assert.ok(captured.scope.files.some((row) => row.path === 'a.js'));
+  assert.ok(captured.scope.files.some((row) => row.path === 'icon.png'));
+});
+
+test('non-selected dirty symlink is a guard and does not make capture indeterminate', async (t) => {
+  const { createTargetScope, captureReviewTarget, sameReviewTarget } = await api();
+  const f = fixture(t);
+  f.write('target.txt', 'target\n');
+  f.run('add', 'target.txt');
+  f.run('commit', '-qm', 'target');
+  fs.symlinkSync('target.txt', path.join(f.repo, 'link.txt'));
+  f.write('a.js', 'two\n');
+  const scope = await createTargetScope({
+    repo: f.repo,
+    changeState: 'unstaged',
+    reviewBase: 'HEAD',
+    records: [{ path: 'a.js', status: 'M' }],
+  });
+  const first = await captureReviewTarget({ scope });
+  assert.equal(first.status, 'captured');
+  fs.unlinkSync(path.join(f.repo, 'link.txt'));
+  assert.equal(sameReviewTarget(first, await captureReviewTarget({ scope })), false);
+});

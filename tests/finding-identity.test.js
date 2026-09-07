@@ -138,6 +138,31 @@ test('claim normalization preserves substantive inline-code underscores and oper
   assert.notEqual(complement.findings[0].claim_key, bareMask.findings[0].claim_key);
 });
 
+test('colon-number inline code is not stripped as a citation', async () => {
+  const { extractFindingState, compareFindingStates } = await loadIdentity();
+  const thirty = extractFindingState(report({
+    warning: ['`src/config.js:12` — Request uses `timeout:30` and violates the configured limit.'],
+  }));
+  const sixty = extractFindingState(report({
+    warning: ['`src/config.js:12` — Request uses `timeout:60` and violates the configured limit.'],
+  }));
+
+  assert.equal(thirty.status, 'complete');
+  assert.equal(sixty.status, 'complete');
+  assert.match(thirty.findings[0].claim, /timeout:30/u);
+  assert.match(sixty.findings[0].claim, /timeout:60/u);
+  assert.notEqual(thirty.findings[0].finding_id, sixty.findings[0].finding_id);
+  assert.deepEqual(thirty.findings[0].locations, [{ path: 'src/config.js', line: 12 }]);
+  assert.deepEqual(compareFindingStates(thirty, sixty), {
+    identity_status: 'complete',
+    repeated_count: 0,
+    newly_observed_count: 1,
+    not_reobserved_count: 1,
+    severity_changes: [],
+    progress: 'changed',
+  });
+});
+
 test('inline code is opaque to prose Markdown and Unicode normalization', async () => {
   const { extractFindingState } = await loadIdentity();
   const pairs = [

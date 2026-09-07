@@ -676,6 +676,42 @@ function admittedWithTolerancesProvenance(attempts) {
   return rows.length > 0 ? { admitted_with_tolerances: rows } : {};
 }
 
+function rebindPreparedConfirmation(plan) {
+  if (!plan?.confirmation_request) return plan;
+  const designated = (plan.routes || []).filter((route) => route.assignment_role === 'confirmation');
+  if (!designated.length) {
+    const fallback = (plan.routes || []).find((route) => route.assignment_role === 'standard')
+      ?? (plan.routes || [])[0];
+    if (fallback) designated.push(fallback);
+  }
+  const ids = designated.map((route) => route.reviewer_id).filter(Boolean);
+  if (!ids.length) return plan;
+  const binding = {
+    decision_mode: plan.decision_mode,
+    review_target: plan.review_target,
+    round_id: plan.round_id,
+    evidence_digest: plan.evidence_digest,
+    confirmation_request: plan.confirmation_request,
+    confirmation_reviewer_ids: ids,
+  };
+  return {
+    ...plan,
+    ...binding,
+    routes: (plan.routes || []).map((route) => ({ ...route, ...binding })),
+    candidate_reviewers: (plan.candidate_reviewers || []).map((candidate) => (
+      Array.isArray(candidate.expansion_route_templates)
+        ? {
+          ...candidate,
+          expansion_route_templates: candidate.expansion_route_templates.map((route) => ({
+            ...route,
+            ...binding,
+          })),
+        }
+        : candidate
+    )),
+  };
+}
+
 export function synthesizeReviewRound({
   attempts,
   consensus,
@@ -912,10 +948,10 @@ export function synthesizeReviewRound({
           selection_reason: `${nextAssignment.selection_reason}; replaces unavailable adaptive floor route`,
         }
         : nextAssignment;
-      const expandedRoutingPlan = {
+      const expandedRoutingPlan = rebindPreparedConfirmation({
         ...replannedBase,
         routes: [...(replannedBase.routes || []), replacement],
-      };
+      });
       return {
         status: 'needs_expansion',
         needs_expansion: true,

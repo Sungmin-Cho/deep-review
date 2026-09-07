@@ -31,7 +31,7 @@ const states = new Set([
 ]);
 const sha = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
-export function containedPath(repo, file) {
+function lexicalContained(repo, file) {
   if (typeof file !== 'string' || !file || file.includes('\0') || !file.isWellFormed())
     throw new Error('unsupported target path');
   const root = realpathSync(repo);
@@ -55,8 +55,13 @@ export function containedPath(repo, file) {
   const rel = relative(root, absolute);
   if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))
     throw new Error('path outside repository');
+  return { root, absolute, rel: rel.split(sep).join('/') };
+}
+
+export function containedPath(repo, file) {
+  const { root, rel } = lexicalContained(repo, file);
   let current = root;
-  for (const part of rel.split(sep)) {
+  for (const part of rel.split('/')) {
     current = resolve(current, part);
     try {
       if (lstatSync(current).isSymbolicLink()) throw new Error('symlink path unsupported');
@@ -64,7 +69,7 @@ export function containedPath(repo, file) {
       if (error.code !== 'ENOENT') throw error;
     }
   }
-  return absolute;
+  return current;
 }
 
 export function readBoundedFile(repo, file, limit = CONTROL_LIMIT) {
@@ -102,6 +107,11 @@ function pathText(repo, value) {
   if (typeof value !== 'string' || !value.isWellFormed() || value.includes('\\'))
     throw new Error('unsupported target path');
   return relative(repo, containedPath(repo, value)).split(sep).join('/');
+}
+function dirtyPath(repo, value) {
+  if (typeof value !== 'string' || !value.isWellFormed() || value.includes('\\'))
+    throw new Error('unsupported target path');
+  return lexicalContained(repo, value).rel;
 }
 function normalizeScope(scope) {
   if (
@@ -180,6 +190,36 @@ function fileIdentity(repo, path) {
     sha256: evidenceHash(readBoundedFile(repo, path, SOURCE_LIMIT)),
   };
 }
+function dirtyGuard(repo, file) {
+  const { root, rel } = lexicalContained(repo, file);
+  let current = root;
+  const parts = rel.split('/');
+  for (let index = 0; index < parts.length; index += 1) {
+    current = resolve(current, parts[index]);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch (error) {
+      if (error.code === 'ENOENT') return { type: 'missing' };
+      throw error;
+    }
+    if (stat.isSymbolicLink()) {
+      return { type: 'symlink', mode: stat.mode & 0o777, mtime_ms: stat.mtimeMs };
+    }
+    if (index < parts.length - 1) continue;
+    if (stat.isDirectory()) return { type: 'directory', mode: stat.mode & 0o777, mtime_ms: stat.mtimeMs };
+    if (!stat.isFile()) return { type: 'other', mode: stat.mode & 0o777, mtime_ms: stat.mtimeMs };
+    if (stat.size > SOURCE_LIMIT) {
+      return { type: 'file', mode: stat.mode & 0o777, size: stat.size, truncated: true };
+    }
+    return {
+      type: 'file',
+      mode: stat.mode & 0o777,
+      sha256: evidenceHash(readBoundedFile(repo, rel, SOURCE_LIMIT)),
+    };
+  }
+  return { type: 'missing' };
+}
 function policies(repo) {
   const rows = [];
   for (const prefix of ['', '.deep-review/']) {
@@ -242,10 +282,10 @@ export function captureReviewTargetSync({ scope }) {
       for (let i = 0; i < fields.length; i++) {
         const text = decode(fields[i]);
         const status = text.slice(0, 2);
-        const path = pathText(repo, text.slice(3));
-        const oldPath = /[RC]/.test(status) ? pathText(repo, decode(fields[++i])) : null;
+        const path = dirtyPath(repo, text.slice(3));
+        const oldPath = /[RC]/.test(status) ? dirtyPath(repo, decode(fields[++i])) : null;
         if (runtimePath(path, explicit) && (!oldPath || runtimePath(oldPath, explicit))) continue;
-        dirty.push({ path, status, old_path: oldPath, worktree: fileIdentity(repo, path) });
+        dirty.push({ path, status, old_path: oldPath, worktree: dirtyGuard(repo, path) });
       }
     }
     const entries = [];
