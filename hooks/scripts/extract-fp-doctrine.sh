@@ -25,15 +25,17 @@ extract_block() {
 doctrine=$(extract_block "fp-doctrine" "$SRC") || exit 3
 conservative=$(extract_block "fp-conservative" "$SRC") || exit 3
 
-# Per-block validation (R4 + R1-W6): doctrine must contain the 4 CANONICAL suppression
-# bullets (by keyword, not just count) and conservative must contain the reachability
-# phrase. Neither may contain VOICE-6/confidence text.
+# Per-block validation: doctrine must contain the six canonical evidence rules
+# (by keyword, not just count) and conservative must bind impact, reachability,
+# and separately stated uncertainty. Neither may contain VOICE-6/confidence text.
 bullet_count=$(printf '%s\n' "$doctrine" | grep -c '^[[:space:]]*-' || true)
-[ "$bullet_count" -ge 4 ] || { echo "extract-fp-doctrine: fp-doctrine expected >=4 bullets, got $bullet_count" >&2; exit 3; }
-for kw in 'pre-existing' '린터' '추측' '취향'; do
+[ "$bullet_count" -ge 6 ] || { echo "extract-fp-doctrine: fp-doctrine expected >=6 bullets, got $bullet_count" >&2; exit 3; }
+for kw in 'pre-existing' '린터' '추측' '취향' 'named important failure' 'concrete attack path'; do
   printf '%s' "$doctrine" | grep -q "$kw" || { echo "extract-fp-doctrine: fp-doctrine missing canonical rule keyword: $kw" >&2; exit 3; }
 done
-printf '%s' "$conservative" | grep -q '강등하지 않는다' || { echo "extract-fp-doctrine: fp-conservative missing reachability phrase" >&2; exit 3; }
+for kw in 'impact' 'reachability' 'uncertainty' 'separately'; do
+  printf '%s' "$conservative" | grep -q "$kw" || { echo "extract-fp-doctrine: fp-conservative missing canonical rule keyword: $kw" >&2; exit 3; }
+done
 if printf '%s\n%s' "$doctrine" "$conservative" | grep -Eq 'VOICE-6|confidence'; then
   echo "extract-fp-doctrine: VOICE-6/confidence text must be outside the markers" >&2; exit 3
 fi

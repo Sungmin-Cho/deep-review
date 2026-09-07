@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "cases": [
+    { "id": "C17", "defects": [] },
+    { "id": "C28", "defects": [{ "id": "D28a", "severity": "warning", "location": "src/page.js:2", "expected_behavior": "takePage([\"a\",\"b\",\"c\",\"d\"],2,2) returns [\"c\",\"d\"].", "actual_behavior": "Returns [] because slice end is count rather than start plus count." }] },
+    { "id": "C39", "defects": [] },
+    { "id": "C46", "defects": [{ "id": "D46a", "severity": "critical", "location": "src/access.js:2", "expected_behavior": "readDocument(\"sam\",{ownerId:null,body:\"private\"}) rejects.", "actual_behavior": "Allows the read because a missing owner evaluates as authorization." }] },
+    { "id": "C58", "defects": [] },
+    { "id": "C63", "defects": [{ "id": "D63a", "severity": "warning", "location": "src/profiles.js:2", "expected_behavior": "loadNames([\"a\"],async id=>({name:id})) resolves to [\"a\"].", "actual_behavior": "Resolves to [undefined] because the returned array contains promises." }] }
+  ]
+}

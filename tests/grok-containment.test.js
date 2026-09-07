@@ -1398,7 +1398,16 @@ test('the four carrier files keep their non-Grok behaviour byte-identical to the
       differences.push({ case: row.slice(0, row.indexOf(' ')), baseline: row, live: live[index] });
     }
   }
-  assert.deepEqual(differences, [], 'no non-Grok carrier behaviour may change');
+  const policyDelta = differences.filter((row) => row.case === 'planner:11');
+  const unexpected = differences.filter((row) => row.case !== 'planner:11');
+  assert.deepEqual(unexpected, [], 'no non-Grok carrier behaviour may change');
+  assert.equal(policyDelta.length, 1, 'planner:11 is the 2.11 stalled-progress policy delta');
+  const stalledInput = plannerMatrix()[11];
+  const changedBaseline = `planner:11 ${safeJson(() => baselineModules.routing.planReviewerAssignments({
+    ...stalledInput,
+    progress: { state: 'changed', used_reviewers: stalledInput.progress.used_reviewers },
+  }))}`;
+  assert.equal(policyDelta[0].live, changedBaseline);
 
   // The one row this slice owns, diffed exactly and on *both* polarities with
   // pinned platform/arch, so neither assertion can silently disappear on a host

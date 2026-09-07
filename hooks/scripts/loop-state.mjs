@@ -17,6 +17,10 @@ import { isReviewerId } from './lib/reviewer-ids.mjs';
 import { canonicalizeRepoPath, extractFindings, matchFindings } from './lib/finding-identity.mjs';
 import { isSessionDocReportName } from './lib/session-doc.js';
 import { classifyLiveness, currentHostHash, processStartMs } from './mutation-protocol.mjs';
+import { buildSchema3Round, readSchema3Round, loopCapDecision, decideRound, decideOperationalStop, buildResponseEvidence, adaptiveCarrier } from './lib/review-loop-decision.mjs';
+import { readControlFile, containedPath, CONTROL_LIMIT } from './lib/review-target-snapshot.mjs';
+import { compareFindingStates } from './lib/finding-identity.mjs';
+export { decideRound, decideOperationalStop, buildResponseEvidence, adaptiveCarrier };
 
 const SNAPSHOT_SCHEMA = 1;
 const ROUND_STATE_SCHEMA = 2;
@@ -545,18 +549,11 @@ export function evaluateLoopTermination({
       || (readiness !== null && !READINESS_VALUES.has(readiness))) {
     throw new LoopStateError('loop termination input is invalid', 'INVALID_LOOP_POLICY');
   }
-  if (artifactPhase === 'document' && readiness === 'READY_FOR_IMPLEMENTATION') {
+  const stopReason = loopCapDecision({ round, limit, artifactPhase, readiness });
+  if (stopReason) {
     return {
       should_stop: true,
-      stop_reason: 'READY_FOR_IMPLEMENTATION',
-      start_another_review: false,
-      run_respond: false,
-    };
-  }
-  if (round >= limit) {
-    return {
-      should_stop: true,
-      stop_reason: artifactPhase === 'document' ? 'DOCUMENT_BLOCKED' : 'MAX_ROUNDS',
+      stop_reason: stopReason,
       start_another_review: false,
       run_respond: false,
     };
@@ -577,6 +574,18 @@ export function evaluateLoopTermination({
  * file naming convention. `baseCommit` is required (fail-closed).
  */
 export function recordRound(options = {}) {
+  if (options.decisionFile !== undefined) {
+    const repo = options.repoRoot;
+    const post = readControlFile(repo, options.postResponseTargetFile);
+    const capturedFile = containedPath(repo, join(options.stateDir, `loop-target-${randomUUID()}.json`));
+    atomicJson(capturedFile, post);
+    const state = { ...buildSchema3Round({ ...options, postResponseTargetFile: capturedFile }), owner: buildOwnerStamp(options.env || process.env) };
+    const file = containedPath(repo, join(options.stateDir, `loop-${state.loop_id}-round-${state.round_number}.state.json`));
+    if (Buffer.byteLength(JSON.stringify(state)) > CONTROL_LIMIT) throw new Error('schema-3 state exceeds control byte limit');
+    if (existsSync(file)) throw new Error('round state already exists');
+    atomicJson(file, state);
+    return { loop_id: state.loop_id, state_file: file };
+  }
   const roundNumber = Number(options.roundNumber);
   if (!Number.isInteger(roundNumber) || roundNumber < 1) {
     throw new LoopStateError('round number must be a positive integer', 'INVALID_ROUND');
@@ -632,14 +641,15 @@ export function recordRound(options = {}) {
   return { loop_id: loopId, state_file: stateFile };
 }
 
-function readRoundState(stateFile) {
+export function readRoundState(stateFile) {
   const filePath = absolute(stateFile, 'state file');
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync(filePath, 'utf8'));
+    parsed = readControlFile(dirname(filePath), filePath);
   } catch (error) {
     throw new LoopStateError(`cannot read round state: ${error.message}`, 'INVALID_STATE');
   }
+  if (parsed?.schema_version === 3) return readSchema3Round(filePath);
   if (
     ![LEGACY_ROUND_STATE_SCHEMA, ROUND_STATE_SCHEMA].includes(parsed?.schema_version)
     || typeof parsed.loop_id !== 'string'
@@ -682,7 +692,7 @@ export function renderPriorContext(options = {}) {
     lines.push('- (none)');
   } else {
     for (const finding of findings) {
-      lines.push(`- [${finding.severity}] \`${finding.path}:${finding.line}\` (${finding.category}) — ${finding.title_slug}`);
+      lines.push(findingBullet(finding));
     }
   }
   lines.push('');
@@ -777,6 +787,11 @@ export function compareRounds(options = {}) {
       current_base_commit: current.base_commit,
     });
   }
+  if (previous.schema_version === 3 || current.schema_version === 3) {
+    if (previous.schema_version !== 3 || current.schema_version !== 3 || current.round_number !== previous.round_number + 1
+        || current.previous_state_file !== resolve(options.previous)) throw new Error('schema-3 comparison requires adjacent bound state');
+    return { ...compareFindingStates(previous.observations, current.observations), verified_closed_count: current.verified_closed_ids.length };
+  }
   // Drop the raw `resolved` list so the returned wire shape is byte-identical to
   // the pre-refactor output.
   const { resolved, ...summary } = summarizeAdjacent(previous.findings, current.findings, { platform: options.platform });
@@ -809,6 +824,7 @@ function readSessionRounds(tmpDir, loopId) {
 }
 
 function findingBullet(finding) {
+  if (finding.finding_id) return `- [${finding.severity}] ${finding.finding_id} — ${finding.claim} (${finding.locations.map(l => `\`${l.path}:${l.line}\``).join(', ') || 'location indeterminate'})`;
   return `- [${finding.severity}] \`${finding.path}:${finding.line}\` (${finding.category}) — ${finding.title_slug}`;
 }
 
@@ -886,10 +902,10 @@ function renderFinalSummaryLines(summary) {
     : '(unspecified)';
   out.push(`- **Stop reason**: ${stopReason}`);
   if (summary.rounds_saved !== undefined && summary.rounds_saved !== null) {
-    out.push(`- **Rounds saved**: ${Number(summary.rounds_saved)}`);
+    out.push(`- **Rounds saved**: ${Number(summary.rounds_saved)} (legacy advisory; not measured savings)`);
   }
   if (summary.reviewer_calls_saved !== undefined && summary.reviewer_calls_saved !== null) {
-    out.push(`- **Reviewer calls saved**: ${Number(summary.reviewer_calls_saved)}`);
+    out.push(`- **Reviewer calls saved**: ${Number(summary.reviewer_calls_saved)} (legacy advisory; not measured savings)`);
   }
   if (summary.implemented_total !== undefined && summary.implemented_total !== null) {
     out.push(`- **Total implemented**: ${Number(summary.implemented_total)}`);
@@ -897,6 +913,10 @@ function renderFinalSummaryLines(summary) {
   if (typeof summary.readiness === 'string' && summary.readiness.length > 0) {
     out.push(`- **Readiness**: ${summary.readiness}`);
   }
+  if (typeof summary.completion_status === 'string') out.push(`- **Completion status**: ${summary.completion_status}`);
+  if (typeof summary.final_tree_verified === 'boolean') out.push(`- **Final tree verified**: ${summary.final_tree_verified}`);
+  if (typeof summary.reviewed_target_digest === 'string') out.push(`- **Verdict reviewed target**: ${summary.reviewed_target_digest}`);
+  if (typeof summary.current_target_digest === 'string') out.push(`- **Current target**: ${summary.current_target_digest}`);
   if (typeof summary.receipt_path === 'string' && summary.receipt_path.length > 0) {
     out.push(`- **Readiness receipt**: ${summary.receipt_path}`);
   }
@@ -957,6 +977,7 @@ export function renderSessionDoc(options = {}) {
   };
 
   const latest = rounds[rounds.length - 1];
+  const schema3 = latest.schema_version === 3;
   const openFindings = Array.isArray(latest.findings) ? latest.findings : [];
 
   const lines = [
@@ -978,7 +999,8 @@ export function renderSessionDoc(options = {}) {
     const counts = round.counts || {};
     let progress = '—';
     if (index > 0) {
-      const summary = summarizeAdjacent(rounds[index - 1].findings, round.findings);
+      const summary = schema3 ? compareFindingStates(rounds[index - 1].observations, round.observations)
+        : summarizeAdjacent(rounds[index - 1].findings, round.findings);
       progress = summary.progress === 'regression'
         ? `regression (+${summary.added_count})`
         : summary.progress;
@@ -986,6 +1008,13 @@ export function renderSessionDoc(options = {}) {
     lines.push(`| ${round.round_number} | ${round.verdict} | ${counts.critical ?? 0} | ${counts.warning ?? 0} | ${counts.info ?? 0} | ${progress} |`);
   }
   lines.push('');
+  if (schema3) {
+    lines.push('## Observed operations', '', `- **Round limit**: ${latest.round_limit}`,
+      `- **Unused round capacity**: ${Math.max(0, latest.round_limit - rounds.length)}`);
+    for (const key of ['planned_reviewer_calls', 'executed_reviewer_calls', 'admitted_reviewer_calls', 'not_run_reviewer_calls'])
+      lines.push(`- **${key}**: ${rounds.some(row => row.accounting[key] === null) ? 'unknown' : rounds.reduce((sum, row) => sum + row.accounting[key], 0)}`);
+    lines.push('- Usage not exposed by an adapter remains unknown; unused capacity is not measured savings.', '');
+  }
 
   const adaptiveRounds = rounds.filter((round) => round.schema_version === ROUND_STATE_SCHEMA
     && round.artifact_phase !== null);
@@ -1015,11 +1044,18 @@ export function renderSessionDoc(options = {}) {
   else for (const finding of openFindings) lines.push(findingBullet(finding));
   lines.push('');
 
-  const resolved = cumulativeResolved(rounds, openFindings);
-  lines.push(`## Resolved (cumulative) — ${resolved.length}`);
+  const closedIds = schema3 ? new Set(rounds.flatMap(r => r.verified_closed_ids)) : null;
+  const resolved = schema3 ? [...new Map(rounds.flatMap(r => r.observations.findings)
+    .filter(f => closedIds.has(f.finding_id) && !openFindings.some(o => o.finding_id === f.finding_id)).map(f => [f.finding_id, f])).values()]
+    : cumulativeResolved(rounds, openFindings);
+  lines.push(`## ${schema3 ? 'Verified closed' : 'Not re-observed (legacy advisory; not verified resolved)'} (cumulative) — ${resolved.length}`);
   if (resolved.length === 0) lines.push('- (none)');
   else for (const finding of resolved) lines.push(findingBullet(finding));
   lines.push('');
+  if (schema3) {
+    const missing = openFindings.filter(f => !latest.observations.findings.some(current => current.finding_id === f.finding_id));
+    lines.push(`## Not re-observed; still pending — ${missing.length}`, ...missing.map(findingBullet), '');
+  }
 
   lines.push('## Round reports');
   for (const round of rounds) {
@@ -1028,7 +1064,7 @@ export function renderSessionDoc(options = {}) {
     lines.push(`- Round ${round.round_number} — review: ${reviewText} · response: ${responseText}`);
   }
 
-  if (finalSummary) lines.push(...renderFinalSummaryLines(finalSummary));
+  if (finalSummary) lines.push(...renderFinalSummaryLines(schema3 ? { ...finalSummary, rounds_saved: undefined, reviewer_calls_saved: undefined } : finalSummary));
 
   const outputFile = atomicText(options.output, `${lines.join('\n')}\n`, 'output');
   return { output_file: outputFile, loop_id: loopId, rounds: rounds.length };
@@ -1220,6 +1256,10 @@ function commandOptions(command, flags) {
       ['--repo-root', 'repoRoot'],
     ]),
     'record-round': new Map([
+      ['--decision-file', 'decisionFile'], ['--previous-state', 'previousState'],
+      ['--round-limit', 'roundLimit'], ['--round-limit-override-file', 'roundLimitOverrideFile'],
+      ['--post-response-target-file', 'postResponseTargetFile'], ['--response-evidence-file', 'responseEvidenceFile'],
+      ['--operation-receipts-file', 'operationReceiptsFile'],
       ['--round-number', 'roundNumber'],
       ['--review-report', 'reviewReport'],
       ['--response-report', 'responseReport'],
@@ -1230,6 +1270,17 @@ function commandOptions(command, flags) {
       ['--recurring-findings', 'recurringFindings'],
       ['--routing-metadata-file', 'routingMetadataFile'],
     ]),
+    'decide-round': new Map([
+      ['--decision-file', 'decisionFile'], ['--previous-state', 'previousState'], ['--state-file', 'stateFile'],
+      ['--round-number', 'roundNumber'], ['--round-limit', 'roundLimit'], ['--round-limit-override-file', 'roundLimitOverrideFile'],
+      ['--current-target-file', 'currentTargetFile'], ['--phase', 'phase'],
+      ['--operation-receipts-file', 'operationReceiptsFile'],
+      ['--user-stop', 'userStop'], ['--defer-stop', 'deferStop'], ['--halted', 'halted'], ['--stalled', 'stalled'], ['--operational-failure', 'operationalFailure'],
+    ]),
+    'decide-operational-stop': new Map([['--operations-file', 'operationsFile'], ['--current-target-file', 'currentTargetFile'],
+      ['--previous-state', 'previousState'], ['--decision-file', 'decisionFile'], ['--round-limit', 'roundLimit']]),
+    'build-response-evidence': new Map([['--repo-root', 'repo'], ['--input', 'input']]),
+    'adaptive-context': new Map([['--state-file', 'stateFile'], ['--current-target-file', 'currentTargetFile']]),
     'render-prior-context': new Map([
       ['--state-file', 'stateFile'],
       ['--output', 'output'],
@@ -1257,6 +1308,10 @@ function commandOptions(command, flags) {
     const key = known.get(flag);
     if (!key) throw new LoopStateError(`unknown argument for ${command}: ${flag}`, 'INVALID_ARGUMENT');
     options[key] = value;
+    if (['userStop', 'deferStop', 'halted', 'stalled', 'operationalFailure'].includes(key)) {
+      if (!['true', 'false'].includes(value)) throw new Error(`${flag} requires true or false`);
+      options[key] = value === 'true';
+    }
   }
   return options;
 }
@@ -1268,6 +1323,10 @@ export function runLoopStateCli(argv = process.argv.slice(2)) {
   if (command === 'resolve-round-report') return resolveRoundReport(options);
   if (command === 'assert-same-path') return assertSamePath(options);
   if (command === 'record-round') return recordRound(options);
+  if (command === 'decide-round') return decideRound(options);
+  if (command === 'decide-operational-stop') return decideOperationalStop(options);
+  if (command === 'adaptive-context') return adaptiveCarrier(options);
+  if (command === 'build-response-evidence') return buildResponseEvidence({ ...readControlFile(options.repo, options.input), repo: options.repo });
   if (command === 'render-prior-context') return renderPriorContext(options);
   if (command === 'compare-rounds') return compareRounds(options);
   if (command === 'render-session-doc') return renderSessionDoc(options);
@@ -1285,11 +1344,11 @@ function serializeError(error) {
 
 const invoked = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 if (invoked) {
-  try {
-    process.stdout.write(`${JSON.stringify({ ok: true, ...runLoopStateCli() })}\n`);
-  } catch (error) {
+  Promise.resolve().then(() => runLoopStateCli()).then(result => {
+    process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
+  }).catch(error => {
     const detail = serializeError(error);
     process.stdout.write(`${JSON.stringify({ ok: false, error: detail, ...error?.details })}\n`);
     process.exitCode = 2;
-  }
+  });
 }

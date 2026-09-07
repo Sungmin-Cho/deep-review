@@ -22,6 +22,7 @@ import {
 import { dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { atomicWriteFile } from './lib/runtime-context.mjs';
+import { captureReviewTargetSync, sameReviewTarget, readControlFile, readBoundedFile, evidenceHash } from './lib/review-target-snapshot.mjs';
 import {
   encodeGitPath,
   gitSync,
@@ -523,7 +524,7 @@ export function rotatePhase6Artifacts({ repo }) {
   return { status: 'rotated', count };
 }
 
-export function snapshotPhase6({ repo, severity, acceptedItems }) {
+export function snapshotPhase6({ repo, severity, acceptedItems, targetScope }) {
   const project = assertWorktreeRoot(repo);
   assertSeverity(severity);
   const allowedRaw = acceptedRawPaths(acceptedItems);
@@ -597,6 +598,11 @@ export function snapshotPhase6({ repo, severity, acceptedItems }) {
     paths,
     log_path: logPath,
   };
+  if (targetScope !== undefined) {
+    const target = captureReviewTargetSync({ scope: targetScope });
+    if (targetScope.repo_root !== project || !sameReviewTarget(target, target)) throw new Error('Phase 6 target capture failed');
+    snapshot.review_target = target;
+  }
   atomicWriteFile(snapshotPath, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   return {
     status: 'snapshotted',
@@ -834,6 +840,10 @@ function verifyLogs(snapshot, parsed) {
     throw new Error('Phase 6 log is missing');
   }
   const log = readFileSync(snapshot.log_path, 'utf8');
+  verifyLogText(log, parsed);
+}
+
+function verifyLogText(log, parsed) {
   for (const item of parsed.items) {
     if (item.status !== 'pass') continue;
     const escaped = item.item_id.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
@@ -950,6 +960,13 @@ export function verifyPhase6({ repo, snapshotPath, groupResult }) {
     changed_paths: sortedChanged.map((value) => value.toString('base64')),
     state_sha256: sha256(Buffer.from(stableJson(state))),
   };
+  if (snapshot.review_target) {
+    const target = captureReviewTargetSync({ scope: snapshot.review_target.scope });
+    if (!sameReviewTarget(target, target)) throw new Error('Phase 6 post target capture failed');
+    Object.assign(receipt, { review_target: target, verified_state: state,
+      group_result_sha256: evidenceHash(groupResult),
+      log_sha256: evidenceHash(readBoundedFile(project, snapshot.log_path, 16 * 1024 * 1024)) });
+  }
   atomicWriteFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   return {
     status: 'verified',
@@ -1135,11 +1152,82 @@ export function commitPhase6({ repo, snapshotPath, severity, confirmPreStaged } 
     }
     throw error;
   }
-  return {
+  const result = {
     status: 'committed',
     commit: currentHead(project),
     paths: changedRaw.map((value) => value.toString('base64')),
   };
+  if (snapshot.review_target) {
+    result.review_target = captureReviewTargetSync({ scope: snapshot.review_target.scope });
+    result.verification_receipt_sha256 = evidenceHash(readBoundedFile(project, receiptPath));
+  }
+  return result;
+}
+
+// Read-only historical join. It never calls verify/commit or grants mutation
+// authority. The caller archives these exact files before runtime rotation.
+export function verifyPhase6History({ repo, snapshotFile, groupResultFile, verificationResultFile, receiptFile, logFile, commitResultFile }) {
+  const snapshotBytes = readBoundedFile(repo, snapshotFile);
+  const snapshot = readControlFile(repo, snapshotFile);
+  validateSnapshotShape(repo, snapshot);
+  const receiptBytes = readBoundedFile(repo, receiptFile);
+  const receipt = readControlFile(repo, receiptFile);
+  const result = readControlFile(repo, verificationResultFile);
+  const groupText = readBoundedFile(repo, groupResultFile).toString('utf8');
+  const parsed = parseGroupResult(groupText);
+  const log = readBoundedFile(repo, logFile, 16 * 1024 * 1024).toString('utf8');
+  if (parsed.execution_status !== 'completed' || parsed.items_failed !== 0 || parsed.items_skipped !== 0
+      || (parsed.severity !== null && parsed.severity !== snapshot.severity)
+      || result.status !== 'verified' || receipt.schema_version !== 1
+      || receipt.head !== snapshot.head || receipt.severity !== snapshot.severity
+      || receipt.snapshot_sha256 !== evidenceHash(snapshotBytes)
+      || receipt.group_result_sha256 !== evidenceHash(groupText) || receipt.log_sha256 !== evidenceHash(log)
+      || !receipt.verified_state || receipt.state_sha256 !== sha256(Buffer.from(stableJson(receipt.verified_state)))
+      || !sameReviewTarget(snapshot.review_target, snapshot.review_target)
+      || !sameReviewTarget(receipt.review_target, receipt.review_target)
+      || snapshot.review_target.scope_digest !== receipt.review_target.scope_digest)
+    throw new Error('Phase 6 historical evidence is missing, stale or malformed');
+  // Reuse the existing log predicate with captured bytes, not a live old path.
+  verifyLogText(log, parsed);
+  const changed = snapshot.allowed.filter(key => {
+    const after = receipt.verified_state.allowed[key];
+    if (!after || !sameIndex(snapshot.paths[key].index, after.index)) throw new Error('Phase 6 historical index mismatch');
+    return !sameState(snapshot.paths[key], after);
+  }).sort();
+  const claimed = parsed.items.flatMap(item => item.files_changed_raw.map(value => value.toString('base64'))).sort();
+  if (!changed.length || stableJson(changed) !== stableJson([...receipt.changed_paths].sort())
+      || stableJson(changed) !== stableJson([...result.changed_paths].sort())
+      || stableJson(changed) !== stableJson(claimed)) throw new Error('Phase 6 historical changed paths mismatch');
+  let post = receipt.review_target;
+  let commit = null;
+  if (commitResultFile) {
+    const committed = readControlFile(repo, commitResultFile);
+    if (committed.status !== 'committed' || !OBJECT_ID_PATTERN.test(committed.commit || '')
+        || stableJson([...committed.paths].sort()) !== stableJson(changed)
+        || committed.verification_receipt_sha256 !== evidenceHash(receiptBytes)
+        || !sameReviewTarget(committed.review_target, committed.review_target)
+        || committed.review_target.scope_digest !== snapshot.review_target.scope_digest)
+      throw new Error('Phase 6 historical commit result mismatch');
+    const parent = checkedGit(repo, ['rev-parse', `${committed.commit}^`]).toString('utf8').trim();
+    if (parent !== snapshot.head) throw new Error('Phase 6 historical commit parent mismatch');
+    const paths = splitNul(checkedGit(repo, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', committed.commit])).map(value => value.toString('base64')).sort();
+    if (stableJson(paths) !== stableJson(changed)) throw new Error('Phase 6 historical commit delta mismatch');
+    const tree = parseHeadTree(repo, committed.commit);
+    for (const key of changed) {
+      const entry = indexState(tree, key), expected = receipt.verified_state.allowed[key].worktree;
+      if (entry.present !== expected.present) throw new Error('Phase 6 historical committed path mismatch');
+      if (entry.present) {
+        const bytes = checkedGit(repo, ['cat-file', 'blob', entry.blob]);
+        if (sha256(bytes) !== expected.sha256
+            || (entry.mode === '120000' ? 'symlink' : 'file') !== expected.type
+            || (expected.type === 'file' && (entry.mode === '100755') !== Boolean(expected.mode & 0o111)))
+          throw new Error('Phase 6 historical committed content mismatch');
+      }
+    }
+    post = committed.review_target; commit = committed.commit;
+  }
+  return { status: 'verified', reviewed_target: snapshot.review_target, post_target: post,
+    changed_paths: changed.map(key => Buffer.from(key, 'base64').toString('utf8')), commit };
 }
 
 function parseCli(argv) {
@@ -1179,6 +1267,7 @@ async function runCli(argv) {
         repo: options.repo,
         severity: options.severity,
         acceptedItems: readJsonFile(options.acceptedItemsFile, 'accepted items'),
+        ...(options.targetScopeFile ? { targetScope: readControlFile(options.repo, options.targetScopeFile) } : {}),
       });
     case 'run-test': {
       const command = readJsonFile(options.argvFile, 'argv');

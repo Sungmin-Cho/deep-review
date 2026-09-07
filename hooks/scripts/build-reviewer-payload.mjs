@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { lstatSync, readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -17,7 +17,9 @@ import {
   documentReviewPolicyText,
   rubricTextForRole,
 } from './lib/assignment-rubrics.mjs';
-import { verifyReadinessReceipt } from './document-readiness.mjs';
+import { canonicalStringify, verifyReadinessReceipt } from './document-readiness.mjs';
+import { validateEvidenceInputs } from './review-evidence.mjs';
+import { evidenceHash, readControlFile } from './lib/review-target-snapshot.mjs';
 import { buildReportContract } from './lib/report-contract.mjs';
 
 const DOCTRINE_WARNING = 'fp-doctrine extraction failed (injection skipped)';
@@ -26,6 +28,7 @@ const PRIOR_ROUNDS_MAX_BYTES = 32 * 1024;
 const PRIOR_CONTEXT_HEADER_PATTERN = /^<!-- PRIOR-CONTEXT v1 loop_id=(\S+) base_commit=(\S+) round=(\d+) -->\s*$/u;
 const SECTION_ORDER = [
   ['TRUSTED REVIEW ASSIGNMENT', 'assignment'],
+  ['TRUSTED REVIEW TARGET', 'reviewTarget'],
   ['VERIFIED DOCUMENT READINESS RECEIPT', 'readinessReceipt'],
   ['REVIEW SUPPRESSION DOCTRINE', 'doctrine'],
   ['CHANGED FILES (cross-file context)', 'changeFiles'],
@@ -67,7 +70,7 @@ function trustedAssignmentSection(options) {
         ]
       : []),
     '',
-    rubricTextForRole(executionPlan.assignmentRole),
+    rubricTextForRole(executionPlan.assignmentRole, { preparedReview: executionPlan.preparedReview, reviewerId: options.reviewerId }),
     ...(executionPlan.artifactPhase === 'document'
       ? ['', documentReviewPolicyText(executionPlan.documentReviewMode || 'full-readiness')]
       : []),
@@ -125,12 +128,14 @@ export function extractFalsePositiveDoctrine(criteriaText) {
   const doctrine = extractAnchoredBlock(criteriaText, 'fp-doctrine');
   const conservative = extractAnchoredBlock(criteriaText, 'fp-conservative');
   const bulletCount = doctrine.split('\n').filter((line) => /^\s*-/.test(line)).length;
-  if (bulletCount < 4) throw new Error(`fp-doctrine requires at least four bullets, got ${bulletCount}`);
-  for (const keyword of ['pre-existing', '린터', '추측', '취향']) {
+  if (bulletCount < 6) throw new Error(`fp-doctrine requires at least six bullets, got ${bulletCount}`);
+  for (const keyword of ['pre-existing', '린터', '추측', '취향', 'named important failure', 'concrete attack path']) {
     if (!doctrine.includes(keyword)) throw new Error(`fp-doctrine missing canonical keyword ${keyword}`);
   }
-  if (!conservative.includes('강등하지 않는다')) {
-    throw new Error('fp-conservative missing reachability phrase');
+  for (const keyword of ['impact', 'reachability', 'uncertainty', 'separately']) {
+    if (!conservative.includes(keyword)) {
+      throw new Error(`fp-conservative missing canonical keyword ${keyword}`);
+    }
   }
   if (/VOICE-6|confidence/.test(`${conservative}\n${doctrine}`)) {
     throw new Error('VOICE-6/confidence text must remain outside doctrine anchors');
@@ -224,27 +229,68 @@ function contentFromOption(options, valueKey, fileKey) {
   return readFileSync(options[fileKey], 'utf8');
 }
 
+const PREPARED_PLUGIN_ROOT = realpathSync(fileURLToPath(new URL('../..', import.meta.url)));
+const escapePrepared = text => text.replace(/^(\\*)=====/gmu, '$1\\=====');
+const unescapePrepared = text => text.replace(/^\\(\\*)=====/gmu, '$1=====');
+const confirmationFor = (prepared, reviewerId, role) => (prepared?.confirmation_reviewer_ids
+  ? prepared.confirmation_reviewer_ids.includes(reviewerId) : role === 'confirmation') ? prepared.confirmation_request : null;
+
+export function buildPreparedReviewerPayload({ executionRoute, evidenceInputs, pluginRoot = PREPARED_PLUGIN_ROOT }) {
+  pluginRoot = realpathSync(resolve(pluginRoot));
+  if (pluginRoot !== PREPARED_PLUGIN_ROOT) throw new Error('prepared plugin root must resolve to the installed module root');
+  validateEvidenceInputs(evidenceInputs);
+  const assignment = trustedAssignmentSection({executionRouteJson:JSON.stringify(executionRoute), reviewerId:executionRoute.reviewer_id});
+  const prepared = assignment.executionPlan.preparedReview;
+  if (!prepared || evidenceHash(evidenceInputs) !== prepared.evidence_digest) throw new Error('prepared payload source mismatch');
+  const doctrine = extractFalsePositiveDoctrine(readFileSync(join(pluginRoot,'skills/deep-review-workflow/references/review-criteria.md'),'utf8'));
+  return assembleReviewerPayload({assignment:`First read ${join(pluginRoot, 'agents/code-reviewer.md')}. Stay read-only and return the report contract below.\n${assignment.content}`, reviewTarget:canonicalStringify(prepared), doctrine,
+    ...Object.fromEntries(Object.entries(evidenceInputs).map(([key,value])=>[key,escapePrepared(value)])),
+    reportContract:buildReportContract({artifactPhase:assignment.executionPlan.artifactPhase,
+      documentReviewMode:assignment.executionPlan.documentReviewMode, confirmationRequest:confirmationFor(prepared,executionRoute.reviewer_id,assignment.executionPlan.assignmentRole)})});
+}
+
+export function verifyPreparedReviewerPayload(payload, executionRoute) {
+  if (typeof payload !== 'string') throw new Error('captured payload required');
+  const markers = [...payload.matchAll(/^===== (.+) =====\n/gmu)];
+  const sections = {};
+  for (let index=0;index<markers.length;index+=1) {
+    const marker=markers[index];const key=SECTION_ORDER.find(([title])=>title===marker[1])?.[1];
+    if (!key || Object.hasOwn(sections,key)) throw new Error('invalid prepared payload boundary');
+    const end=markers[index+1] ? markers[index+1].index-1 : payload.length;
+    sections[key]=payload.slice(marker.index+marker[0].length,end).replace(/\n$/u,'');
+  }
+  const evidenceInputs=Object.fromEntries(['context','diff','changeFiles','priorRounds','readinessReceipt'].map(key=>[key,unescapePrepared(sections[key]||'')]));
+  if (buildPreparedReviewerPayload({executionRoute,evidenceInputs})!==payload) throw new Error('prepared payload bytes mismatch');
+  return {payload_sha256:evidenceHash(payload),payload_bytes:Buffer.byteLength(payload),evidence_digest:evidenceHash(evidenceInputs)};
+}
+
 export function buildReviewerPayload(options = {}) {
   const root = resolve(options.pluginRoot ?? resolvePluginRoot());
   const warnings = [];
   const assignment = trustedAssignmentSection(options);
   const readinessReceipt = trustedReadinessReceiptSection(options);
+  const prepared = assignment.executionPlan?.preparedReview;
+  let evidenceInputs = null;
+  if (prepared) {
+    if (!options.repo || !options.evidenceInputsFile) throw new Error('prepared route requires repo and evidence-inputs-file');
+    evidenceInputs = validateEvidenceInputs(readControlFile(options.repo, options.evidenceInputsFile));
+    if (evidenceHash(evidenceInputs) !== prepared.evidence_digest) throw new Error('prepared evidence digest mismatch');
+    if (evidenceInputs.readinessReceipt !== readinessReceipt.content) throw new Error('readiness evidence requires matching verified receipt');
+  } else if (options.evidenceInputsFile) {
+    throw new Error('evidence-inputs-file requires a prepared route');
+  }
   let doctrine = '';
-  const omitDoctrine = options.reviewerId === 'codex-review'
-    || options.reviewerId === 'codex-adversarial';
-  if (!omitDoctrine) {
-    try {
-      const criteriaPath = join(
-        root,
-        'skills',
-        'deep-review-workflow',
-        'references',
-        'review-criteria.md',
-      );
-      doctrine = extractFalsePositiveDoctrine(readFileSync(criteriaPath, 'utf8'));
-    } catch {
-      warnings.push(DOCTRINE_WARNING);
-    }
+  try {
+    const criteriaPath = join(
+      root,
+      'skills',
+      'deep-review-workflow',
+      'references',
+      'review-criteria.md',
+    );
+    doctrine = extractFalsePositiveDoctrine(readFileSync(criteriaPath, 'utf8'));
+  } catch {
+    warnings.push(DOCTRINE_WARNING);
   }
 
   let changeFiles = '';
@@ -293,17 +339,20 @@ export function buildReviewerPayload(options = {}) {
     }
   }
 
-  const context = contentFromOption(options, 'context', 'contextFile');
-  const diff = contentFromOption(options, 'diff', 'diffFile');
-  const priorRounds = ingestPriorRounds(options, warnings);
-  const reportContract = CONTRACT_PAYLOAD_REVIEWERS.has(options.reviewerId)
+  const context = evidenceInputs?.context ?? contentFromOption(options, 'context', 'contextFile');
+  const diff = evidenceInputs?.diff ?? contentFromOption(options, 'diff', 'diffFile');
+  const priorRounds = evidenceInputs ? escapePriorRoundsFences(evidenceInputs.priorRounds) : ingestPriorRounds(options, warnings);
+  if (evidenceInputs) changeFiles = evidenceInputs.changeFiles;
+  const reportContract = (prepared?.confirmation_request || CONTRACT_PAYLOAD_REVIEWERS.has(options.reviewerId))
     ? buildReportContract({
       artifactPhase: assignment.executionPlan?.artifactPhase ?? null,
       documentReviewMode: assignment.executionPlan?.documentReviewMode ?? null,
+      confirmationRequest: confirmationFor(prepared,options.reviewerId,assignment.executionPlan?.assignmentRole),
     })
     : '';
-  const payload = assembleReviewerPayload({
+  const legacyPayload = assembleReviewerPayload({
     assignment: assignment.content,
+    reviewTarget: prepared ? JSON.stringify(prepared) : '',
     readinessReceipt: readinessReceipt.content,
     doctrine,
     changeFiles,
@@ -312,10 +361,13 @@ export function buildReviewerPayload(options = {}) {
     diff,
     reportContract,
   });
+  const executionRoute = prepared ? (options.executionRouteJson ? JSON.parse(options.executionRouteJson) : JSON.parse(readFileSync(options.routingPlan,'utf8')).routes.find(route=>route.reviewer_id===options.reviewerId)) : null;
+  const payload = prepared ? buildPreparedReviewerPayload({executionRoute:{protocol_version:'3.0',...executionRoute},evidenceInputs,pluginRoot:root}) : legacyPayload;
   const promptFile = makeSecureTempPath('deep-review-prompt', '.md');
   atomicWriteFile(promptFile, payload, { encoding: 'utf8', mode: 0o600 });
   return {
     promptFile: resolve(promptFile),
+    ...(prepared ? {payload_sha256:evidenceHash(payload),payload_bytes:Buffer.byteLength(payload),evidence_digest:prepared.evidence_digest} : {}),
     warnings,
     changeFilesCount,
     changeFilesStatus,
@@ -348,6 +400,7 @@ function parseArguments(argv) {
     ['--execution-route-json', 'executionRouteJson'],
     ['--reviewer-id', 'reviewerId'],
     ['--readiness-receipt', 'readinessReceipt'],
+    ['--evidence-inputs-file', 'evidenceInputsFile'],
     ['--max-entries', 'maxEntries'],
     ['--max-bytes', 'maxBytes'],
   ]);

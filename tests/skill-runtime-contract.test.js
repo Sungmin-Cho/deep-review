@@ -118,7 +118,7 @@ test('production route and synthesis helpers own parsing and fail-closed reviewe
   const review = read('skills/deep-review-workflow/references/review-execution.md');
   assert.match(publicSkill, /returned JSON.{0,120}executable route authority/is);
   assert.match(loop, /public-route\.mjs --entry loop/);
-  assert.match(review, /review-synthesis\.mjs --input/);
+  assert.match(review, /review-synthesis\.mjs --prepared-input/);
   assert.match(review, /phase6_allowed/);
   assert.match(review, /operational_failure.{0,160}no later response or Phase 6 commit/is);
 });
@@ -253,7 +253,7 @@ test('Codex native dispatch uses two history-free route-specific leaves with tra
   assert.match(combined, /explicit.{0,120}(?:model|effort).{0,160}(?:unsupported|rejected).{0,160}(?:single|one).{0,80}retry/is);
   assert.match(combined, /--allow-fallback/);
   assert.match(agent, /both.{0,40}`codex-review` and `codex-adversarial`/s);
-  assert.doesNotMatch(combined, /companion/iu);
+  assert.doesNotMatch(combined, /codex-companion|--companion|companion fallback/iu);
 
   for (const dimension of ['model', 'effort']) {
     assert.match(
@@ -352,7 +352,8 @@ test('loop public contract forwards routing controls and codifies document readi
   assert.match(loop, /high\/critical document scope to 3/u);
   assert.match(loop, /READY_FOR_IMPLEMENTATION/u);
   assert.match(loop, /DOCUMENT_BLOCKED/u);
-  assert.match(loop, /routing-metadata-file/u);
+  assert.match(loop, /--decision-file/u);
+  assert.match(loop, /schema-3/u);
 });
 
 test('supported runtime references use Node/direct tools and the runtime-root contract', () => {
@@ -484,11 +485,35 @@ test('init is shell-free and doctrine anchors remain byte-identical under the No
   const doctrineLf = anchoredBody(criteria, 'fp-doctrine');
   const doctrineCrlf = anchoredBody(criteria.replace(/\r\n|\n|\r/gu, '\r\n'), 'fp-doctrine');
   assert.equal(doctrineCrlf, doctrineLf);
-  assert.equal(sha256(doctrineLf), '1cfa74f3e6af65b7d778a476a3faf18d4e780392393ab0251bd1851b4cbf2dbe');
+  assert.equal(sha256(doctrineLf), '881ce12d36e57fbb77c6e7cafcc74862896a7c99e763bc077fcf9b59c3338d6d');
   const conservativeLf = anchoredBody(criteria, 'fp-conservative');
   const conservativeCrlf = anchoredBody(criteria.replace(/\r\n|\n|\r/gu, '\r\n'), 'fp-conservative');
   assert.equal(conservativeCrlf, conservativeLf);
-  assert.equal(sha256(conservativeLf), '14a3f66dc8637dc14bc7a39c349dcc606a208f50c29ba8a934b8e6696ef1ba08');
+  assert.equal(sha256(conservativeLf), '36258751df423aecad77ff47976f418a026a995d84c4a3491cf34f27737e1d31');
+});
+
+test('review and response authorities share one evidence policy without provider or prompt-string shortcuts', () => {
+  const agent = read('agents/code-reviewer.md');
+  const criteria = read('skills/deep-review-workflow/references/review-criteria.md');
+  const receiving = read('skills/receiving-review/SKILL.md');
+  const protocol = read('skills/receiving-review/references/response-protocol.md');
+  const forbidden = read('skills/receiving-review/references/forbidden-patterns.md');
+  const execution = read('skills/deep-review-workflow/references/review-execution.md');
+  const combined = [agent, criteria, receiving, protocol, forbidden, execution].join('\n');
+
+  assert.match(criteria, /same evidence standard.{0,160}(?:provider|role)/isu);
+  assert.match(criteria, /impact.{0,80}reachability.{0,160}uncertainty/isu);
+  assert.match(criteria, /agreement.{0,80}corroboration.{0,80}(?:not|아니)/isu);
+  assert.match(agent, /concrete.{0,120}(?:attack path|exploit path|reachable defect)/isu);
+  assert.match(protocol, /choose.{0,100}(?:method|investigation order|bounded check)/isu);
+  assert.match(execution, /every selected reviewer role.{0,160}(?:same|identical).{0,80}doctrine/isu);
+
+  assert.doesNotMatch(combined, /Codex adversarial(?:은|s+is).{0,80}false positive/iu);
+  assert.doesNotMatch(combined, /Adversarial만 지적.{0,80}기각이 기본/iu);
+  assert.doesNotMatch(combined, /테스트 없으면 🔴/u);
+  assert.doesNotMatch(combined, /300줄 이하/u);
+  assert.doesNotMatch(combined, /Ignore previous instructions.{0,240}🔴 Critical/isu);
+  assert.doesNotMatch(execution, /omits false-positive suppression/iu);
 });
 
 test('loop-state snapshots sets, enforces one-report delta, compares paths, and emits metrics JSON', () => {
@@ -721,13 +746,13 @@ test('the public skill wires --dry-run/--explain-routing to the classifier and n
   assert.match(publicSkill, /(?:dryRun|dry-run|explainRouting|explain-routing)[\s\S]{0,400}(?:without running|no reviewer|리뷰어[^\n]*실행|종료)/i);
 });
 
-test('loop SKILL codifies compare-rounds consumption, no-new-verdict-on-skip, and explicit-flag prior-context handoff', () => {
+test('loop SKILL delegates transitions to decide-round and preserves explicit prior-context handoff', () => {
   const loop = fs.readFileSync(path.join(root, 'skills', 'deep-review-loop', 'SKILL.md'), 'utf8');
 
-  // Condition 3 is re-stated to consume compare-rounds's code output rather
-  // than a natural-language "half of the larger set repeats" judgment.
-  assert.match(loop, /compare-rounds.{0,200}stalled/is);
-  assert.match(loop, /implemented_count.{0,80}0|0.{0,80}implemented_count/is);
+  assert.match(loop, /decide-round[^\n]*--decision-file[^\n]*--phase before-respond/);
+  assert.match(loop, /decide-round[^\n]*--state-file[^\n]*--phase after-respond/);
+  assert.match(loop, /UNVERIFIED_FINAL_TREE/);
+  assert.doesNotMatch(loop, /Two operational failures occur|implemented_count == 0/);
   assert.match(loop, /response halted/i);
 
   // A review-skipped round must never fabricate a new verdict/N_actual.
@@ -752,7 +777,7 @@ test('loop SKILL documents the opt-in --session-doc single per-session review do
   assert.match(loop, /render-session-doc/);
   assert.match(loop, /loop-\{loop_id\}-review\.md/);
   // The end-of-loop summary is absorbed into the session doc to avoid dup.
-  assert.match(loop, /absorb|absorbed|흡수/i);
+  assert.match(loop, /appends the closing summary to the single durable document/i);
   // A FINAL post-stop render pass supplies the closing summary the per-round
   // renders never received, via the explicit --final-summary-file input.
   assert.match(loop, /--final-summary-file/);
@@ -839,7 +864,7 @@ test('document instructions use practical blockers and readiness-owned final ver
   }
 
   for (const relativePath of ['package.json', '.claude-plugin/plugin.json', '.codex-plugin/plugin.json']) {
-    assert.equal(JSON.parse(read(relativePath)).version, '2.10.0', relativePath);
+    assert.equal(JSON.parse(read(relativePath)).version, '2.11.0', relativePath);
   }
 
   const changelog = read('CHANGELOG.md');

@@ -162,182 +162,129 @@ The Node CLI compares exact absolute set entries and succeeds only when exactly
 one new canonical `*-review.md` exists. Zero or multiple entries is a terminal
 operational error. Store its `report_path` as `round_review_report_path`.
 
-Apply reviewer-count rules before Respond:
+The prepared review pipeline returns `report_path` and `decision_path` from
+`review-evidence.mjs finalize`. Require exact equality of `report_path` with the
+resolved report delta and store the returned `decision_path`. A missing or
+changed companion is operational failure; never reconstruct it from prose.
+Synthesis owns reviewer admission, required roles, the at-most-one expansion,
+and the critical implementation floor of three trusted reviewers across two
+provider families. An operational failure is terminal on its first occurrence.
 
-- `N_actual == 0`: stop with operational failure; no verdict is trusted.
-- `N_actual == 1`: Critical or security is `REQUEST_CHANGES`, Warning-only is
-  `CONCERN`, and no blocking issue is `APPROVE`.
-- Larger sets use the synthesis contract in
-  `{plugin_root}/skills/deep-review-workflow/references/review-execution.md`.
+At loop start, use the captured target's immutable `scope.review_base` for all
+rounds. It is null for initial/non-Git scopes; do not invent a commit. Keep the
+actual explicit path manifest, including session documents. After classification
+and before planning a later round, generate the schema-3 carrier with:
 
-Review synthesis is two-wave at most. First produce a provisional result with
-`review-synthesis.mjs`. When it reports `needs_expansion`, dispatch exactly one
-unused reviewer from wave 2. Pass the returned `next_assignment` verbatim as the
-added reviewer's `--execution-route-json`; this binds the returned model/effort
-and trusted rubric without hand-editing or re-persisting a plan. Use the same original evidence and never reveal another reviewer's
-conclusion. Re-synthesize all trusted attempts once and emit one final verdict.
-Critical implementation scope requires at least three trusted reviewers across
-two provider families; a shortage is an operational failure without a verdict.
+```text
+node {plugin_root}/hooks/scripts/loop-state.mjs adaptive-context --state-file PREVIOUS_STATE_FILE --current-target-file CURRENT_TARGET_FILE
+```
 
-For round 2+, pass `classify-artifacts.mjs --adaptive-context-json` a schema-2
-JSON object containing the previous risk, code-owned progress result, and
-canonical reviewer IDs used in the previous round. Schema 1 state is advisory
-only and must not populate this carrier.
+Require the CLI result's `ok: true`, then remove only the transport `ok` key.
+Pass the remaining schema-3 carrier verbatim to the classifier's
+`--adaptive-context-json`. The classifier re-captures its actual selected scope
+and validates the previous decision, observations, pending ledger and Phase 6
+proof. A full review after a changed view or expanded scope still receives the
+exact pending IDs, bound to the fresh current target; this does not permit a
+smaller reviewer slate. Schema 1/2 history remains advisory. Only runtime-verified confirmation
+can contract; report-only new or stalled observations do not add cost. Explicit
+regression evidence uses the source/target-bound carrier accepted by the Node
+runtime. Public constraints and risk floors still apply.
 
-For pure document scope, evaluate the `Artifact Gate` after synthesis.
-`READY_FOR_IMPLEMENTATION` skips Respond and stops the loop after atomically
-writing the content-addressed readiness receipt. If the document cap is
-reached without readiness, preserve the last canonical verdict, record
-`DOCUMENT_BLOCKED`, and do not start another Review.
+If terminal review failure produced no decision, use the count-only
+record-operations / decide-operational-stop sequence in
+`{plugin_root}/skills/deep-review-workflow/references/review-execution.md` and
+publish that stopped result. Do not create a successful schema-3 state or a new
+verdict. Preserve retired soft-floor receipts separately and pass their JSON
+path list as `--operation-receipts-file` to record-round and before-Respond
+decide-round so attempted calls remain in the totals.
 
-## 3. Respond sub-step
+## 3. Decide before Respond
 
-Skip Respond for `READY_FOR_IMPLEMENTATION`, for `APPROVE` with zero Critical
-and Warning issues, and for a split-only `CONCERN` with no accepted actionable
-item.
+Unconditionally capture the current target through the review-evidence capture
+helper, even if Respond appears unnecessary. Then invoke:
 
-Otherwise execute the public `--respond` branch with the exact absolute
-`round_review_report_path`. After the response reference loads its source path,
-verify identity through:
+```text
+node {plugin_root}/hooks/scripts/loop-state.mjs decide-round --decision-file DECISION_FILE --round-number N --round-limit ROUND_LIMIT --current-target-file CURRENT_TARGET_FILE --phase before-respond
+```
+
+On rounds 2+, append `--previous-state PREVIOUS_STATE_FILE`. Use the first
+recorded limit; an explicit user change requires the runtime-validated
+`--round-limit-override-file` with source, reason, prior_limit and new_limit.
+These fields record the user's actual instruction; elapsed time is not consent.
+Execute only the returned action. This is the stop/continue authority, including
+last-slot behavior: `--max=1` is review-only and the final Review never starts
+automatic Respond. New verdicts or N_actual must never be generated for a Review
+that did not run. Record the last trusted verdict against its reviewed target.
+
+For `action: respond`, execute the public `--respond` branch with the exact absolute `round_review_report_path` and carry the exact `decision_path` as
+internal response context. The response reference verifies that companion and
+uses `review-evidence.mjs response-items` for implementation ACCEPT eligibility.
+Verify the loaded report path through:
 
 ```text
 node {plugin_root}/hooks/scripts/loop-state.mjs assert-same-path --expected ROUND_REVIEW_REPORT_PATH --actual LOADED_RESPONSE_SOURCE
 ```
 
-The comparison canonicalizes absolute paths without filesystem alias
-resolution. A mismatch stops the loop before implementation. The loop's entry
-notice pre-approves the ordinary response confirmation, but privacy warnings,
-mutation ownership, pre-staged confirmation, and DEFER choices remain active.
-If the user selects DEFER-and-stop, end after the current round.
+The loop pre-approves ordinary response confirmation. Privacy, mutation
+ownership, pre-staged confirmation and DEFER choices retain their existing gates.
+Phase 6 records every attempted group and returns archived `evidence_file` from
+`loop-state.mjs build-response-evidence`. A response halted or failed result
+remains unknown evidence; it never becomes a zero-change success.
 
-## 4. Metrics sub-step
+## 4. Record the round
 
-After Review and optional Respond, invoke:
-
-```text
-node {plugin_root}/hooks/scripts/loop-state.mjs collect-metrics --round-number N --review-report ROUND_REVIEW_REPORT_PATH --response-report RESPONSE_REPORT_PATH --recurring-findings RECURRING_FILE
-```
-
-Omit the response arguments when Respond was skipped. Store the JSON fields:
-round number, absolute review/response paths, verdict, Critical/Warning/Info
-counts, accepted/rejected/deferred/implemented counts, halted, execution path,
-and `findings_signature`.
-
-Each signature is
-`severity:file:floor(line/7):taxonomy_category`. The category comes from the
-current recurring artifact's exact `example_files` match and otherwise is
-`untagged`. This field is vestigial for stop-condition purposes — display and
-backward-compatibility only. The deterministic stop logic in §5 consumes
-`compare-rounds` output, never `findings_signature`.
-
-Immediately after `collect-metrics`, record this round's finding-state for
-convergence comparison:
+After Review and optional Respond, capture the current scope again. Call:
 
 ```text
-node {plugin_root}/hooks/scripts/loop-state.mjs record-round --round-number N --review-report ROUND_REVIEW_REPORT_PATH --response-report RESPONSE_REPORT_PATH --base-commit REVIEW_BASE --repo-root PROJECT_ROOT --state-dir .deep-review/tmp [--loop-id LOOP_ID]
+node {plugin_root}/hooks/scripts/loop-state.mjs record-round --repo-root PROJECT_ROOT --state-dir .deep-review/tmp --round-number N --round-limit ROUND_LIMIT --review-report ROUND_REVIEW_REPORT_PATH --decision-file DECISION_FILE --post-response-target-file CURRENT_TARGET_FILE
 ```
 
-Omit `--response-report` when Respond was skipped. Omit `--loop-id` on round 1
-only — `record-round` mints one and echoes `{loop_id, state_file}`; store both
-for every later round in this session (pass the same `loop_id` back via
-`--loop-id` on rounds 2+; never re-mint). `--base-commit` is required.
-`--repo-root PROJECT_ROOT` is required so finding locations canonicalize to a
-repo-relative identity — without it absolute path citations stay absolute and
-`compare-rounds` misreads an unchanged finding as resolved+added instead of
-repeated, defeating stall detection. `record-round` also stamps the round state
-with this loop's **durable session** liveness owner (the top-level `claude`
-process on Claude Code, the session id on Codex, or none when neither is
-resolvable), which §1's `cleanup-residue` consults to tell a crashed loop's
-residue from a live sibling's — the live sibling's durable session process is
-still probeable, so its residue is kept.
+On rounds 2+, append `--previous-state PREVIOUS_STATE_FILE --loop-id LOOP_ID`.
+For an executed response, append `--response-report RESPONSE_REPORT_PATH` and
+its actual `--response-evidence-file RESPONSE_EVIDENCE_FILE` when available.
+Store returned `{loop_id, state_file}`. The runtime binds the immutable base,
+report/decision digests, observed findings, prior pending ledger, positive
+closure, snapshots, response proof and actual operation accounting. It retains
+the durable-session owner used by `cleanup-residue`. The legacy
+`collect-metrics` and report-only schema-2 `record-round` remain display APIs;
+their parsed counters and `findings_signature` grant no completion authority.
 
-Write a private routing-metadata JSON file and pass
-`--routing-metadata-file ROUTING_METADATA_FILE`. It records schema-2 evidence:
-artifact phase/risk, routing-plan digest, planned/actual reviewers,
-assignment/model/effort and wave, response metrics, expansion, calls saved,
-readiness, and receipt path. A schema-1 state remains readable as legacy
-convergence evidence but must never be used to infer adaptive routing.
+An omitted pending ID is displayed as not re-observed and remains pending.
+Only bound positive confirmation closes implementation findings. Document
+readiness retains scope-level Artifact Gate and deferred receipt evidence.
 
 ### 4a. Session doc (only when `--session-doc`)
 
-When `--session-doc` was accepted (§0), re-render this session's single
-consolidated review document **in place** right after `record-round`, keyed by
-this loop's `loop_id`:
+When the flag is present (default OFF), re-render one consolidated per-session
+review document in place after each recorded round:
 
 ```text
 node {plugin_root}/hooks/scripts/loop-state.mjs render-session-doc --loop-id LOOP_ID --tmp-dir .deep-review/tmp --reports-dir REPORTS_DIR --output REPORTS_DIR/loop-{loop_id}-review.md
 ```
 
-The document always lives at `.deep-review/reports/loop-{loop_id}-review.md`
-(no timestamp — the SAME file every round, so a session yields exactly one human
-review doc). `render-session-doc` is pure and deterministic: it reads only this
-session's sorted per-round `loop-{loop_id}-round-{N}.state.json` files (and the
-review/response paths recorded in them) and re-renders the latest verdict, the
-per-round verdict/count history with code-owned
-`regression > confirmation > stalled > changed` progress, adaptive assignments,
-model/effort, expansion and readiness, the
-open-vs-resolved findings rollup (via `matchFindings`), and per-round
-review/response links, written atomically. Because its name matches the
-`loop-<id>-review.md` session-doc pattern (not the timestamp-prefixed canonical
-`{date}-{time}-review.md`), it is **excluded** from `snapshot-reports` /
-`resolve-round-report` delta accounting — the per-round REPORT_DELTA_COUNT
-invariant (§2) still observes exactly one NEW canonical report per round. The
-session doc is a derived, additive view; it never replaces a per-round
-`*-review.md`. When `--session-doc` is absent (default), skip this step entirely
-and behave exactly as before.
+This additive view links the canonical review/response reports, shows observed
+progress and pending versus verified-closed findings, and derives executed
+calls and unused capacity from all recorded rounds. It is excluded from
+`snapshot-reports` / `resolve-round-report` delta accounting and never replaces
+a canonical report. `compare-rounds` is an advisory observation comparison,
+not a second termination predicate.
 
-## 5. Stop or continue
+## 5. Decide after Respond
 
-Stop immediately when any condition holds:
+Use the freshly captured current target even when Respond was skipped:
 
-1. `READY_FOR_IMPLEMENTATION` for pure document scope, or implementation
-   `APPROVE` with zero Critical and Warning issues and every deferred receipt
-   item verified.
-2. Review count reaches the resolved cap. For a non-ready document this stop
-   reason is `DOCUMENT_BLOCKED`; no additional Review is created.
-3. `compare-rounds` (previous round's `state_file` vs. this round's) reports
-   `stalled=true` AND this round's `implemented_count == 0`, or the response halted:
+```text
+node {plugin_root}/hooks/scripts/loop-state.mjs decide-round --state-file CURRENT_STATE_FILE --round-limit ROUND_LIMIT --current-target-file CURRENT_TARGET_FILE --phase after-respond
+```
 
-   ```text
-   node {plugin_root}/hooks/scripts/loop-state.mjs compare-rounds --previous PREVIOUS_STATE_FILE --current CURRENT_STATE_FILE
-   ```
-
-   This condition **consumes `compare-rounds`'s code-owned `stalled` output**
-   in place of the former natural-language "half of the larger set repeats"
-   judgment; the `halted` branch is preserved unchanged. Round 1 has no
-   previous state to compare against, so condition 3 cannot fire before
-   round 2.
-4. Two operational failures occur in one round.
-5. The user chooses stop or DEFER-and-stop.
-6. `N_actual == 0` or a Codex-only round has no Codex role.
-7. This round's `accepted_count == 0` AND `implemented_count == 0` AND
-   `halted == false` — a Review executed but nothing was accepted or
-   implemented and Respond did not halt (most often a split-only `CONCERN`
-   round where Respond was itself skipped per §3). Stop with the last
-   trusted verdict; **do not start another Review round.**
-
-**Condition interaction**: condition 7 fires immediately whenever a
-split-only `CONCERN` round skips Respond (§3) — this is an intended early
-stop, not a bug. §3's Respond-skip rule and condition 7 interact by design to
-avoid an idle extra round.
-
-**Skip semantics — three distinct kinds, never conflate them**:
-(a) *Respond skip within an executed round* (§3 — `APPROVE` with zero issues,
-or a split-only `CONCERN` with no accepted actionable item; that round's
-metrics use response defaults);
-(b) *stopping before starting another Review round* (conditions 2/3/6/7 — no
-new round begins, and a new `verdict` or `N_actual` must never be generated
-for a round whose Review was never started; the loop summary's final verdict
-attribution is always the last executed canonical report, never inferred or
-synthesized by the loop layer);
-(c) the user's explicit DEFER-and-stop choice (§3), which ends after the
-current round regardless of other conditions.
-
-Continue when the verdict is actionable, at least one change was implemented,
-the response did not halt, `compare-rounds` shows progress (`progressed=true`
-or `stalled=false`), and the resolved round cap is not reached. In a gray area,
-stop on external dependency or repeatedly failing dispatch rather than
-cycling without evidence.
+Before-Respond decision-file and after-Respond state-file modes are mutually
+exclusive. Forward actual user stop, DEFER-and-stop, halt and operational signals with
+their corresponding boolean flags. Follow the returned `action`, `stop_reason`,
+`completion_status` and `final_tree_verified` without recomputing a verdict.
+`review` starts the next bounded Review; `stop` publishes the result and ends.
+A changed source awaiting another Review is `verification_pending`; terminal
+unreviewed bytes carry `UNVERIFIED_FINAL_TREE` alongside the actual stop reason.
+History-only replay retains the ledger and supplies no current readiness.
 
 ## PRACTICAL DOCUMENT POLICY
 
@@ -382,39 +329,24 @@ in one paragraph.
 
 ## 6. Final summary
 
-**Default (no `--session-doc`)**: use a direct host file tool to write one unique
-`.deep-review/responses/{YYYY-MM-DD}-{HHmmss}-loop-summary.md`. Include each
-round's review and response paths, counts, implemented total, final verdict,
-stop reason, `rounds_saved` (the resolved cap minus the number of rounds that
-actually executed a Review), `reviewer_calls_saved`, per-round assignments,
-expansion, readiness and receipt path, and remaining human or external work.
-Loop state is otherwise session-local; existing reports allow a later explicit
-response to resume.
+**Default (no `--session-doc`)**: write one unique private loop summary with a
+direct host file tool. Use the final `decide-round` result and schema-3 states:
+round_limit, rounds_executed, unused_round_capacity, planned/executed/admitted/
+not-run reviewer calls, final_tree_verified, completion_status, last trusted
+verdict and target attribution, stop reason, response evidence, readiness and
+remaining human or external work. Unknown token/time/cost usage stays null.
+Legacy `rounds_saved` and `reviewer_calls_saved` are non-authoritative historical
+labels; unused capacity is not measured money saved.
 
-**When `--session-doc` is ON**: after the loop stops (§5), run one FINAL
-`render-session-doc` pass — the per-round renders (§4a) run before the stop is
-decided and never receive the closing data, so this pass supplies it explicitly
-via `--final-summary-file`:
+**When `--session-doc` is ON**: save the final Node decision result as
+`FINAL_SUMMARY_FILE`, adding only explanatory remaining_work, then run:
 
 ```text
 node {plugin_root}/hooks/scripts/loop-state.mjs render-session-doc --loop-id LOOP_ID --tmp-dir .deep-review/tmp --reports-dir REPORTS_DIR --output REPORTS_DIR/loop-{loop_id}-review.md --final-summary-file FINAL_SUMMARY_FILE
 ```
 
-`FINAL_SUMMARY_FILE` is a private JSON object with `stop_reason`, `rounds_saved`
-(the resolved cap minus the number of rounds that actually executed a Review),
-`reviewer_calls_saved`, `implemented_total` (the summed `implemented_count`
-across rounds), `readiness`, `receipt_path`, and `remaining_work` (an array of
-remaining human or external items). This final
-pass appends a `## Final summary` section, so the single durable document
-`.deep-review/reports/loop-{loop_id}-review.md` **absorbs** the loop summary — do
-**not** write a separate `*-loop-summary.md`, avoiding a duplicated
-round-by-round artifact. The doc already carries the per-round review/response
-links, the verdict/count history, and the cumulative open-vs-resolved rollup;
-the final pass adds exactly the stop reason, `rounds_saved`, implemented total,
-and remaining work the standalone summary used to hold, so nothing durable is
-lost. Omitting `--final-summary-file` renders a byte-identical doc, so the
-per-round renders (§4a) and the default-OFF path are unaffected.
-
-Delete this session's `loop-*-round-*.prior.md` advisory files with a direct
-host file tool. Leave the `.state.json` files in place — they remain
-readable evidence of the round history.
+This final pass appends the closing summary to the single durable document;
+do not write a separate `*-loop-summary.md`. Omitting `--final-summary-file`
+keeps per-round rendering deterministic. Delete only this session's advisory
+`loop-*-round-*.prior.md` files. Preserve states, target snapshots, decision
+companions and archived response evidence for verification and history.

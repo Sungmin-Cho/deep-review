@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "legacy-without-decision-mode",
+      "source_task": 2,
+      "expected": { "authority": "legacy-compatibility-only", "schema3_completion": false }
+    },
+    {
+      "id": "positive-confirmation",
+      "source_task": 2,
+      "expected": { "pending_after_omission": true, "designated_verified_closed_required": true }
+    },
+    {
+      "id": "unchanged-document-receipt",
+      "source_task": 2,
+      "expected": { "readiness_authority": "artifact-gate-v1", "implementation_adjudication": false }
+    },
+    {
+      "id": "implementation-unresolved-only",
+      "source_task": 3,
+      "expected": { "action": "stop", "stop_reason": "UNRESOLVED_WORK", "completion_status": "unresolved" }
+    },
+    {
+      "id": "final-slot-review-only",
+      "source_task": 3,
+      "expected": { "automatic_respond": false, "stop_reason": "MAX_ROUNDS" }
+    },
+    {
+      "id": "unknown-completion",
+      "source_task": 3,
+      "expected": { "stop_reason": "INDETERMINATE_OBSERVATIONS", "completion_status": "unresolved" }
+    }
+  ]
+}

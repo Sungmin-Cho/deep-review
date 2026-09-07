@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
+import { observeRoutePayload } from './lib/review-target-snapshot.mjs';
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -113,6 +115,7 @@ export async function runClaudeReviewer(options = {}) {
     ? requiredString(options.binary, 'binary')
     : (resolveExecutable('claude', env) || 'claude');
   const prompt = readFileSync(promptFile);
+  const payloadObservation = observeRoutePayload(prompt, options.expectedPayloadSha256, Boolean(executionPlan?.preparedReview));
 
   const args = [
     '-p',
@@ -158,6 +161,7 @@ export async function runClaudeReviewer(options = {}) {
   // allow_fallback keeps the single-run failure; auth/timeout/empty-output
   // failures are never retried.
   let modelFallback = null;
+  const retryAttempts = [];
   const firstStderr = processResult.stderr.toString('utf8');
   if (
     model
@@ -168,6 +172,11 @@ export async function runClaudeReviewer(options = {}) {
     && UNSUPPORTED_MODEL_PATTERN.test(firstStderr)
     && executionPlan?.allowFallback === true
   ) {
+    retryAttempts.push({
+      attempt_id: randomUUID(),
+      invocation_id: randomUUID(),
+      status: processResult.timedOut || processResult.code === 124 ? 'timeout' : 'failed',
+    });
     processResult = await processRunner(binary, stripModelFlag(args), {
       cwd: projectRoot,
       env,
@@ -190,6 +199,7 @@ export async function runClaudeReviewer(options = {}) {
     stdout: processResult.stdout.toString('utf8'),
     stderr: processResult.stderr.toString('utf8'),
     outputFile,
+    ...payloadObservation,
     requested_model: executionPlan?.requestedModel ?? executionPlan?.model ?? (model || null),
     resolved_model: modelFallback ? null : (model || null),
     applied_model: null,
@@ -198,6 +208,7 @@ export async function runClaudeReviewer(options = {}) {
     applied_effort: null,
     verification_status: (executionFallback || modelFallback) ? 'fallback' : 'provider-did-not-report',
     fallback: modelFallback || executionFallback || executionPlan?.routingFallback || { occurred: false },
+    ...(retryAttempts.length ? { retry_attempts: retryAttempts } : {}),
   };
 }
 
@@ -210,6 +221,7 @@ export function parseCli(argv) {
       '--project-root': 'projectRoot',
       '--plugin-root': 'pluginRoot',
       '--prompt-file': 'promptFile',
+      '--expected-payload-sha256': 'expectedPayloadSha256',
       '--output': 'outputFile',
       '--model': 'model',
       '--agent': 'agent',
@@ -255,6 +267,13 @@ async function main() {
     options.executionPlan = loadExecutionPlan(options.routingPlan, options.reviewerId);
   }
   const result = await runClaudeReviewer(options);
+  if (options.expectedPayloadSha256) process.stdout.write(JSON.stringify({
+    status: result.status,
+    route_payload_sha256: result.route_payload_sha256,
+    route_payload_bytes: result.route_payload_bytes,
+    outputFile: result.outputFile,
+    ...(result.retry_attempts ? { retry_attempts: result.retry_attempts } : {}),
+  }) + '\n');
   process.exitCode = result.code;
 }
 

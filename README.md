@@ -210,6 +210,31 @@ The opt-in `agy` (Google Antigravity) CLI can join as a cross-vendor-family revi
 
 For `staged`, `unstaged`, and `mixed` states, deep-review offers to create a WIP commit so cross-model verification can run against a real commit base. The prompt previews the file list, warns about sensitive patterns, and never uses `git add -A`; undo with `git reset --soft HEAD~1`. Shallow clones are detected with a `git fetch --unshallow` recommendation.
 
+## Evidence and completion
+
+Prepared implementation reviews use one evidence standard across reviewer
+roles and providers: the captured target, exact dispatched payload, admitted raw
+report, and independent adjudication are bound into the decision. Reviewer
+agreement, provider names, and self-declared defect matches do not establish
+correctness. Inputs without `decision_mode` remain available through the
+explicit legacy compatibility path, but they do not create schema-3 completion
+authority.
+
+An implementation finding closes only when a Node-designated confirmation
+reviewer supplies a bound `verified_closed` claim. Omission never closes it,
+and an admitted `still_open` or `indeterminate` claim remains evidence. The last
+permitted review slot is review-only: it does not begin an automatic response.
+Missing output, incomplete observations, stale targets, and unverified final
+trees stay unknown or unresolved instead of becoming completion.
+
+Document reviews keep the existing Artifact Gate and unchanged receipt schema 2.0
+as their readiness authority. Runtime accounting separates planned, executed,
+and admitted reviewer calls. Token and cost fields are reported only from
+observed provider metadata; unavailable fields remain `null` and are never
+estimated. The repository also ships a blinded toy corpus and offline evaluator
+for bounded prompt-policy comparisons; its scores do not establish repository-wide
+accuracy, severity calibration, or universal cost savings.
+
 ## Receiving review (Stage 5)
 
 When Stage 4 returns `REQUEST_CHANGES`, deep-review offers an evidence-based response (`/deep-review --respond`) or manual handling. The `--respond` flag activates a 6-phase protocol:

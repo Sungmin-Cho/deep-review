@@ -54,8 +54,8 @@ t_precedence() {
   assert_grep PR3 "$ULTRA" '\-\-ultracode.*six focused lenses' "--ultracode selects six-lens fan-out"
   assert_grep PR4 "$REVEXEC" 'named Claude agent or the Claude CLI bridge' "Claude capability fallback is explicit"
   assert_grep_flat PR5 "$REVEXEC" 'Decline or[[:space:]]+any error excludes that provider; no reviewer process receives project access\.' "decline or error excludes that provider without exposing project access"
-  assert_grep PR6 "$CODEXREF" 'N_actual.*trusted successful roles' "N_actual counts trusted roles only"
-  assert_grep PR7 "$REVEXEC" 'N_actual == 0.*no verdict' "single-shot N=0 fails closed"
+  assert_grep PR6 "$CODEXREF" 'N_actual.*trusted successful canonical roles' "N_actual counts trusted canonical roles only"
+  assert_grep PR7 "$REVEXEC" 'NO_TRUSTED_REVIEWER' "single-shot N=0 uses the Node operational receipt path"
 }
 
 t_security() {
@@ -101,7 +101,7 @@ t_execution_and_report() {
   assert_grep RF4 "$REPORTFMT" 'codex-only \+ agy' "report labels codex-only plus agy"
 
   assert_grep X1 "$CODEXREF" 'runtime-dispatch.md.*owns role selection' "Codex reference defers capability ownership"
-  assert_grep X2 "$CODEXREF" 'Ultracode.*one Anthropic voice' "Codex synthesis counts collapsed ultracode once"
+  assert_grep_flat X2 "$CODEXREF" 'Ultracode.*collapsed output remains one Anthropic role' "Codex synthesis counts collapsed ultracode once"
   assert_absent X3 "$CODEXREF" 'K >= [0-9].*success' "Codex reference does not duplicate quorum bands"
 }
 
@@ -115,10 +115,10 @@ t_phase6_and_loop() {
   assert_grep L2 "$LOOP" 'Never forward .*--max' "loop has a never-forward set"
   assert_grep L3 "$LOOP" 'Rounds 2\+ remove .*--ultracode' "rounds two plus remove ultracode"
   assert_grep L4 "$LOOP" 'ultracode_consumed=true' "loop records ultracode consumption"
-  assert_grep L5 "$LOOP" 'N_actual == 0.*stop with operational failure' "loop N=0 is terminal"
+  assert_grep L5 "$LOOP" 'decide-operational-stop' "loop N=0 delegates to the Node terminal stop authority"
   assert_grep L6 "$LOOP" 'withhold.*--no-opus' "Codex-unavailable round retains a reviewer"
   assert_grep L7 "$LOOP" '\-\-no-opus --no-agy' "integrated later rounds disable Opus and agy"
-  assert_grep L8 "$LOOP" 'floor\(line/7\)' "loop signature uses fixed bucket"
+  assert_grep_flat L8 "$LOOP" 'legacy.*collect-metrics.*display APIs' "legacy signatures remain display-only history"
   assert_absent L8b "$LOOP" 'line ±3' "stale moving bucket is absent"
   assert_absent L9 "$LOOP" '\-\-contract.*only forwarded|only forward.*\-\-contract' "stale contract-only forwarding is absent"
   assert_grep L10 "$LOOP" 'never requested ultracode, preserve the original reviewer' "plain loops retain original reviewer flags"
@@ -149,8 +149,8 @@ t_mutants() {
   sed 's/K >= 4/K >= 1/' "$ULTRA" > "$mutant"
   assert_absent U12M "$mutant" 'K >= 4.*success' "quorum-one mutant is rejected"
 
-  sed 's/N_actual == 0/N_actual > 0/' "$LOOP" > "$mutant"
-  assert_absent L5M "$mutant" 'N_actual == 0.*stop with operational failure' "N=0 fail-open mutant is rejected"
+  sed 's/decide-operational-stop/decide-round/g' "$LOOP" > "$mutant"
+  assert_absent L5M "$mutant" 'decide-operational-stop' "loss of the no-decision operational stop path is rejected"
   rm -f "$mutant"
 }
 

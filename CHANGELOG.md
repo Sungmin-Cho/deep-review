@@ -4,6 +4,32 @@
 
 All notable changes to deep-review are documented here. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0] — 2026-09-06
+
+### Added
+- An offline review-quality evaluator with explicit coverage, independently
+  adjudicated precision, defect-deduplicated recall, completed-clean-case
+  false-block rate, unassessed findings, and provenance-preserving usage.
+- A public six-case blinded toy corpus with separate gold defects and
+  transition fixtures for compatibility, confirmation, completion, and final-slot behavior.
+
+### Changed
+- Prepared implementation review binds the target, exact dispatched payload,
+  raw observations, and evidence adjudication through the persisted decision;
+  legacy inputs remain an explicit compatibility path without schema-3 authority.
+- Only designated positive confirmation can close an implementation finding.
+  The final review slot never starts an automatic response, and unresolved-only
+  implementation work reports `UNRESOLVED_WORK` consistently.
+- Document readiness remains owned by the unchanged Artifact Gate receipt schema 2.0;
+  planned, executed, and admitted calls stay distinct, and usage is reported
+  only when the provider exposed it.
+
+### Security
+- Missing, malformed, mixed-target, stale, or incomplete prepared evidence
+  cannot produce a trusted verdict or verified completion.
+- Unknown calls, usage, and unassessed predictions remain unknown rather than
+  being inferred as success, zero cost, true positives, or false positives.
+
 ## [2.10.0] — 2026-09-02
 
 ### Added

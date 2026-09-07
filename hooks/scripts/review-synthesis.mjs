@@ -2,13 +2,18 @@
 
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { canonicalStringify, isFindingRef } from './document-readiness.mjs';
 import { rubricIdForRole } from './lib/assignment-rubrics.mjs';
-import { parseExecutionPlanDocument, parseExecutionRoute } from './lib/execution-plan.mjs';
+import { parseExecutionPlanDocument, parseExecutionRoute, parsePreparedReviewBinding } from './lib/execution-plan.mjs';
 import { REVIEWER_IDS, REVIEWER_PROVIDERS } from './lib/reviewer-ids.mjs';
 import { UNSUPPORTED_GROK_CONTAINMENT } from './lib/grok-process-supervisor.mjs';
+
+import { registerAttemptEvidence, getAttemptEvidence, evaluateAdjudication, verifyConfirmation } from './lib/review-adjudication.mjs';
+import { extractFindingState } from './lib/finding-identity.mjs';
+import { renderAdjudicatedReport } from './lib/report-contract.mjs';
+import { sameReviewTarget, readBoundedFile } from './lib/review-target-snapshot.mjs';
 
 const VERDICTS = new Set(['APPROVE', 'CONCERN', 'REQUEST_CHANGES']);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
@@ -223,7 +228,7 @@ function fingerprintFailure(before, after) {
   return null;
 }
 
-export function evaluateReviewerAttempt({
+function evaluateReviewerAttemptBase({
   reviewer_id: reviewerId,
   role,
   output,
@@ -271,6 +276,10 @@ export function evaluateReviewerAttempt({
       ? { tolerances: diagnosed.tolerances }
       : {}),
   };
+}
+
+export function evaluateReviewerAttempt(raw) {
+  return registerAttemptEvidence(evaluateReviewerAttemptBase(raw), raw);
 }
 
 function consensusVerdict(consensus, included) {
@@ -667,6 +676,43 @@ function admittedWithTolerancesProvenance(attempts) {
   return rows.length > 0 ? { admitted_with_tolerances: rows } : {};
 }
 
+function rebindPreparedConfirmation(plan) {
+  if (!plan?.confirmation_request) return plan;
+  const selected = new Set((plan.routes || []).map((route) => route.reviewer_id));
+  const current = plan.confirmation_reviewer_ids || [];
+  if (current.length && current.every((id) => selected.has(id))) return plan;
+  const replacement = (plan.routes || []).at(-1);
+  const canCarryConfirmation = (route) => route && ['confirmation', 'standard'].includes(route.assignment_role);
+  const designated = [];
+  if (canCarryConfirmation(replacement)) designated.push(replacement);
+  else {
+    designated.push(...(plan.routes || []).filter((route) => route.assignment_role === 'confirmation'));
+    if (!designated.length) {
+      const fallback = (plan.routes || []).find((route) => route.assignment_role === 'standard')
+        ?? (plan.routes || [])[0];
+      if (fallback) designated.push(fallback);
+    }
+  }
+  const ids = designated.map((route) => route.reviewer_id).filter(Boolean);
+  if (!ids.length) return plan;
+  const replacementIndex = (plan.routes || []).length - 1;
+  const replacementBinding = {
+    decision_mode: plan.decision_mode,
+    review_target: plan.review_target,
+    round_id: plan.round_id,
+    evidence_digest: plan.evidence_digest,
+    confirmation_request: plan.confirmation_request,
+    confirmation_reviewer_ids: ids,
+  };
+  return {
+    ...plan,
+    confirmation_reviewer_ids: ids,
+    routes: (plan.routes || []).map((route, index) => (
+      index === replacementIndex ? { ...route, ...replacementBinding } : route
+    )),
+  };
+}
+
 export function synthesizeReviewRound({
   attempts,
   consensus,
@@ -675,9 +721,29 @@ export function synthesizeReviewRound({
   readinessMismatch = false,
   deferredAcceptance = null,
   dispatch = null,
+  adjudication,
 } = {}) {
   if (!Array.isArray(attempts)) throw new TypeError('attempts must be an array');
   const toleranceProvenance = admittedWithTolerancesProvenance(attempts);
+  const invalidEvidence = (error, detail) => ({status:'operational_failure', needs_expansion:false,
+    n_actual:0, verdict:null, phase6_allowed:false, exclusions:[], error, ...(detail ? {detail} : {})});
+  let prepared;
+  try { prepared = parsePreparedReviewBinding(routingPlan || {}); }
+  catch (error) { return invalidEvidence('invalid_prepared_review', error.message); }
+  if (adjudication !== undefined && consensus !== undefined) return invalidEvidence('invalid_adjudication', 'both authorities supplied');
+  if (routingPlan?.artifact_phase === 'document' && adjudication !== undefined) return invalidEvidence('invalid_adjudication', 'document route');
+  if (prepared) {
+    if (routingPlan.shadow_mode || (prepared.decision_mode === 'adjudication-v1' && adjudication === undefined)) return invalidEvidence('invalid_adjudication', 'prepared implementation requires adjudication');
+    for (const attempt of attempts) {
+      const raw = getAttemptEvidence(attempt);
+      if (!raw || JSON.stringify(evaluateReviewerAttemptBase(raw)) !== JSON.stringify(attempt)
+          || raw.evidence_digest !== prepared.evidence_digest
+          || !sameReviewTarget(raw.target_before, prepared.review_target)
+          || !sameReviewTarget(raw.target_after, prepared.review_target)) return invalidEvidence('review_target_mismatch');
+    }
+    if (!dispatch || dispatch.round_id !== prepared.round_id) return invalidEvidence('invalid_readiness_admission', 'prepared dispatch required');
+  }
+
   if (!routingPlan || routingPlan.protocol_version !== '3.0') {
     throw new Error('adaptive synthesis requires routing plan protocol 3.0');
   }
@@ -804,7 +870,17 @@ export function synthesizeReviewRound({
       };
     }
   }
-  const synthesis = synthesizeReviewAttempts(attempts, consensus);
+  let adjudicated = null;
+  if (adjudication !== undefined) {
+    try { adjudicated = evaluateAdjudication({adjudication, attempts, routingPlan}); }
+    catch (error) { return invalidEvidence('invalid_adjudication', error.message); }
+  }
+  const synthesis = adjudicated && included.length > 0
+    ? {status:'reviewed', n_actual:included.length, verdict:adjudicated.verdict, phase6_allowed:true,
+       exclusions:attempts.filter(a=>!a.included).map(a=>({role:a.role,reason:a.exclusion})),
+       adjudication:adjudicated, counts:adjudicated.counts, material_groups:adjudicated.material_groups,
+       source_findings:adjudicated.source_findings}
+    : synthesizeReviewAttempts(attempts, consensus);
   const includedIds = new Set(included.map(attemptReviewerId));
   const missingSelectedRoutes = (routingPlan.routes || [])
     .filter((route) => !includedIds.has(route.reviewer_id));
@@ -827,12 +903,16 @@ export function synthesizeReviewRound({
       ...toleranceProvenance,
     };
   }
-  const reasons = shadowMode ? [] : expansionReasons({
+  let reasons = shadowMode ? [] : expansionReasons({
     included,
     synthesis,
     routingPlan,
     readinessMismatch,
   });
+  if (adjudicated && !shadowMode) {
+    reasons = reasons.filter(reason => ['reviewer_minimum_broken', 'readiness_mismatch'].includes(reason));
+    if (adjudicated.unresolved_sensitive) reasons.push('single_critical_or_security');
+  }
   const maxExpansionWaves = Number.isInteger(routingPlan.max_expansion_waves)
     ? routingPlan.max_expansion_waves
     : 1;
@@ -869,10 +949,10 @@ export function synthesizeReviewRound({
           selection_reason: `${nextAssignment.selection_reason}; replaces unavailable adaptive floor route`,
         }
         : nextAssignment;
-      const expandedRoutingPlan = {
+      const expandedRoutingPlan = rebindPreparedConfirmation({
         ...replannedBase,
         routes: [...(replannedBase.routes || []), replacement],
-      };
+      });
       return {
         status: 'needs_expansion',
         needs_expansion: true,
@@ -880,7 +960,7 @@ export function synthesizeReviewRound({
         verdict: null,
         phase6_allowed: false,
         expansion_reasons: reasons,
-        next_assignment: replacement,
+        next_assignment: expandedRoutingPlan.routes.at(-1) ?? replacement,
         expanded_routing_plan: expandedRoutingPlan,
         exclusions: synthesis.exclusions || [],
         ...toleranceProvenance,
@@ -925,7 +1005,16 @@ export function synthesizeReviewRound({
   const deferredAcceptanceFloor = routingPlan.artifact_phase === 'implementation'
     && deferredAcceptance?.complete === false
     && synthesis.verdict === 'APPROVE';
-  const verdict = confidenceFloorApplied || deferredAcceptanceFloor
+  let confirmation = null;
+  if (prepared?.confirmation_request) {
+    try {
+      const designated = prepared.confirmation_reviewer_ids ?? routingPlan.routes.filter(route => route.assignment_role === 'confirmation').map(route => route.reviewer_id);
+      confirmation = verifyConfirmation({attempts, requiredReviewerIds:designated, requiredFindings:prepared.confirmation_request.finding_ids,
+        target:prepared.review_target, currentFindings:extractFindingState(renderAdjudicatedReport({date:'2000-01-01',verdict:synthesis.verdict,groups:adjudicated?.groups || []}), {repoRoot:prepared.review_target.scope.repo_root}).findings});
+    } catch (error) { return invalidEvidence('invalid_confirmation', error.message); }
+  }
+  const confirmationFloor = confirmation !== null && !confirmation.complete && synthesis.verdict === 'APPROVE';
+  const verdict = confidenceFloorApplied || deferredAcceptanceFloor || confirmationFloor
     ? 'CONCERN'
     : synthesis.verdict;
   const documentBlocked = routingPlan.artifact_phase === 'document'
@@ -935,6 +1024,8 @@ export function synthesizeReviewRound({
     ...synthesis,
     needs_expansion: false,
     verdict,
+    ...(prepared ? {decision_mode:prepared.decision_mode, round_id:prepared.round_id, review_target:prepared.review_target} : {}),
+    ...(confirmation ? {confirmation, confirmation_floor_applied:confirmationFloor} : {}),
     confidence_floor_applied: confidenceFloorApplied,
     deferred_acceptance_floor: deferredAcceptanceFloor,
     provider_families: providerFamilies,
@@ -960,11 +1051,38 @@ export function synthesizeReviewRound({
 }
 
 const invoked = process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
-if (invoked) {
+async function runSynthesisCli() {
   try {
-    const inputIndex = process.argv.indexOf('--input');
-    if (inputIndex < 0 || !process.argv[inputIndex + 1]) throw new Error('--input FILE is required');
-    const input = JSON.parse(readFileSync(resolve(process.argv[inputIndex + 1]), 'utf8'));
+    const selectors = process.argv.flatMap((value, index) => (
+      ['--input', '--prepared-input'].includes(value) ? [{ value, index }] : []
+    ));
+    if (selectors.length !== 1) {
+      throw new Error('exactly one --input FILE or --prepared-input FILE is required');
+    }
+    const [selector] = selectors;
+    const file = process.argv[selector.index + 1];
+    if (!file || file.startsWith('--')) throw new Error(`${selector.value} FILE is required`);
+    const inputPath = resolve(file);
+    const preparedInput = selector.value === '--prepared-input';
+    // The argv selector is the authority for the read boundary. Prepared input
+    // never enters the unrestricted legacy reader, including on read failure.
+    let input = preparedInput
+      ? JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+        readBoundedFile(dirname(inputPath), inputPath),
+      ))
+      : JSON.parse(readFileSync(inputPath, 'utf8'));
+    const hasDecisionMode = Boolean(input?.routing_plan)
+      && Object.hasOwn(input.routing_plan, 'decision_mode');
+    if (!preparedInput && hasDecisionMode) {
+      throw new Error('decision_mode requires --prepared-input FILE; --input is legacy-only');
+    }
+    if (preparedInput && !hasDecisionMode) {
+      throw new Error('--prepared-input requires a routing_plan.decision_mode carrier');
+    }
+    if (input?.routing_plan?.decision_mode && input.attempts?.some(attempt=>!Object.hasOwn(attempt,'output'))) {
+      const {loadReviewEvidenceInput} = await import('./review-evidence.mjs');
+      input = loadReviewEvidenceInput({repo:input.routing_plan.review_target.scope.repo_root,input});
+    }
     const attemptInput = Array.isArray(input) ? input : input?.attempts;
     if (!Array.isArray(attemptInput)) throw new TypeError('input must contain an attempt array');
     if (attemptInput.some((attempt) => !Object.hasOwn(attempt || {}, 'output'))) {
@@ -980,6 +1098,8 @@ if (invoked) {
         expansionWavesUsed: input.expansion_waves_used || 0,
         readinessMismatch: input.readiness_mismatch === true,
         deferredAcceptance: input.deferred_acceptance || null,
+        dispatch: input.dispatch ?? null,
+        adjudication: input.adjudication,
       })
       : synthesizeReviewAttempts(attempts, consensus);
     process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -988,3 +1108,8 @@ if (invoked) {
     process.exitCode = 2;
   }
 }
+
+// Do not top-level-await a dynamic import of review-evidence: that module
+// imports this synthesis authority, so waiting during evaluation deadlocks the
+// thin-input CLI. The async entry runs after this module can finish evaluating.
+if (invoked) void runSynthesisCli();
