@@ -357,6 +357,9 @@ test('soft-floor replacement rebinds confirmation onto the remaining selected ro
   });
   assert.equal(synthesis.status, 'needs_expansion');
   assert.ok(!synthesis.expanded_routing_plan.routes.some((route) => route.reviewer_id === 'codex-review'));
+  assert.equal(synthesis.next_assignment.reviewer_id, 'claude-opus');
+  assert.deepEqual(synthesis.next_assignment.confirmation_reviewer_ids, synthesis.expanded_routing_plan.confirmation_reviewer_ids);
+  assert.deepEqual(synthesis.expanded_routing_plan.confirmation_reviewer_ids, ['claude-opus']);
   assert.ok(synthesis.expanded_routing_plan.confirmation_reviewer_ids.every(
     (id) => synthesis.expanded_routing_plan.routes.some((route) => route.reviewer_id === id),
   ));

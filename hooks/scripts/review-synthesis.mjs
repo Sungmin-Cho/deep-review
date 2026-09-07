@@ -681,11 +681,17 @@ function rebindPreparedConfirmation(plan) {
   const selected = new Set((plan.routes || []).map((route) => route.reviewer_id));
   const current = plan.confirmation_reviewer_ids || [];
   if (current.length && current.every((id) => selected.has(id))) return plan;
-  const designated = (plan.routes || []).filter((route) => route.assignment_role === 'confirmation');
-  if (!designated.length) {
-    const fallback = (plan.routes || []).find((route) => route.assignment_role === 'standard')
-      ?? (plan.routes || [])[0];
-    if (fallback) designated.push(fallback);
+  const replacement = (plan.routes || []).at(-1);
+  const canCarryConfirmation = (route) => route && ['confirmation', 'standard'].includes(route.assignment_role);
+  const designated = [];
+  if (canCarryConfirmation(replacement)) designated.push(replacement);
+  else {
+    designated.push(...(plan.routes || []).filter((route) => route.assignment_role === 'confirmation'));
+    if (!designated.length) {
+      const fallback = (plan.routes || []).find((route) => route.assignment_role === 'standard')
+        ?? (plan.routes || [])[0];
+      if (fallback) designated.push(fallback);
+    }
   }
   const ids = designated.map((route) => route.reviewer_id).filter(Boolean);
   if (!ids.length) return plan;
@@ -954,7 +960,7 @@ export function synthesizeReviewRound({
         verdict: null,
         phase6_allowed: false,
         expansion_reasons: reasons,
-        next_assignment: replacement,
+        next_assignment: expandedRoutingPlan.routes.at(-1) ?? replacement,
         expanded_routing_plan: expandedRoutingPlan,
         exclusions: synthesis.exclusions || [],
         ...toleranceProvenance,
