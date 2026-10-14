@@ -4,6 +4,14 @@
 
 All notable changes to deep-review are documented here. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.2] — 2026-10-14
+
+### Fixed
+- Grok CLI `1.0.4` is removed from the allowlist (#75); the xAI service refuses it with `426 Upgrade Required`. It is now refused as `unsupported_grok_cli_version` before privacy or any provider launch.
+
+### Changed
+- The allowlist is `{1.0.13, 1.0.52}`, each an explicit version profile. Both require the advertised help flags and accept the hidden `--no-memory`, which the bridge still passes.
+
 ## [2.11.1] — 2026-10-14
 
 ### Fixed

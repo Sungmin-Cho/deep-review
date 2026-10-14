@@ -844,7 +844,7 @@ test('withGrokContainment releases the preflighted owner on privacy decline, on 
 const GROK_DETECTED = Object.freeze({
   grok_cli: true,
   grok_cli_path: '/tools/grok',
-  grok_version: '1.0.4',
+  grok_version: '1.0.13',
   grok_compatibility_verified: true,
 });
 

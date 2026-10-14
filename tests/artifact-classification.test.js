@@ -1670,7 +1670,7 @@ const executionPlanUrl = pathToFileURL(
 const CARRIER_GROK_HELP = [
   '--single', '--prompt-file', '--model', '--reasoning-effort',
   '--permission-mode', '--sandbox', '--cwd', '--output-format', '--max-turns',
-  '--session-id', '--no-memory', '--no-subagents',
+  '--session-id', '--no-subagents',
 ].join(' ');
 
 const carrierCoordinatorChildren = new Set();
@@ -1707,7 +1707,7 @@ function carrierGrokBin(prefix) {
   const detectionLog = path.join(dir, 'agy-calls.ndjson');
   fs.mkdirSync(bin, { recursive: true });
   installStub(bin, dir, 'grok', log, [
-    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
+    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.13 (5e9a58528b76) [stable]\\n');",
     `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${CARRIER_GROK_HELP}\n`)});`,
     'else process.exitCode = 2;',
   ].join('\n'));

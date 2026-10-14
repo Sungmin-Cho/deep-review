@@ -32,6 +32,10 @@ const REQUIRED_FLAGS = Object.freeze([
   '--single',
 ]);
 
+// `--no-memory` is hidden-accepted by every supported CLI and never advertised,
+// so REQUIRED_FLAGS (with it) is the cross-profile negative control.
+const FLAGS_1013 = REQUIRED_FLAGS.filter((flag) => flag !== '--no-memory');
+
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -93,12 +97,12 @@ function validCarrier() {
     executable_sha256: 'a'.repeat(64),
     executable_size: 12,
     prepared_spawn_chain,
-    version: '1.0.4',
-    version_build: 'd846eb93d94d',
+    version: '1.0.13',
+    version_build: '5e9a58528b76',
     version_banner_sha256: 'b'.repeat(64),
     help_sha256: 'c'.repeat(64),
     help_size: 1024,
-    required_help_flags: [...REQUIRED_FLAGS],
+    required_help_flags: [...FLAGS_1013],
   };
   return {
     ...evidence,
@@ -147,12 +151,12 @@ function validWindowsCarrier() {
     executable_sha256: 'a'.repeat(64),
     executable_size: 12,
     prepared_spawn_chain: chain,
-    version: '1.0.4',
-    version_build: 'd846eb93d94d',
+    version: '1.0.13',
+    version_build: '5e9a58528b76',
     version_banner_sha256: 'b'.repeat(64),
     help_sha256: 'c'.repeat(64),
     help_size: 1024,
-    required_help_flags: [...REQUIRED_FLAGS],
+    required_help_flags: [...FLAGS_1013],
   });
 }
 
@@ -178,7 +182,7 @@ async function sealedCarrier(overrides = {}) {
   return seal({ ...validCarrier(), ...overrides });
 }
 
-const FLAGS_1013 = REQUIRED_FLAGS.filter((flag) => flag !== '--no-memory');
+const FLAGS_1052 = FLAGS_1013;
 function helpText(flags) {
   return `Usage: grok [OPTIONS]\n\nOptions:\n${flags.map((flag) => `      ${flag} <VALUE>\n          doc`).join('\n')}\n`;
 }
@@ -236,7 +240,7 @@ test('a validly framed carrier still fails closed unless its compatibility evide
   for (const [name, mutation, pattern] of [
     ['unknown key', (carrier) => ({ ...carrier, covert_channel: true }), /unknown/u],
     ['missing version', (carrier) => ({ ...carrier, version: undefined }), /version/u],
-    ['malformed version', (carrier) => ({ ...carrier, version: '1.0.4-beta' }), /version/u],
+    ['malformed version', (carrier) => ({ ...carrier, version: '1.0.13-beta' }), /version/u],
     ['incomplete required flag set', (carrier) => ({
       ...carrier,
       required_help_flags: carrier.required_help_flags.slice(1),
@@ -322,22 +326,22 @@ test('a resealed carrier is still rejected when its fields contradict the sealed
 
 test('the sole Grok CLI stdout parser accepts only the admitted version banner and complete help flags', async () => {
   const { parseGrokCompatibilityStdout } = await runtimePromise;
-  const completeHelp = REQUIRED_FLAGS.join('\n');
+  const completeHelp = FLAGS_1013.join('\n');
 
   assert.deepEqual(
-    parseGrokCompatibilityStdout('grok 1.0.4 (d846eb93d94d) [stable]\n', 'version'),
-    { version: '1.0.4', version_build: 'd846eb93d94d' },
+    parseGrokCompatibilityStdout('grok 1.0.13 (5e9a58528b76) [stable]\n', 'version'),
+    { version: '1.0.13', version_build: '5e9a58528b76' },
   );
   assert.deepEqual(
-    parseGrokCompatibilityStdout(completeHelp, 'help', { version: '1.0.4' }),
-    { required_help_flags: [...REQUIRED_FLAGS] },
+    parseGrokCompatibilityStdout(completeHelp, 'help', { version: '1.0.13' }),
+    { required_help_flags: [...FLAGS_1013] },
   );
   for (const [name, text, kind, pattern] of [
-    ['unparseable version', 'grok 1.0.4\n', 'version', /version/u],
+    ['unparseable version', 'grok 1.0.13\n', 'version', /version/u],
     ['unsupported version', 'grok 1.0.5 (d846eb93d94d) [stable]', 'version', /unsupported/u],
-    ['missing required flag', REQUIRED_FLAGS.slice(1).join('\n'), 'help', /required/u],
+    ['missing required flag', FLAGS_1013.slice(1).join('\n'), 'help', /required/u],
   ]) {
-    const options = kind === 'help' ? { version: '1.0.4' } : undefined;
+    const options = kind === 'help' ? { version: '1.0.13' } : undefined;
     assert.throws(() => parseGrokCompatibilityStdout(text, kind, options), pattern, name);
   }
   let rejected;
@@ -346,8 +350,8 @@ test('the sole Grok CLI stdout parser accepts only the admitted version banner a
   } catch (error) {
     rejected = error;
   }
-  assert.match(rejected.message, /unsupported Grok CLI version: 1\.0\.99 \(supported: 1\.0\.4, 1\.0\.13\)/u);
-  assert.deepEqual(rejected.grokVersionRejection, { observed: '1.0.99', supported: ['1.0.4', '1.0.13'] });
+  assert.match(rejected.message, /unsupported Grok CLI version: 1\.0\.99 \(supported: 1\.0\.13, 1\.0\.52\)/u);
+  assert.deepEqual(rejected.grokVersionRejection, { observed: '1.0.99', supported: ['1.0.13', '1.0.52'] });
   let rejectedUnstable;
   try {
     parseGrokCompatibilityStdout('grok 1.0.99 (d846eb93d94d)\n', 'version');
@@ -357,29 +361,73 @@ test('the sole Grok CLI stdout parser accepts only the admitted version banner a
   assert.equal(rejectedUnstable.grokVersionRejection.observed, '1.0.99');
 });
 
-test('T-COMPAT-13: the allowlist is {1.0.4, 1.0.13} with version-scoped help profiles', async () => {
-  const { GROK_CLI_PROFILES, SUPPORTED_GROK_CLI_VERSIONS, grokCliProfile, supportedGrokCliVersions, parseGrokCompatibilityStdout } = await runtimePromise;
-  assert.deepEqual(supportedGrokCliVersions(), ['1.0.4', '1.0.13']);
-  assert.deepEqual([...SUPPORTED_GROK_CLI_VERSIONS], ['1.0.4', '1.0.13']);
-  assert.deepEqual([...GROK_CLI_PROFILES['1.0.4'].required_help_flags], [...REQUIRED_FLAGS]);
+test('T-COMPAT-13: the allowlist is {1.0.13, 1.0.52} with explicit version-scoped help profiles', async () => {
+  const { GROK_CLI_PROFILES, GROK_REQUIRED_HELP_FLAGS, SUPPORTED_GROK_CLI_VERSIONS, grokCliProfile, supportedGrokCliVersions, parseGrokCompatibilityStdout } = await runtimePromise;
+  assert.deepEqual(supportedGrokCliVersions(), ['1.0.13', '1.0.52']);
+  assert.deepEqual([...SUPPORTED_GROK_CLI_VERSIONS], ['1.0.13', '1.0.52']);
+  assert.deepEqual(Object.keys(GROK_CLI_PROFILES), ['1.0.13', '1.0.52']);
+  assert.deepEqual([...GROK_REQUIRED_HELP_FLAGS], FLAGS_1013);
   assert.deepEqual([...GROK_CLI_PROFILES['1.0.13'].required_help_flags], FLAGS_1013);
   assert.deepEqual([...GROK_CLI_PROFILES['1.0.13'].hidden_accepted_flags], ['--no-memory']);
+  assert.deepEqual([...GROK_CLI_PROFILES['1.0.52'].required_help_flags], FLAGS_1052);
+  assert.deepEqual([...GROK_CLI_PROFILES['1.0.52'].required_help_flags], [...GROK_CLI_PROFILES['1.0.13'].required_help_flags]);
+  assert.deepEqual([...GROK_CLI_PROFILES['1.0.52'].hidden_accepted_flags], ['--no-memory']);
+  assert.equal(GROK_CLI_PROFILES['1.0.52'].required_help_flags.includes('--no-memory'), false);
   assert.deepEqual(parseGrokCompatibilityStdout(helpText(FLAGS_1013), 'help', { version: '1.0.13' }).required_help_flags, FLAGS_1013);
-  assert.throws(() => parseGrokCompatibilityStdout(helpText(FLAGS_1013), 'help', { version: '1.0.4' }), /--no-memory/u);
-  assert.throws(() => parseGrokCompatibilityStdout(helpText(FLAGS_1013.filter((f) => f !== '--sandbox')), 'help', { version: '1.0.13' }), /--sandbox/u);
+  assert.deepEqual(parseGrokCompatibilityStdout(helpText(FLAGS_1052), 'help', { version: '1.0.52' }).required_help_flags, FLAGS_1052);
+  for (const version of ['1.0.13', '1.0.52']) {
+    // --no-memory in help is tolerated but never required; a missing advertised flag is refused.
+    assert.doesNotThrow(() => parseGrokCompatibilityStdout(helpText(REQUIRED_FLAGS), 'help', { version }));
+    assert.throws(() => parseGrokCompatibilityStdout(helpText(FLAGS_1013.filter((f) => f !== '--sandbox')), 'help', { version }), /--sandbox/u);
+  }
   assert.throws(() => parseGrokCompatibilityStdout(helpText(FLAGS_1013), 'help'), /version/u);
   assert.deepEqual(parseGrokCompatibilityStdout('grok 1.0.13 (5e9a58528b76) [stable]\n', 'version'), { version: '1.0.13', version_build: '5e9a58528b76' });
+  assert.deepEqual(parseGrokCompatibilityStdout('grok 1.0.52 (abc123def456) [stable]\n', 'version'), { version: '1.0.52', version_build: 'abc123def456' });
   assert.throws(() => parseGrokCompatibilityStdout('grok 1.0.99 (abc123) [stable]\n', 'version'), (error) => {
-    assert.deepEqual(error.grokVersionRejection, { observed: '1.0.99', supported: ['1.0.4', '1.0.13'] });
+    assert.deepEqual(error.grokVersionRejection, { observed: '1.0.99', supported: ['1.0.13', '1.0.52'] });
     return true;
   });
   assert.throws(() => grokCliProfile('1.0.99'), /unsupported/u);
 });
 
-test('T-COMPAT-14: a carrier whose required_help_flags is the other version profile is refused', async () => {
+test('T-COMPAT-15: retired 1.0.4 and unknown versions are rejected by banner, help, profile and carrier', async () => {
+  const { grokCliProfile, parseGrokCompatibilityStdout, validateGrokCompatibilityCarrier } = await runtimePromise;
+  const retiredBanner = 'grok 1.0.4 (d846eb93d94d) [stable]\n';
+  const expected = { observed: '1.0.4', supported: ['1.0.13', '1.0.52'] };
+  assert.throws(() => parseGrokCompatibilityStdout(retiredBanner, 'version'), (error) => {
+    assert.match(error.message, /unsupported Grok CLI version: 1\.0\.4 /u);
+    assert.deepEqual(error.grokVersionRejection, expected);
+    return true;
+  });
+  assert.throws(() => parseGrokCompatibilityStdout(helpText(REQUIRED_FLAGS), 'help', { version: '1.0.4' }), (error) => {
+    assert.deepEqual(error.grokVersionRejection, expected);
+    return true;
+  });
+  assert.throws(() => grokCliProfile('1.0.4'), /unsupported/u);
+  for (const unknown of ['1.0.14', '1.0.51', '1.0.53', '1.1.0', '2.0.0', '1.0.13-beta']) {
+    const banner = `grok ${unknown} (5e9a58528b76) [stable]\n`;
+    assert.throws(() => parseGrokCompatibilityStdout(banner, 'version'), /unsupported|malformed/u, unknown);
+    assert.throws(() => grokCliProfile(unknown), /unsupported/u, unknown);
+  }
+  // A carrier sealed as the retired CLI is refused even though its seals agree with its bytes.
+  for (const flags of [FLAGS_1013, REQUIRED_FLAGS]) {
+    const retired = await sealedCarrier({ version: '1.0.4', version_build: 'd846eb93d94d', required_help_flags: [...flags] });
+    assert.throws(() => validateGrokCompatibilityCarrier(retired), /unsupported Grok CLI version: 1\.0\.4/u);
+  }
+  const unknown = await sealedCarrier({ version: '1.0.53', required_help_flags: [...FLAGS_1013] });
+  assert.throws(() => validateGrokCompatibilityCarrier(unknown), /unsupported Grok CLI version: 1\.0\.53/u);
+});
+
+test('T-COMPAT-14: a carrier whose required_help_flags is not the exact advertised profile is refused', async () => {
   const { validateGrokCompatibilityCarrier } = await runtimePromise;
-  const crossed = await sealedCarrier({ version: '1.0.13', required_help_flags: [...REQUIRED_FLAGS] });
-  const ok = await sealedCarrier({ version: '1.0.13', required_help_flags: FLAGS_1013 });
-  assert.throws(() => validateGrokCompatibilityCarrier(crossed), /required_help_flags/u);
-  assert.equal(validateGrokCompatibilityCarrier(ok).version, '1.0.13');
+  for (const version of ['1.0.13', '1.0.52']) {
+    const crossed = await sealedCarrier({ version, required_help_flags: [...REQUIRED_FLAGS] });
+    const missing = await sealedCarrier({ version, required_help_flags: FLAGS_1013.filter((f) => f !== '--sandbox') });
+    const reordered = await sealedCarrier({ version, required_help_flags: [...FLAGS_1013].reverse() });
+    const ok = await sealedCarrier({ version, required_help_flags: FLAGS_1013 });
+    assert.throws(() => validateGrokCompatibilityCarrier(crossed), /required_help_flags/u, `${version} extra --no-memory`);
+    assert.throws(() => validateGrokCompatibilityCarrier(missing), /required_help_flags/u, `${version} missing flag`);
+    assert.throws(() => validateGrokCompatibilityCarrier(reordered), /required_help_flags/u, `${version} reordered`);
+    assert.equal(validateGrokCompatibilityCarrier(ok).version, version);
+  }
 });

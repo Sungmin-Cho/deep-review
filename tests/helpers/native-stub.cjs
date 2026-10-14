@@ -73,7 +73,7 @@ function stubNativeRoot({ platform = HOST_STUB_PLATFORM, arch = HOST_STUB_ARCH, 
   return { root, helperPath, helperSha256: digestOf(helperPath), skipReason: null };
 }
 
-function stubGrokLauncher({ version = '1.0.4', build = 'd846eb93d94d', helpFlags = null } = {}) {
+function stubGrokLauncher({ version = '1.0.13', build = '5e9a58528b76', helpFlags = null } = {}) {
   const built = compileGrokOnce();
   if (built.skipReason) return { skipReason: built.skipReason };
   const root = mkdtempSync(path.join(tmpdir(), 'deep-review-stub-grok-bin-'));

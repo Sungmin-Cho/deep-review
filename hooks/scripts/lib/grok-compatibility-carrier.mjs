@@ -2,19 +2,26 @@ import { createHash } from 'node:crypto';
 
 export const GROK_CARRIER_MAX_BYTES = 65536;
 
-const HELP_FLAGS_1_0_4 = Object.freeze([
-  '--cwd', '--max-turns', '--model', '--no-memory', '--no-subagents', '--output-format',
+// The flags every allowlisted CLI documents in `--help`. `--no-memory` is
+// deliberately absent: the supported CLIs accept it without listing it.
+const HELP_FLAGS_ADVERTISED = Object.freeze([
+  '--cwd', '--max-turns', '--model', '--no-subagents', '--output-format',
   '--permission-mode', '--prompt-file', '--reasoning-effort', '--sandbox', '--session-id', '--single',
 ]);
 
 // One profile per allowlisted CLI version: the flags that version documents in
 // `--help`, and the flags it accepts without documenting them (proven by the
-// CLI at launch, never by this parser). Keys are in ascending semver order and
-// that order is the public `grok_supported_versions` order.
+// CLI at launch, never by this parser). Versions are explicit entries, never a
+// range. 1.0.4 is retired: the xAI service refuses it (426 Upgrade Required).
+// Keys are in ascending semver order and that order is the public
+// `grok_supported_versions` order.
 export const GROK_CLI_PROFILES = Object.freeze({
-  '1.0.4': Object.freeze({ required_help_flags: HELP_FLAGS_1_0_4, hidden_accepted_flags: Object.freeze([]) }),
   '1.0.13': Object.freeze({
-    required_help_flags: Object.freeze(HELP_FLAGS_1_0_4.filter((flag) => flag !== '--no-memory')),
+    required_help_flags: HELP_FLAGS_ADVERTISED,
+    hidden_accepted_flags: Object.freeze(['--no-memory']),
+  }),
+  '1.0.52': Object.freeze({
+    required_help_flags: HELP_FLAGS_ADVERTISED,
     hidden_accepted_flags: Object.freeze(['--no-memory']),
   }),
 });
@@ -31,8 +38,8 @@ export function supportedGrokCliVersions() {
 }
 
 export const SUPPORTED_GROK_CLI_VERSIONS = new Set(supportedGrokCliVersions());
-// Legacy alias: the 1.0.4 profile list. Tests and older callers import it.
-export const GROK_REQUIRED_HELP_FLAGS = GROK_CLI_PROFILES['1.0.4'].required_help_flags;
+// Baseline alias: the oldest supported profile's list. Tests and older callers import it.
+export const GROK_REQUIRED_HELP_FLAGS = GROK_CLI_PROFILES['1.0.13'].required_help_flags;
 
 function isVersionString(value) { return typeof value === 'string' && /^\d+\.\d+\.\d+$/u.test(value); }
 
