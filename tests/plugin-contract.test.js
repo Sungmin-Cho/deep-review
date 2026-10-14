@@ -170,7 +170,7 @@ test('both workflows cover every release-relevant path class', () => {
 });
 
 const PUBLISHED_RELEASE_BASELINE = '2.6.0';
-const PLANNED_RELEASE = '2.11.1';
+const PLANNED_RELEASE = '2.11.2';
 
 function semverParts(version) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(version);
@@ -233,11 +233,16 @@ test('planned release is strictly greater than the published 2.6.0 baseline, abs
     (source) => releaseBlockAnyDate(source, PLANNED_RELEASE),
   );
   assert.deepEqual(
-    ['### Fixed', '### Changed', '### Notes']
+    ['### Fixed', '### Changed']
       .map((heading) => bulletCount(plannedReleaseBlocks[0], heading)),
-    ['### 수정', '### 변경', '### 참고']
+    ['### 수정', '### 변경']
       .map((heading) => bulletCount(plannedReleaseBlocks[1], heading)),
     'the bilingual planned-release sections must have parallel structure',
+  );
+  assert.deepEqual(
+    plannedReleaseBlocks.map((block) => [...block.matchAll(/^### (.+)$/gmu)].map((match) => match[1])),
+    [['Fixed', 'Changed'], ['수정', '변경']],
+    'the new release uses exactly the paired standard changelog categories',
   );
   const baselineBlocks = changelogSources.map(
     (source) => releaseBlockAnyDate(source, PUBLISHED_RELEASE_BASELINE),
@@ -272,13 +277,13 @@ test('planned release is strictly greater than the published 2.6.0 baseline, abs
   }
 });
 
-test('release version is exactly 2.11.1 on all three package surfaces', () => {
+test('release version is exactly 2.11.2 on all three package surfaces', () => {
   const versions = [
     JSON.parse(read('.claude-plugin/plugin.json')).version,
     JSON.parse(read('.codex-plugin/plugin.json')).version,
     JSON.parse(read('package.json')).version,
   ];
-  assert.deepEqual(versions, ['2.11.1', '2.11.1', '2.11.1']);
+  assert.deepEqual(versions, ['2.11.2', '2.11.2', '2.11.2']);
 });
 
 test('evergreen bilingual READMEs advertise both native hosts and portable runtime', () => {
@@ -529,7 +534,8 @@ test('T-DOC-1: reasons, enabled-platform rule, release channel and release proce
   assert.match(english, /tagged release commit/u);
   assert.match(korean, /태그된 릴리스 커밋/u);
   for (const source of [english, korean]) {
-    assert.match(source, /`1\.0\.4`[^\n]*`1\.0\.13`/u);
+    assert.match(source, /`1\.0\.13`[^\n]*`1\.0\.52`/u);
+    assert.doesNotMatch(source, /`1\.0\.4` (?:or|또는) `1\.0\.13`/u, 'the retired CLI is not allowlisted');
     assert.match(source, /platform_verification_pending/u);
     assert.match(source, /build:native/u);
   }

@@ -32,7 +32,7 @@ const carrierUrl = pathToFileURL(
 const GROK_HELP = [
   '--single', '--prompt-file', '--model', '--reasoning-effort',
   '--permission-mode', '--sandbox', '--cwd', '--output-format', '--max-turns',
-  '--session-id', '--no-memory', '--no-subagents',
+  '--session-id', '--no-subagents',
 ].join(' ');
 const temporaryRoots = new Set();
 
@@ -90,7 +90,7 @@ function grokProbeSource(log, marker = '') {
     "const fs = require('node:fs');",
     `const log = ${JSON.stringify(log)};`,
     "fs.appendFileSync(log, `${JSON.stringify(process.argv.slice(2))}\\n`);",
-    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.4 (d846eb93d94d) [stable]\\n');",
+    "if (process.argv[2] === '--version') process.stdout.write('grok 1.0.13 (5e9a58528b76) [stable]\\n');",
     `else if (process.argv[2] === '--help') process.stdout.write(${JSON.stringify(`${GROK_HELP}\n`)});`,
     "else process.exitCode = 2;",
     marker ? `// ${marker}` : '',
@@ -283,7 +283,7 @@ test('both compatibility probes use one identity-stable prepared-chain seal', as
         timedOut: false,
         captureOverflow: false,
         stdout: Buffer.from(args[0] === '--version'
-          ? 'grok 1.0.4 (d846eb93d94d) [stable]\n'
+          ? 'grok 1.0.13 (5e9a58528b76) [stable]\n'
           : `${GROK_HELP}\n`),
         stderr: Buffer.alloc(0),
       };
@@ -351,7 +351,7 @@ test('a prepared-chain mismatch result is incompatible even when the child repor
       preparedChainMismatch: true,
       preparedChainMismatchReason: 'prepared_chain_launcher_sha256_mismatch',
       stdout: Buffer.from(args[0] === '--version'
-        ? 'grok 1.0.4 (d846eb93d94d) [stable]\n'
+        ? 'grok 1.0.13 (5e9a58528b76) [stable]\n'
         : `${GROK_HELP}\n`),
       stderr: Buffer.alloc(0),
     }),
@@ -378,7 +378,7 @@ test('grok-cli advertises prevention only for a detected, compatibility-verified
   const admitted = grok({
     grok_cli: true,
     grok_cli_path: '/tools/grok',
-    grok_version: '1.0.4',
+    grok_version: '1.0.13',
     grok_compatibility_verified: true,
     grok_compatibility_evidence: evidence,
   });
@@ -457,22 +457,22 @@ test('Grok cache key uses detected version and changes on a version-only upgrade
   const fixture = makeGrokFixture('grok-cache-version');
   const first = capabilityCacheKeys({
     grok_cli_path: fixture.launcher,
-    grok_version: 'grok 1.0.4 (build) [stable]',
+    grok_version: 'grok 1.0.13 (build) [stable]',
   });
   const upgraded = capabilityCacheKeys({
     grok_cli_path: fixture.launcher,
-    grok_version: 'grok 1.0.5 (build) [stable]',
+    grok_version: 'grok 1.0.52 (build) [stable]',
   });
 
-  assert.equal(first.grok.version, '1.0.4');
-  assert.equal(upgraded.grok.version, '1.0.5');
+  assert.equal(first.grok.version, '1.0.13');
+  assert.equal(upgraded.grok.version, '1.0.52');
   assert.notDeepEqual(first, upgraded);
   assert.equal(capabilityCacheKeys({
     grok_cli_path: fixture.launcher,
-    grok_version: 'grok 1.0.4 (detected) [stable]',
+    grok_version: 'grok 1.0.13 (detected) [stable]',
   }, {
-    grok: { version: 'grok 1.0.6 (probe) [stable]' },
-  }).grok.version, '1.0.6');
+    grok: { version: 'grok 1.0.53 (probe) [stable]' },
+  }).grok.version, '1.0.53');
 });
 
 test('validProbeResults still rejects a persisted grok key', async () => {
@@ -481,14 +481,14 @@ test('validProbeResults still rejects a persisted grok key', async () => {
   const cache = join(repo, 'capabilities.json');
   const fixture = makeGrokFixture('grok-raw-probe-bin');
   const keys = {
-    grok: { path: fixture.launcher, mtime_ms: 10, version: '1.0.4' },
+    grok: { path: fixture.launcher, mtime_ms: 10, version: '1.0.13' },
   };
   writeFileSync(cache, `${JSON.stringify({
     protocol_version: '2.0',
     cache_contract_revision: CAPABILITY_CACHE_REVISION,
     invalidation_keys: keys,
     probe_results: {
-      grok: { ok: true, version: 'grok 1.0.4', help: GROK_HELP },
+      grok: { ok: true, version: 'grok 1.0.13', help: GROK_HELP },
     },
   })}\n`);
 

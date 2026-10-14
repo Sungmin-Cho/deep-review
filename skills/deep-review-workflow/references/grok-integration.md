@@ -71,15 +71,19 @@ the bytes on this machine are the bytes the release workflow built, smoked and
 committed. It is not a defence against a same-user process rewriting the
 plugin tree.
 
-The allowlist is Grok CLI `{1.0.4, 1.0.13}` with version-scoped help-flag
-profiles. Compatibility probes (`--version`, `--help`) remain uncontained by
-design (D20). A non-native launcher (`.cmd`/`.bat`, a PowerShell shim, or a
+The allowlist is Grok CLI `{1.0.13, 1.0.52}` with version-scoped help-flag
+profiles; each version is an explicit entry, never a semver range.
+Compatibility probes (`--version`, `--help`) remain uncontained by design
+(D20). A non-native launcher (`.cmd`/`.bat`, a PowerShell shim, or a
 `#!` script) is `incompatible_grok_cli` before privacy.
 
 | version | required `--help` flags | hidden accepted flags |
 |---|---|---|
-| `1.0.4` | `--cwd` `--max-turns` `--model` `--no-memory` `--no-subagents` `--output-format` `--permission-mode` `--prompt-file` `--reasoning-effort` `--sandbox` `--session-id` `--single` | none |
-| `1.0.13` | the same list minus `--no-memory` | `--no-memory` |
+| `1.0.13` | `--cwd` `--max-turns` `--model` `--no-subagents` `--output-format` `--permission-mode` `--prompt-file` `--reasoning-effort` `--sandbox` `--session-id` `--single` | `--no-memory` |
+| `1.0.52` | the same list | `--no-memory` |
+
+`--no-memory` is accepted by both CLIs but not listed in their `--help`, so it
+is never a required help flag; the bridge still passes it on every attempt.
 
 Show `reason`, `detail` and `remedy` from a refusal. Never paste `helper_stderr`
 into the published review.
@@ -89,7 +93,7 @@ into the published review.
 | `unsupported_grok_containment` | platform/arch is not inventoried, or inventoried but not in `GROK_ENABLED_PLATFORMS` | `platform_verification_pending` when inventoried-but-not-enabled | do not expect `--grok` on this host until its real-turn gate passes |
 | `missing_grok_containment_helper` | inventoried platform; helper is not a regular, non-symlink, executable file | | install from a tagged release commit; compiling locally does not enable `--grok` |
 | `grok_containment_helper_failed` | helper is present but cannot establish containment, fails integrity, or fails the preflight handshake | closed vocabulary: `integrity_mismatch`, `integrity_sums_missing`, `integrity_sums_malformed`, `integrity_sums_symlink`, `integrity_not_listed`, `integrity_outside_root`, `integrity_symlink_component`, `integrity_not_release`, `spawn_error`, `start_deadline`, `handshake_lost`, `helper_exit_<n>`, `helper_signal_<name>`, `record_digest_mismatch`, `record_directory_untrusted` | inspect `detail` and sanitised `helper_stderr`; `build:native` is not a remedy |
-| `unsupported_grok_cli_version` | CLI version is outside `{1.0.4, 1.0.13}` | | install an allowlisted Grok CLI |
+| `unsupported_grok_cli_version` | CLI version is outside `{1.0.13, 1.0.52}`, including the retired `1.0.4` | | install Grok CLI `1.0.52` (recommended) or `1.0.13`; see the operator note below |
 | `incompatible_grok_cli` | CLI missing, banner malformed, required help flags absent for the detected version, or the launcher is not a native executable | | install a compatible Grok CLI whose launcher is a native executable, not a `.cmd`/`.bat`, PowerShell shim, or `#!` script |
 
 Restricted user namespaces (Ubuntu 24.04 AppArmor `userns` restriction, or a
@@ -124,8 +128,17 @@ a model only after probing it through this bridge's own argv. A router that has
 moved to a newer id is not, by itself, authorization here.
 
 **Operator note:** the xAI service refuses Grok CLI `1.0.4` with `426 Upgrade
-Required`, although `1.0.4` remains in the compatibility allowlist. Use
-`1.0.13`.
+Required`, so `1.0.4` is no longer in the allowlist and is refused as
+`unsupported_grok_cli_version` before the privacy gate or any provider launch.
+Install `1.0.52` (recommended) or `1.0.13` with the official xAI installer
+published at `https://x.ai/cli` for the host OS, pinning the version
+explicitly and inspecting the installer before running it. Any other version,
+including a newer one, stays refused until it is probed and added as its own
+profile.
+
+Linux CI starts the pinned CLI through the native containment helper, which
+proves helper startup and teardown. CI has no Grok credentials, so it does not
+prove an authenticated Linux model response.
 
 ## Privacy gate
 

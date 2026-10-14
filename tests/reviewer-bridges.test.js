@@ -2153,7 +2153,7 @@ test('the Grok bridge child-process entry consumes the transported token instead
   const refused = JSON.parse(withToken.stdout.trim().split('\n').pop());
   // Past the admission gate and into evidence consumption — the sealed carrier
   // is on the result — then refused by the NEXT gate, contributing no vote.
-  assert.equal(refused.compatibility.version, '1.0.4');
+  assert.equal(refused.compatibility.version, '1.0.13');
   assert.equal(refused.attempted, false);
   assert.equal(refused.contributes_vote, false);
 

@@ -54,7 +54,7 @@ function grokCapabilities() {
       grok_cli: true,
       grok_cli_path: '/usr/local/bin/grok',
       grok_compatibility_verified: true,
-      grok_version: 'grok 1.0.4 (d846eb93d94d) [stable]',
+      grok_version: 'grok 1.0.13 (5e9a58528b76) [stable]',
     },
     // This file's subject is Grok model/effort authorization, not containment.
     // `containment` defaults to the live host, so without an explicit pin the

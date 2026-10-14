@@ -67,6 +67,8 @@ int main(int argc, char **argv) {
   if (command_index < 0) { char buffer[256]; while (fgets(buffer, sizeof buffer, stdin)) {} }
   else {
     const char *output = env_or("STUB_PROVIDER_OUTPUT", "");
+    if (command_index + 1 < argc && strcmp(argv[command_index + 1], "--help") == 0)
+      output = env_or("STUB_PROVIDER_HELP_OUTPUT", output);
     if (*output) { fputs(output, stderr); fputs("\n", stderr); fflush(stderr); }
     if (strcmp(fault, "overflow") == 0) {
       char block[4096];

@@ -412,13 +412,13 @@ function smokeGrokCarrier(runtime, binary) {
     executable_sha256: 'a'.repeat(64),
     executable_size: 12,
     prepared_spawn_chain: preparedSpawnChain,
-    version: '1.0.4',
-    version_build: 'd846eb93d94d',
+    version: '1.0.13',
+    version_build: '5e9a58528b76',
     version_banner_sha256: 'b'.repeat(64),
     help_sha256: 'c'.repeat(64),
     help_size: 1024,
     required_help_flags: [
-      '--cwd', '--max-turns', '--model', '--no-memory', '--no-subagents',
+      '--cwd', '--max-turns', '--model', '--no-subagents',
       '--output-format', '--permission-mode', '--prompt-file', '--reasoning-effort',
       '--sandbox', '--session-id', '--single',
     ],
@@ -1434,7 +1434,7 @@ test('every Grok argv carries one adjacent model pair and one non-null effort', 
     detected: {
       grok_cli: true,
       grok_cli_path: fakeBinary,
-      grok_version: '1.0.4',
+      grok_version: '1.0.13',
       grok_compatibility_verified: true,
       grok_compatibility_evidence: carrier,
     },
@@ -1492,12 +1492,15 @@ test('an incompatible Grok version or help yields no candidate and no bridge spa
   const requiredHelp = [
     '--single', '--prompt-file', '--model', '--reasoning-effort', '--permission-mode',
     '--sandbox', '--cwd', '--output-format', '--max-turns', '--session-id',
-    '--no-memory', '--no-subagents',
+    '--no-subagents',
   ].join(' ');
 
-  for (const [label, version, help] of [
-    ['version', 'grok 1.0.5 (future) [stable]\n', `${requiredHelp}\n`],
-    ['help', 'grok 1.0.4 (d846eb93d94d) [stable]\n', '--single --model\n'],
+  for (const [label, version, help, reason] of [
+    ['version', 'grok 1.0.5 (future) [stable]\n', `${requiredHelp}\n`, 'incompatible_grok_cli'],
+    ['retired version', 'grok 1.0.4 (d846eb93d94d) [stable]\n', `${requiredHelp} --no-memory\n`, 'unsupported_grok_cli_version'],
+    ['unknown version', 'grok 1.0.53 (0920c8169e27) [stable]\n', `${requiredHelp}\n`, 'unsupported_grok_cli_version'],
+    ['help', 'grok 1.0.13 (5e9a58528b76) [stable]\n', '--single --model\n', 'incompatible_grok_cli'],
+    ['help 1.0.52', 'grok 1.0.52 (0920c8169e27) [stable]\n', '--single --model\n', 'incompatible_grok_cli'],
   ]) {
     const probes = [];
     const detected = await runtime.detect.detectEnvironment({
@@ -1526,7 +1529,7 @@ test('an incompatible Grok version or help yields no candidate and no bridge spa
     let bridgeSpawns = 0;
     if (grokCapability.available === true) bridgeSpawns += 1;
     assert.deepEqual(probes, [['--version'], ['--help']], label);
-    assert.equal(detected.grok_unavailable_reason, 'incompatible_grok_cli', label);
+    assert.equal(detected.grok_unavailable_reason, reason, label);
     assert.equal(grokCapability.available, false, label);
     assert.equal(grokCapability.read_only_enforcement, 'none', label);
     assert.equal(bridgeSpawns, 0, label);
@@ -1817,7 +1820,7 @@ test('T-PACK-1 provider stub emits the ran proof required by the packed helper s
   assert.equal(launch.stdout, `${packedProviderRanProof}\n`);
 });
 
-test('T-PACK-2: release automation builds, packs, verifies and integrity-binds both native helpers', () => {
+test('T-PACK-2: release automation builds, packs, verifies and integrity-binds both native helpers', async () => {
   const manifest = JSON.parse(readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'));
   assert.equal(manifest.scripts?.['build:native'], 'node scripts/build-native.mjs');
   const buildNativeSource = readFileSync(path.join(sourceRoot, 'scripts', 'build-native.mjs'), 'utf8');
@@ -1914,6 +1917,13 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
 
   const release = readFileSync(path.join(sourceRoot, '.github', 'workflows', 'release.yml'), 'utf8');
   assert.match(release, /^on:\s*\n\s*workflow_dispatch:/mu);
+  const releaseCliVersion = /^  GROK_CLI_VERSION: '([^']+)'$/mu.exec(release)?.[1];
+  assert.ok(releaseCliVersion, 'the release must explicitly pin its CLI version');
+  const { supportedGrokCliVersions } = await import(pathToFileURL(path.join(
+    sourceRoot, 'hooks', 'scripts', 'lib', 'grok-compatibility-carrier.mjs',
+  )).href);
+  assert.ok(supportedGrokCliVersions().includes(releaseCliVersion),
+    'the release CLI pin must have an explicit compatibility profile');
   assert.match(release, /GROK_CLI_INSTALLER_SHA256_LINUX: '[a-f0-9]{64}'/u, 'linux installer pin is an observed digest, never empty after bootstrap');
   assert.match(release, /GROK_CLI_INSTALLER_SHA256_WINDOWS: '[a-f0-9]{64}'/u, 'windows installer pin is an observed digest, never empty after bootstrap');
   assert.match(release, /GROK_CLI_LAUNCHER_SHA256_LINUX: '[a-f0-9]{64}'/u, 'linux launcher pin is an observed digest, never empty after bootstrap');

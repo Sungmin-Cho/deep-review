@@ -59,7 +59,6 @@ const REQUIRED_HELP_FLAGS = Object.freeze([
   '--cwd',
   '--max-turns',
   '--model',
-  '--no-memory',
   '--no-subagents',
   '--output-format',
   '--permission-mode',
@@ -135,7 +134,7 @@ function member(path) {
   };
 }
 
-function sealedCarrier(launcherPath) {
+function sealedCarrier(launcherPath, overrides = {}) {
   const chainBody = {
     schema_version: '1.0',
     prepared_kind: 'direct',
@@ -160,12 +159,13 @@ function sealedCarrier(launcherPath) {
     executable_sha256: 'a'.repeat(64),
     executable_size: 12,
     prepared_spawn_chain: preparedSpawnChain,
-    version: '1.0.4',
-    version_build: 'd846eb93d94d',
+    version: '1.0.13',
+    version_build: '5e9a58528b76',
     version_banner_sha256: 'b'.repeat(64),
     help_sha256: 'c'.repeat(64),
     help_size: 1024,
     required_help_flags: [...REQUIRED_HELP_FLAGS],
+    ...overrides,
   };
   return {
     ...evidence,
@@ -740,6 +740,15 @@ test('missing, malformed, or seal-mismatched compatibility evidence fails before
     ['malformed', { schema_version: '1.0' }],
     ['seal-mismatched', 'seal-mismatch'],
     ['downgraded version', 'version-downgrade'],
+    ['resealed retired 1.0.4', { reseal: { version: '1.0.4', version_build: 'd846eb93d94d' } }],
+    ['resealed retired 1.0.4 with hidden flag', { reseal: {
+      version: '1.0.4', version_build: 'd846eb93d94d', required_help_flags: ['--no-memory', ...REQUIRED_HELP_FLAGS],
+    } }],
+    ['resealed unknown 1.0.53', { reseal: { version: '1.0.53', version_build: '0920c8169e27' } }],
+    ['resealed 1.0.52 missing advertised flag', { reseal: {
+      version: '1.0.52', version_build: '0920c8169e27', required_help_flags: REQUIRED_HELP_FLAGS.slice(1),
+    } }],
+    ['resealed 1.0.13 requiring the hidden flag', { reseal: { required_help_flags: ['--no-memory', ...REQUIRED_HELP_FLAGS] } }],
   ];
   for (const [label, mutation] of cases) {
     const fixture = harness(`grok-carrier-${label.replace(/\s+/gu, '-')}`);
@@ -754,6 +763,8 @@ test('missing, malformed, or seal-mismatched compatibility evidence fails before
         ...sealedCarrier(fixture.binary),
         version: '1.0.3',
       };
+    } else if (mutation?.reseal) {
+      plan.grokCompatibilityEvidence = sealedCarrier(fixture.binary, mutation.reseal);
     } else {
       plan.grokCompatibilityEvidence = mutation;
     }
@@ -775,6 +786,19 @@ test('missing, malformed, or seal-mismatched compatibility evidence fails before
   }
 });
 
+test('the bridge admits sealed 1.0.52 evidence and still passes the hidden --no-memory flag (#75)', async () => {
+  const fixture = harness('grok-carrier-1052');
+  fixture.seams.executionPlan = {
+    ...fixture.seams.executionPlan,
+    grokCompatibilityEvidence: sealedCarrier(fixture.binary, { version: '1.0.52', version_build: '0920c8169e27' }),
+  };
+  const result = await runGrokReviewer(fixture.seams);
+  assert.equal(result.status, 'success');
+  assert.equal(result.compatibility.version, '1.0.52');
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls[0].args.filter((token) => token === '--no-memory').length, 1);
+});
+
 test('the bridge passes the sealed prepared chain into every runner call and re-probes nothing', async () => {
   const fixture = harness('grok-chain-consumer');
   const result = await runGrokReviewer(fixture.seams);
@@ -784,8 +808,8 @@ test('the bridge passes the sealed prepared chain into every runner call and re-
   assert.deepEqual(fixture.calls[0].options.expectedPreparedSpawnChain, expected);
   assert.equal(fixture.calls[0].command, fixture.binary, 'the sealed launcher is the spawn target');
   assert.deepEqual(result.compatibility, {
-    version: '1.0.4',
-    version_build: 'd846eb93d94d',
+    version: '1.0.13',
+    version_build: '5e9a58528b76',
     evidence_sha256: fixture.seams.executionPlan.grokCompatibilityEvidence.evidence_sha256,
     chain_sha256: expected.chain_sha256,
   });
