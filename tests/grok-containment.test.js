@@ -33,6 +33,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { GROK_AUTHORIZED_MODEL } from '../hooks/scripts/lib/grok-authorization.mjs';
+import { MODEL_TIERS } from '../hooks/scripts/lib/target-taxonomy.mjs';
 
 import {
   GROK_CONTAINMENT_HELPER_FAILED,
@@ -1409,7 +1411,8 @@ test('the four carrier files keep their non-Grok behaviour byte-identical to the
   }))}`;
   assert.equal(policyDelta[0].live, changedBaseline);
 
-  // The one row this slice owns, diffed exactly and on *both* polarities with
+  // The one row this slice owns, including the deliberate #74 alias delta,
+  // diffed exactly and on *both* polarities with
   // pinned platform/arch, so neither assertion can silently disappear on a host
   // that happens to be the other polarity. On an uncontainable containment the
   // row may differ in `available` and `unavailable_reason`; on a containable one
@@ -1422,15 +1425,22 @@ test('the four carrier files keep their non-Grok behaviour byte-identical to the
   };
   for (const input of capabilityMatrix()) {
     const before = grokRow(baselineModules, input);
+    assert.deepEqual(before.model_selection.aliases, Array(4).fill('grok-4.6'),
+      'the pinned baseline has four grok-4.6 aliases');
 
     const uncontainable = grokRow(liveModules, { ...input, containment: UNCONTAINABLE });
-    assert.deepEqual(strip(uncontainable), strip(before),
+    assert.deepEqual(uncontainable.model_selection.aliases, Array(MODEL_TIERS.length).fill(GROK_AUTHORIZED_MODEL));
+    const { model_selection: _beforeModel, ...beforeWithoutAliases } = before;
+    const { model_selection: _uncontainableModel, ...uncontainableWithoutAliases } = uncontainable;
+    assert.deepEqual(strip(uncontainableWithoutAliases), strip(beforeWithoutAliases),
       'on an uncontainable host only available and unavailable_reason may change on grok-cli');
     assert.equal(uncontainable.available, false);
     assert.equal(uncontainable.unavailable_reason, UNSUPPORTED_GROK_CONTAINMENT);
 
     const containable = grokRow(liveModules, { ...input, containment: CONTAINABLE });
-    assert.deepEqual(containable, before,
+    assert.deepEqual(containable.model_selection.aliases, Array(MODEL_TIERS.length).fill(GROK_AUTHORIZED_MODEL));
+    const { model_selection: _containableModel, ...containableWithoutAliases } = containable;
+    assert.deepEqual(containableWithoutAliases, beforeWithoutAliases,
       'on a containable host the grok-cli row is unchanged from the pinned baseline');
   }
 });

@@ -13,7 +13,7 @@ deep-review의 모든 주요 변경 사항을 이 파일에 기록합니다. [Ke
 - 명시적 모델 override, policy 또는 `grok-4.6`을 담은 저장된 plan/loop 상태는 `ERROR_UNSUPPORTED_MODEL`로 거부됩니다. 다시 계획하세요. Registry alias는 `GROK_AUTHORIZED_MODEL`에서 파생됩니다.
 
 ### 참고
-- effort는 `low|medium|high`로 유지합니다. 자동 `xhigh`는 `high`로 매핑되며 이를 선언하면 매핑이 달라집니다.
+- CLI는 `grok-4.7`의 `xhigh`를 받지만 deep-review는 이를 미선언 상태로 두어 자동 `xhigh`/`max`를 `high`로 매핑합니다. CLI는 `max`를 거부합니다.
 - deep-review가 승인한 Grok 모델은 이 bridge가 probe하고 승인할 때까지 deep-model-router보다 의도적으로 뒤처질 수 있습니다.
 
 ## [2.11.0] — 2026-09-06

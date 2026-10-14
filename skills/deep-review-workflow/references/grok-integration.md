@@ -114,9 +114,10 @@ in `{plugin_root}/hooks/scripts/lib/grok-authorization.mjs`, currently
 Declared efforts are `low`, `medium`, and `high`. Automatic `max` and `xhigh`
 map to `high`; automatic values below `low` clamp to `low`. An operator-specified
 effort outside those three is `ERROR_UNSUPPORTED_EFFORT`. The CLI accepts
-`xhigh` for this model, but it stays undeclared because declaring it changes the
-automatic mapping contract and the bridge's 900-second timeout is short for
-`xhigh` review turns. The CLI rejects `max` outright.
+`xhigh` for this model and round-trips it through the bridge, but it stays
+undeclared because declaring it changes the automatic mapping contract.
+`xhigh` review turns have also been observed running ten minutes or longer,
+close to the bridge's 900-second timeout. The CLI rejects `max` outright.
 
 Deep-review can differ from deep-model-router's xAI model because it authorizes
 a model only after probing it through this bridge's own argv. A router that has

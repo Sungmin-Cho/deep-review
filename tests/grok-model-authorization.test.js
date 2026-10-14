@@ -201,7 +201,7 @@ test('the model rule is exact: every near-miss spelling is rejected from every s
   }
 });
 
-test('grok capability aliases and shipped integration docs share the authorized model', async () => {
+test('grok capability registry aliases all use the authorized model', async () => {
   const [{ buildCapabilities }, { MODEL_TIERS }, { GROK_AUTHORIZED_MODEL }, { readFileSync }, { execFileSync }] = await Promise.all([
     import(registryUrl), import(taxonomyUrl),
     import(pathToFileURL(path.join(root, 'hooks/scripts/lib/grok-authorization.mjs')).href),
@@ -213,18 +213,33 @@ test('grok capability aliases and shipped integration docs share the authorized 
   }).find((item) => item.adapter_id === 'grok-cli');
   assert.equal(capability.model_selection.aliases.length, MODEL_TIERS.length);
   assert.ok(capability.model_selection.aliases.every((model) => model === GROK_AUTHORIZED_MODEL));
+});
+
+test('the shipped Grok integration doc names the authorized model as a whole token', async () => {
+  const { GROK_AUTHORIZED_MODEL } = await import(pathToFileURL(path.join(root, 'hooks/scripts/lib/grok-authorization.mjs')).href);
+  const { readFileSync } = require('node:fs');
   const doc = readFileSync(path.join(root, 'skills/deep-review-workflow/references/grok-integration.md'), 'utf8');
-  assert.ok(doc.includes(GROK_AUTHORIZED_MODEL));
+  const escaped = GROK_AUTHORIZED_MODEL.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  assert.match(doc, new RegExp(`${escaped}(?![\\w.])`, 'u'));
+});
+
+test('tracked Grok integration sources contain no retired model ids', async () => {
+  const { readFileSync } = require('node:fs');
+  const { execFileSync } = require('node:child_process');
   const tracked = execFileSync('git', ['ls-files', 'hooks', 'skills', 'commands', 'agents'], { cwd: root, encoding: 'utf8' }).trim().split(/\r?\n/u).filter(Boolean);
+  for (const required of ['hooks/scripts/lib/grok-authorization.mjs', 'hooks/scripts/lib/capability-registry.mjs', 'skills/deep-review-workflow/references/grok-integration.md']) {
+    assert.ok(tracked.includes(required), `tracked source list includes ${required}`);
+  }
+  const hits = [];
   for (const relative of tracked) {
-    let source;
-    try { source = readFileSync(path.join(root, relative), 'utf8'); } catch { continue; }
-    if (source.includes('\uFFFD')) continue;
+    const bytes = readFileSync(path.join(root, relative));
+    if (bytes.includes(0)) continue;
+    const lines = bytes.toString('utf8').split(/\r?\n/u);
     for (const retired of ['grok-4.6', 'grok-4.5']) {
-      const lines = source.split(/\r?\n/u);
-      lines.forEach((line, index) => assert.ok(!line.includes(retired), `${relative}:${index + 1} contains ${retired}`));
+      lines.forEach((line, index) => { if (line.includes(retired)) hits.push(`${relative}:${index + 1} ${retired}`); });
     }
   }
+  assert.deepEqual(hits, []);
 });
 
 test('the authorized model is accepted from every source, so the rule is not a blanket refusal', async () => {

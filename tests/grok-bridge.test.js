@@ -652,6 +652,13 @@ test('an unsupported-model stderr terminates as failed with no second spawn', as
   assert.equal(result.error_code, 'ERROR_UNSUPPORTED_MODEL');
 });
 
+test('a persisted 2.11.0 route naming grok-4.6 is refused before provider spawn', async () => {
+  const fixture = harness('grok-persisted-retired-model');
+  fixture.seams.executionPlan = plannedRoute(fixture.binary, { resolved: { model: 'grok-4.6', effort: 'high' } });
+  await assert.rejects(() => runGrokReviewer(fixture.seams), /ERROR_UNSUPPORTED_MODEL/u);
+  assert.equal(fixture.calls.length, 0);
+});
+
 test('a malformed report normalizes to null and downgrades success to failed', async () => {
   const fixture = harness('grok-malformed-report', { behavior: 'malformed' });
   const result = await runGrokReviewer(fixture.seams);
@@ -1244,6 +1251,9 @@ test('T-OWN-13: terminalStatus reads the auth and unsupported-model patterns fro
   const model = harness('grok-merged-model', { behavior: 'failure' });
   model.seams.processRunner = async () => contained({ code: 1, timedOut: false, stdout: Buffer.from('error: unsupported model grok-4.7\n'), stderr: Buffer.alloc(0), provider_channel: 'merged-owner-stderr' });
   assert.equal((await runGrokReviewer(model.seams)).error_code, 'ERROR_UNSUPPORTED_MODEL');
+  const retired = harness('grok-merged-retired-model', { behavior: 'failure' });
+  retired.seams.processRunner = async () => contained({ code: 1, timedOut: false, stdout: Buffer.from(`Couldn't set model 'grok-4.6': Invalid params: "unknown model id". Run 'grok models' to see available models.`), stderr: Buffer.alloc(0), provider_channel: 'merged-owner-stderr' });
+  assert.equal((await runGrokReviewer(retired.seams)).error_code, 'ERROR_UNSUPPORTED_MODEL');
 });
 
 test('T-OWN-16: the bridge CLI serialises a containment admission refusal as stdout JSON with exit 3 and leaves the record', async () => {
