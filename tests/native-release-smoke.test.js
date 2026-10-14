@@ -1893,10 +1893,25 @@ test('T-PACK-2: release automation builds, packs, verifies and integrity-binds b
   assert.match(linuxSmoke, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\/packed-tree\/package/u);
   assert.match(linuxSmoke, /--test-name-pattern=['"]T-PACK-1['"]/u);
   assert.doesNotMatch(linuxSmoke, /github\.workspace|GITHUB_WORKSPACE/iu);
+  const coordinatorAdmission = workflowStep(releaseBundle, 'Require packed-tree Grok 1.0.52 coordinator admission');
+  assert.match(coordinatorAdmission, /DEEP_REVIEW_PACKED_ROOT:\s*\$\{\{ runner\.temp \}\}\/packed-tree\/package/u);
+  assert.match(coordinatorAdmission, /DEEP_REVIEW_REQUIRE_PACKED_COORDINATOR:\s*'1'/u);
+  assert.match(coordinatorAdmission, /--test-name-pattern='T-COMPAT-52-PACKED'/u);
+  assert.match(coordinatorAdmission, /set -euo pipefail/u);
+  assert.match(coordinatorAdmission, /--test-reporter=tap/u);
+  assert.ok(coordinatorAdmission.includes("grep -Eq '^ok [0-9]+ - T-COMPAT-52-PACKED:'"),
+    'a passing file wrapper cannot replace the required named test');
+  assert.match(coordinatorAdmission, /grep -qx '# pass 1'/u, 'the required gate cannot pass with zero or skipped tests');
+  assert.match(coordinatorAdmission, /\$DEEP_REVIEW_PACKED_ROOT\/tests\/detect-environment\.test\.js/u);
+  assert.doesNotMatch(coordinatorAdmission, /github\.workspace|GITHUB_WORKSPACE/iu);
+  const coordinatorTestSource = readFileSync(path.join(sourceRoot, 'tests', 'detect-environment.test.js'), 'utf8');
+  assert.equal([...coordinatorTestSource.matchAll(/^test\('T-COMPAT-52-PACKED:/gmu)].length, 1,
+    'the required coordinator test must exist exactly once');
   assertOrdered(releaseBundle, 'name: Integrity-bind native helpers', 'name: Pack into an isolated release tree', 'integrity before pack');
   assertOrdered(releaseBundle, 'name: Pack into an isolated release tree', 'name: Verify packed native inventory', 'pack before packed-tree verification');
   assertOrdered(releaseBundle, 'name: Verify packed native inventory', 'name: Run packed-tree T-PACK-3 on Linux x86_64', 'packed-tree verification before Linux T-PACK-3');
   assertOrdered(releaseBundle, 'name: Run packed-tree T-PACK-3 on Linux x86_64', 'name: Run packed-tree T-PACK-1 on Linux x86_64', 'Linux T-PACK-3 before T-PACK-1');
+  assertOrdered(releaseBundle, 'name: Run packed-tree T-PACK-1 on Linux x86_64', 'name: Require packed-tree Grok 1.0.52 coordinator admission', 'packed native verification before required coordinator admission');
 
   const windowsSmoke = workflowJob(workflow, 'release-bundle-windows-smoke');
   assert.match(windowsSmoke, /runs-on:\s*windows-latest/u);

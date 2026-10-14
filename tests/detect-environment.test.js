@@ -799,7 +799,16 @@ test('the shipped coordinator executable drains one frame from real process A an
   assert.equal(await coordinator.exited, 0);
 });
 
-test('the shipped coordinator accepts a 1.0.52 CLI whose help hides --no-memory (#75)', async (t) => {
+test('T-COMPAT-52-PACKED: the shipped coordinator accepts a 1.0.52 CLI whose help hides --no-memory (#75)', async (t) => {
+  const required = process.env.DEEP_REVIEW_REQUIRE_PACKED_COORDINATOR === '1';
+  if (required) {
+    assert.equal(process.platform, 'linux', 'the required packed coordinator gate needs Linux');
+    assert.equal(process.arch, 'x64', 'the required packed coordinator gate needs x64');
+    assert.ok(process.env.DEEP_REVIEW_PACKED_ROOT, 'the required gate must declare its packed root');
+    const { realpathSync } = await import('node:fs');
+    assert.equal(realpathSync(join(__dirname, '..')), realpathSync(process.env.DEEP_REVIEW_PACKED_ROOT),
+      'the required gate must execute the installed packed test, not the source checkout');
+  }
   if (process.platform === 'win32') {
     t.skip('POSIX private-socket endpoints');
     return;
@@ -810,27 +819,32 @@ test('the shipped coordinator accepts a 1.0.52 CLI whose help hides --no-memory 
   const { defaultCoordinatorHelperExists, requestCoordinatorShutdown } = await import(coordinatorLibUrl);
   const gate = resolveGrokContainmentPlatform();
   if (!gate.supported || !defaultCoordinatorHelperExists(gate.helper_path)) {
+    assert.equal(required, false, 'the required packed coordinator helper must be present and enabled');
     t.skip('shipped coordinator CLI success path requires an inventoried executable helper');
     return;
   }
   const grok = stubGrokLauncher({ version: '1.0.52', build: '0920c8169e27' });
   if (grok.skipReason) {
+    assert.equal(required, false, `the required gate must compile its native CLI fixture: ${grok.skipReason}`);
     t.skip(grok.skipReason);
     return;
   }
   const repo = createGitFixture('coordinator 1.0.52 repo');
   const env = { ...pathEnvironment(grok.bin), ...grok.env };
   const coordinator = await startCoordinator(repo, env, 'dry-run');
-  assert.equal(coordinator.environment.grok_compatibility_verified, true);
-  assert.equal(coordinator.environment.grok_version, '1.0.52');
-  assert.equal(coordinator.environment.grok_compatibility_evidence.version, '1.0.52');
-  assert.equal(coordinator.environment.grok_compatibility_evidence.version_build, '0920c8169e27');
-  assert.equal(coordinator.environment.grok_compatibility_evidence.required_help_flags.includes('--no-memory'), false);
-  assert.deepEqual(grokChildren(grok.log), [['--version'], ['--help']]);
-  await requestCoordinatorShutdown({
-    controlPath: coordinator.descriptor.control_path,
-    coordinatorId: coordinator.descriptor.coordinator_id,
-  });
+  try {
+    assert.equal(coordinator.environment.grok_compatibility_verified, true);
+    assert.equal(coordinator.environment.grok_version, '1.0.52');
+    assert.equal(coordinator.environment.grok_compatibility_evidence.version, '1.0.52');
+    assert.equal(coordinator.environment.grok_compatibility_evidence.version_build, '0920c8169e27');
+    assert.equal(coordinator.environment.grok_compatibility_evidence.required_help_flags.includes('--no-memory'), false);
+    assert.deepEqual(grokChildren(grok.log), [['--version'], ['--help']]);
+  } finally {
+    await requestCoordinatorShutdown({
+      controlPath: coordinator.descriptor.control_path,
+      coordinatorId: coordinator.descriptor.coordinator_id,
+    });
+  }
   assert.equal(await coordinator.exited, 0);
 });
 
