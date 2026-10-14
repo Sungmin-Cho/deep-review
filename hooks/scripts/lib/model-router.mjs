@@ -247,6 +247,9 @@ function previousSupportedEffort(requested, supported) {
 // rule exists to eliminate. The rule below therefore keys off no source and no
 // fallback flag, and runs before either exists. The authorized model string
 // is the shared binding from grok-authorization.mjs, not a second literal.
+// grok-4.7 accepts xhigh (round-tripped through this bridge's argv on CLI
+// 1.0.13 and 1.0.52) and rejects max at the CLI parser. xhigh stays undeclared
+// by the mapping contract, not for lack of capability.
 const GROK_DECLARED_EFFORTS = Object.freeze(['low', 'medium', 'high']);
 const GROK_EFFORT_FLOOR = 'low';
 const GROK_EFFORT_CEILING = 'high';

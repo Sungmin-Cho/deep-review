@@ -1,9 +1,9 @@
 'use strict';
 
-// SLICE-005 — D11 exclusive `grok-4.6` authorization, enforced source-independently.
+// SLICE-005 — D11 exclusive `grok-4.7` authorization, enforced source-independently.
 //
 // D11 enumerates six paths by which an attempt could launch on something other
-// than an explicitly specified `grok-4.6`. Four of them (P1, P2, P3, P6) are
+// than an explicitly specified `grok-4.7`. Four of them (P1, P2, P3, P6) are
 // closed here at one point — the provider-scoped rule in `validateConstraints`,
 // which runs before `explicitModel` is computed and before the fallback
 // machinery exists, so it keys off no source and no `allow_fallback` flag. P4
@@ -38,7 +38,7 @@ const bridgeUrl = pathToFileURL(path.join(root, 'hooks/scripts/run-grok-reviewer
 const registryUrl = pathToFileURL(path.join(root, 'hooks/scripts/lib/capability-registry.mjs')).href;
 const taxonomyUrl = pathToFileURL(path.join(root, 'hooks/scripts/lib/target-taxonomy.mjs')).href;
 
-const AUTHORIZED_MODEL = 'grok-4.6';
+const AUTHORIZED_MODEL = 'grok-4.7';
 const DECLARED_EFFORTS = ['low', 'medium', 'high'];
 // Every source that is not genuine `auto`. `cli-reviewer` and `cli-provider`
 // satisfy `isExplicit`; `project-policy` and `user-policy` do not, which is
@@ -102,7 +102,7 @@ const TIER_SCENARIOS = {
   maximum: { routing_policy: 'quality', risk: 'high' },
 };
 
-test('P1: every MODEL_TIERS value resolves to grok-4.6, never null', async () => {
+test('P1: every MODEL_TIERS value resolves to grok-4.7, never null', async () => {
   const { routeReviewer } = await import(routerUrl);
   const { MODEL_TIERS } = await import(taxonomyUrl);
   assert.deepEqual(Object.keys(TIER_SCENARIOS).sort(), [...MODEL_TIERS].sort());
@@ -185,7 +185,7 @@ test('P6: a policy-sourced grok-4.5 throws rather than being substituted', async
 
 test('the model rule is exact: every near-miss spelling is rejected from every source', async () => {
   const { routeReviewer } = await import(routerUrl);
-  const nearMisses = ['grok-4.5', 'Grok-4.6', 'GROK-4.6', 'grok-4.6 ', ' grok-4.6', 'grok', '', 'grok-4.60'];
+  const nearMisses = ['grok-4.5', 'grok-4.6', 'Grok-4.7', 'GROK-4.7', 'grok-4.7 ', ' grok-4.7', 'grok-4.7\n', 'grok-4.7\0', 'grok', '', 'grok-4.70'];
   for (const source of NON_AUTO_SOURCES) {
     for (const model of nearMisses) {
       for (const allowFallback of [false, true]) {
@@ -199,6 +199,47 @@ test('the model rule is exact: every near-miss spelling is rejected from every s
       }
     }
   }
+});
+
+test('grok capability registry aliases all use the authorized model', async () => {
+  const [{ buildCapabilities }, { MODEL_TIERS }, { GROK_AUTHORIZED_MODEL }, { readFileSync }, { execFileSync }] = await Promise.all([
+    import(registryUrl), import(taxonomyUrl),
+    import(pathToFileURL(path.join(root, 'hooks/scripts/lib/grok-authorization.mjs')).href),
+    import('node:fs'), import('node:child_process'),
+  ]);
+  const capability = buildCapabilities({
+    detected: { grok_cli: true, grok_cli_path: '/usr/local/bin/grok', grok_compatibility_verified: true },
+    containment: { platform: 'linux', arch: 'x64' },
+  }).find((item) => item.adapter_id === 'grok-cli');
+  assert.equal(capability.model_selection.aliases.length, MODEL_TIERS.length);
+  assert.ok(capability.model_selection.aliases.every((model) => model === GROK_AUTHORIZED_MODEL));
+});
+
+test('the shipped Grok integration doc names the authorized model as a whole token', async () => {
+  const { GROK_AUTHORIZED_MODEL } = await import(pathToFileURL(path.join(root, 'hooks/scripts/lib/grok-authorization.mjs')).href);
+  const { readFileSync } = require('node:fs');
+  const doc = readFileSync(path.join(root, 'skills/deep-review-workflow/references/grok-integration.md'), 'utf8');
+  const escaped = GROK_AUTHORIZED_MODEL.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  assert.match(doc, new RegExp(`(?<![\\w.-])${escaped}(?![\\w.])`, 'u'));
+});
+
+test('tracked Grok integration sources contain no retired model ids', async () => {
+  const { readFileSync } = require('node:fs');
+  const { execFileSync } = require('node:child_process');
+  const tracked = execFileSync('git', ['ls-files', 'hooks', 'skills', 'commands', 'agents'], { cwd: root, encoding: 'utf8' }).trim().split(/\r?\n/u).filter(Boolean);
+  for (const required of ['hooks/scripts/lib/grok-authorization.mjs', 'hooks/scripts/lib/capability-registry.mjs', 'skills/deep-review-workflow/references/grok-integration.md']) {
+    assert.ok(tracked.includes(required), `tracked source list includes ${required}`);
+  }
+  const hits = [];
+  for (const relative of tracked) {
+    const bytes = readFileSync(path.join(root, relative));
+    if (bytes.includes(0)) continue;
+    const lines = bytes.toString('utf8').split(/\r?\n/u);
+    for (const retired of ['grok-4.6', 'grok-4.5']) {
+      lines.forEach((line, index) => { if (line.includes(retired)) hits.push(`${relative}:${index + 1} ${retired}`); });
+    }
+  }
+  assert.deepEqual(hits, []);
 });
 
 test('the authorized model is accepted from every source, so the rule is not a blanket refusal', async () => {

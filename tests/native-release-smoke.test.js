@@ -455,7 +455,7 @@ function smokePlan(runtime, {
   const routes = planned.assignments.map((assignment) => ({
     ...assignment,
     resolved: {
-      model: assignment.reviewer_id === 'grok' ? 'grok-4.6' : null,
+      model: assignment.reviewer_id === 'grok' ? 'grok-4.7' : null,
       effort: 'high',
     },
     ...context,
@@ -568,9 +568,9 @@ async function runInstalledGrok(runtime, {
     risk: 'low',
     document_review_mode: 'full-readiness',
     requested: {
-      model: 'grok-4.6', effort, model_source: 'auto', effort_source: 'auto',
+      model: 'grok-4.7', effort, model_source: 'auto', effort_source: 'auto',
     },
-    resolved: { model: 'grok-4.6', effort },
+    resolved: { model: 'grok-4.7', effort },
     grok_compatibility_evidence: carrier,
   };
   const promptFile = path.join(repo, 'smoke-prompt.md');
@@ -1473,7 +1473,7 @@ test('every Grok argv carries one adjacent model pair and one non-null effort', 
       (token, index) => token === '--reasoning-effort' ? [index] : [],
     );
     assert.equal(modelIndexes.length, 1, `${effort}: model pair count`);
-    assert.equal(args[modelIndexes[0] + 1], 'grok-4.6', `${effort}: adjacent model value`);
+    assert.equal(args[modelIndexes[0] + 1], 'grok-4.7', `${effort}: adjacent model value`);
     assert.equal(effortIndexes.length, 1, `${effort}: effort pair count`);
     assert.equal(args[effortIndexes[0] + 1], routed.resolved.effort, `${effort}: adjacent effort value`);
     assert.notEqual(bridge.result.resolved_effort, null, effort);

@@ -4,6 +4,18 @@
 
 All notable changes to deep-review are documented here. Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.1] — 2026-10-14
+
+### Fixed
+- The Grok reviewer pin moves to `grok-4.7` (#74); the CLI refuses the retired `grok-4.6` id, so 2.11.0 could not complete a `--grok` review.
+
+### Changed
+- Explicit model overrides, policy, or persisted plan/loop state naming `grok-4.6` are refused with `ERROR_UNSUPPORTED_MODEL`; re-plan. Registry aliases derive from `GROK_AUTHORIZED_MODEL`.
+
+### Notes
+- `grok-4.7` accepts `xhigh` at the CLI, but deep-review leaves it undeclared so automatic `xhigh`/`max` maps to `high`; the CLI rejects `max`.
+- Deep-review's authorized Grok model may intentionally lag deep-model-router's until this bridge probes and authorizes an id.
+
 ## [2.11.0] — 2026-09-06
 
 ### Added

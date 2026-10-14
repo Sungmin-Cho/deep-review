@@ -105,6 +105,28 @@ refused with `unsupported_grok_containment` and
 later patch release. Enabling it is a one-line change to
 `GROK_ENABLED_PLATFORMS`.
 
+## Authorized model and effort
+
+The bridge and router gate authorize exactly one model: `GROK_AUTHORIZED_MODEL`
+in `{plugin_root}/hooks/scripts/lib/grok-authorization.mjs`, currently
+`grok-4.7`. Any other model from any source is `ERROR_UNSUPPORTED_MODEL`.
+
+Declared efforts are `low`, `medium`, and `high`. Automatic `max` and `xhigh`
+map to `high`; automatic values below `low` clamp to `low`. An operator-specified
+effort outside those three is `ERROR_UNSUPPORTED_EFFORT`. The CLI accepts
+`xhigh` for this model and round-trips it through the bridge, but it stays
+undeclared because declaring it changes the automatic mapping contract.
+`xhigh` review turns have also been observed running ten minutes or longer,
+close to the bridge's 900-second timeout. The CLI rejects `max` outright.
+
+Deep-review can differ from deep-model-router's xAI model because it authorizes
+a model only after probing it through this bridge's own argv. A router that has
+moved to a newer id is not, by itself, authorization here.
+
+**Operator note:** the xAI service refuses Grok CLI `1.0.4` with `426 Upgrade
+Required`, although `1.0.4` remains in the compatibility allowlist. Use
+`1.0.13`.
+
 ## Privacy gate
 
 Do not scan, create state, or patch config when `--no-grok` is effective,
