@@ -1383,6 +1383,39 @@ function runMatrix(modules) {
   return rows;
 }
 
+function assertGrokRowMatchesBaseline(baselineModules, liveModules) {
+  const grokRow = (modules, input) => modules.registry.buildCapabilities(input)
+    .find((capability) => capability.adapter_id === 'grok-cli');
+  const strip = (capability) => {
+    const { available: _available, unavailable_reason: _reason, ...rest } = capability;
+    return rest;
+  };
+  for (const input of capabilityMatrix()) {
+    const before = grokRow(baselineModules, input);
+    assert.deepEqual(before.model_selection.aliases, Array(4).fill('grok-4.6'),
+      'the pinned baseline has four grok-4.6 aliases');
+
+    const expectedLive = {
+      ...before,
+      model_selection: {
+        ...before.model_selection,
+        aliases: Array(MODEL_TIERS.length).fill(GROK_AUTHORIZED_MODEL),
+      },
+    };
+    const uncontainable = grokRow(liveModules, { ...input, containment: UNCONTAINABLE });
+    assert.deepEqual(uncontainable.model_selection.aliases, Array(MODEL_TIERS.length).fill(GROK_AUTHORIZED_MODEL));
+    assert.deepEqual(strip(uncontainable), strip(expectedLive),
+      'on an uncontainable host only available and unavailable_reason may change on grok-cli');
+    assert.equal(uncontainable.available, false);
+    assert.equal(uncontainable.unavailable_reason, UNSUPPORTED_GROK_CONTAINMENT);
+
+    const containable = grokRow(liveModules, { ...input, containment: CONTAINABLE });
+    assert.deepEqual(containable.model_selection.aliases, Array(MODEL_TIERS.length).fill(GROK_AUTHORIZED_MODEL));
+    assert.deepEqual(containable, expectedLive,
+      'on a containable host the grok-cli row is unchanged from the pinned baseline');
+  }
+}
+
 const MATRIX_SIZE = capabilityMatrix().length + plannerMatrix().length
   + routingMatrix().length + synthesisMatrix().length;
 
@@ -1417,32 +1450,31 @@ test('the four carrier files keep their non-Grok behaviour byte-identical to the
   // that happens to be the other polarity. On an uncontainable containment the
   // row may differ in `available` and `unavailable_reason`; on a containable one
   // it may differ in nothing at all.
-  const grokRow = (modules, input) => modules.registry.buildCapabilities(input)
-    .find((capability) => capability.adapter_id === 'grok-cli');
-  const strip = (capability) => {
-    const { available: _available, unavailable_reason: _reason, ...rest } = capability;
-    return rest;
-  };
-  for (const input of capabilityMatrix()) {
-    const before = grokRow(baselineModules, input);
-    assert.deepEqual(before.model_selection.aliases, Array(4).fill('grok-4.6'),
-      'the pinned baseline has four grok-4.6 aliases');
+  assertGrokRowMatchesBaseline(baselineModules, liveModules);
+});
 
-    const uncontainable = grokRow(liveModules, { ...input, containment: UNCONTAINABLE });
-    assert.deepEqual(uncontainable.model_selection.aliases, Array(MODEL_TIERS.length).fill(GROK_AUTHORIZED_MODEL));
-    const { model_selection: _beforeModel, ...beforeWithoutAliases } = before;
-    const { model_selection: _uncontainableModel, ...uncontainableWithoutAliases } = uncontainable;
-    assert.deepEqual(strip(uncontainableWithoutAliases), strip(beforeWithoutAliases),
-      'on an uncontainable host only available and unavailable_reason may change on grok-cli');
-    assert.equal(uncontainable.available, false);
-    assert.equal(uncontainable.unavailable_reason, UNSUPPORTED_GROK_CONTAINMENT);
-
-    const containable = grokRow(liveModules, { ...input, containment: CONTAINABLE });
-    assert.deepEqual(containable.model_selection.aliases, Array(MODEL_TIERS.length).fill(GROK_AUTHORIZED_MODEL));
-    const { model_selection: _containableModel, ...containableWithoutAliases } = containable;
-    assert.deepEqual(containableWithoutAliases, beforeWithoutAliases,
-      'on a containable host the grok-cli row is unchanged from the pinned baseline');
-  }
+test('the Grok row replay oracle observes a mutation planted in the pinned baseline', async () => {
+  const baselineRoot = extractBaseline(BASELINE_COMMIT, 'grok-carrier-baseline-control');
+  const mutatedRoot = extractBaseline(BASELINE_COMMIT, 'grok-carrier-mutant', (relPath, bytes) => {
+    if (relPath !== 'hooks/scripts/lib/capability-registry.mjs') return bytes;
+    const source = bytes.toString('utf8');
+    const grokStart = source.indexOf("adapterId: 'grok-cli'");
+    assert.notEqual(grokStart, -1, 'the pinned Grok capability block must exist before mutation');
+    const grokEnd = source.indexOf("adapterId:", grokStart + 1);
+    const blockEnd = grokEnd === -1 ? source.length : grokEnd;
+    const catalogOffset = source.indexOf('catalog_complete: true', grokStart);
+    assert.ok(catalogOffset !== -1 && catalogOffset < blockEnd,
+      'the pinned Grok capability block must have catalog_complete: true before mutation');
+    return Buffer.from(`${source.slice(0, catalogOffset)}catalog_complete: false${source.slice(catalogOffset + 'catalog_complete: true'.length)}`, 'utf8');
+  });
+  const baselineModules = await loadCarriers(baselineRoot);
+  const mutatedModules = await loadCarriers(mutatedRoot);
+  const liveModules = await loadCarriers(pluginRoot);
+  assert.throws(
+    () => assertGrokRowMatchesBaseline(mutatedModules, liveModules),
+    (error) => error instanceof assert.AssertionError && /catalog_complete/u.test(error.message),
+  );
+  assert.doesNotThrow(() => assertGrokRowMatchesBaseline(baselineModules, liveModules));
 });
 
 test('the replay harness observes a mutation planted in the pinned baseline', async () => {

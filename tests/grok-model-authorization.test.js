@@ -220,7 +220,7 @@ test('the shipped Grok integration doc names the authorized model as a whole tok
   const { readFileSync } = require('node:fs');
   const doc = readFileSync(path.join(root, 'skills/deep-review-workflow/references/grok-integration.md'), 'utf8');
   const escaped = GROK_AUTHORIZED_MODEL.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-  assert.match(doc, new RegExp(`${escaped}(?![\\w.])`, 'u'));
+  assert.match(doc, new RegExp(`(?<![\\w.-])${escaped}(?![\\w.])`, 'u'));
 });
 
 test('tracked Grok integration sources contain no retired model ids', async () => {
