@@ -83,7 +83,7 @@ test('T-CADENCE-1: both cadence authorities strip Grok selectors and parse deriv
     },
     {
       name: 'provider model override',
-      argv: ['--ultracode', '--model', 'grok=grok-4.6'],
+      argv: ['--ultracode', '--model', 'grok=grok-4.7'],
       expected: ['--no-opus', '--no-agy', '--no-grok'],
     },
     {
@@ -93,7 +93,7 @@ test('T-CADENCE-1: both cadence authorities strip Grok selectors and parse deriv
     },
     {
       name: 'reviewer model override',
-      argv: ['--ultracode', '--reviewer-model', 'grok=grok-4.6'],
+      argv: ['--ultracode', '--reviewer-model', 'grok=grok-4.7'],
       expected: ['--no-opus', '--no-agy', '--no-grok'],
     },
     {

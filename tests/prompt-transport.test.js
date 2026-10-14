@@ -199,7 +199,7 @@ function largestInlinePrompt({ binary, platform, fixedArgs, promptFilePath }) {
 
 test('every fixed argv token is charged against the host budget', () => {
   const promptFilePath = promptFilePathFor('grok-fixed-tokens');
-  const base = ['--model', 'grok-4.6', '--permission-mode', 'plan'];
+  const base = ['--model', 'grok-4.7', '--permission-mode', 'plan'];
   const extra = 'x'.repeat(1_000);
 
   for (const [platform, binary] of GROK_HOSTS) {
@@ -217,7 +217,7 @@ test('every fixed argv token is charged against the host budget', () => {
 
 test('complete composed bytes deterministically select inline or prompt-file transport', () => {
   const fixedArgs = [
-    '--model', 'grok-4.6',
+    '--model', 'grok-4.7',
     '--permission-mode', 'plan',
     '--sandbox', 'read-only',
     '--cwd', '/repo',
@@ -294,7 +294,7 @@ test('the prompt-file argv form must itself fit the host budget or the attempt f
     () => selectPromptTransport({
       binary,
       platform,
-      fixedArgs: ['--model', 'grok-4.6'],
+      fixedArgs: ['--model', 'grok-4.7'],
       promptFilePath,
       promptBytes: Buffer.alloc(1_000_000, 0x63),
     }),
@@ -309,7 +309,7 @@ test('the selector never truncates and never reports a truncating outcome', () =
     const selection = selectPromptTransport({
       binary: '/usr/local/bin/grok',
       platform: 'linux',
-      fixedArgs: ['--model', 'grok-4.6'],
+      fixedArgs: ['--model', 'grok-4.7'],
       promptFilePath,
       promptBytes,
     });

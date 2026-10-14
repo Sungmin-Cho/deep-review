@@ -7,6 +7,8 @@ import {
 } from './probe-limits.mjs';
 import { readContainedFile, writeContainedFile } from './runtime-context.mjs';
 import { ASSIGNMENT_ROLES } from './assignment-rubrics.mjs';
+import { MODEL_TIERS } from './target-taxonomy.mjs';
+import { GROK_AUTHORIZED_MODEL } from './grok-authorization.mjs';
 import {
   UNSUPPORTED_GROK_CONTAINMENT,
   isGrokContainmentPlatformSupported,
@@ -240,7 +242,7 @@ export function buildCapabilities({
         roles: ['standard', 'adversarial'],
         modelSelection: {
           supported: true,
-          aliases: ['grok-4.6', 'grok-4.6', 'grok-4.6', 'grok-4.6'],
+          aliases: MODEL_TIERS.map(() => GROK_AUTHORIZED_MODEL),
           catalog_complete: true,
           transport: 'flag:--model',
         },

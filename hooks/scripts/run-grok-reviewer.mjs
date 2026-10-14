@@ -66,6 +66,7 @@ import { atomicWriteFile, resolvePluginRoot } from './lib/runtime-context.mjs';
 import { parseReviewerReport } from './review-synthesis.mjs';
 
 export { GROK_AUTHORIZED_MODEL };
+// The grok-4.7 CLI parser accepts xhigh and rejects max; xhigh stays undeclared by mapping contract, not capability.
 export const GROK_SUPPORTED_EFFORTS = Object.freeze(['low', 'medium', 'high']);
 
 const DEFAULT_MAX_TURNS = 6;

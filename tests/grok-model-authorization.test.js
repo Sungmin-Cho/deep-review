@@ -1,9 +1,9 @@
 'use strict';
 
-// SLICE-005 — D11 exclusive `grok-4.6` authorization, enforced source-independently.
+// SLICE-005 — D11 exclusive `grok-4.7` authorization, enforced source-independently.
 //
 // D11 enumerates six paths by which an attempt could launch on something other
-// than an explicitly specified `grok-4.6`. Four of them (P1, P2, P3, P6) are
+// than an explicitly specified `grok-4.7`. Four of them (P1, P2, P3, P6) are
 // closed here at one point — the provider-scoped rule in `validateConstraints`,
 // which runs before `explicitModel` is computed and before the fallback
 // machinery exists, so it keys off no source and no `allow_fallback` flag. P4
@@ -38,7 +38,7 @@ const bridgeUrl = pathToFileURL(path.join(root, 'hooks/scripts/run-grok-reviewer
 const registryUrl = pathToFileURL(path.join(root, 'hooks/scripts/lib/capability-registry.mjs')).href;
 const taxonomyUrl = pathToFileURL(path.join(root, 'hooks/scripts/lib/target-taxonomy.mjs')).href;
 
-const AUTHORIZED_MODEL = 'grok-4.6';
+const AUTHORIZED_MODEL = 'grok-4.7';
 const DECLARED_EFFORTS = ['low', 'medium', 'high'];
 // Every source that is not genuine `auto`. `cli-reviewer` and `cli-provider`
 // satisfy `isExplicit`; `project-policy` and `user-policy` do not, which is
@@ -102,7 +102,7 @@ const TIER_SCENARIOS = {
   maximum: { routing_policy: 'quality', risk: 'high' },
 };
 
-test('P1: every MODEL_TIERS value resolves to grok-4.6, never null', async () => {
+test('P1: every MODEL_TIERS value resolves to grok-4.7, never null', async () => {
   const { routeReviewer } = await import(routerUrl);
   const { MODEL_TIERS } = await import(taxonomyUrl);
   assert.deepEqual(Object.keys(TIER_SCENARIOS).sort(), [...MODEL_TIERS].sort());
@@ -185,7 +185,7 @@ test('P6: a policy-sourced grok-4.5 throws rather than being substituted', async
 
 test('the model rule is exact: every near-miss spelling is rejected from every source', async () => {
   const { routeReviewer } = await import(routerUrl);
-  const nearMisses = ['grok-4.5', 'Grok-4.6', 'GROK-4.6', 'grok-4.6 ', ' grok-4.6', 'grok', '', 'grok-4.60'];
+  const nearMisses = ['grok-4.5', 'grok-4.6', 'Grok-4.7', 'GROK-4.7', 'grok-4.7 ', ' grok-4.7', 'grok-4.7\n', 'grok-4.7\0', 'grok', '', 'grok-4.70'];
   for (const source of NON_AUTO_SOURCES) {
     for (const model of nearMisses) {
       for (const allowFallback of [false, true]) {
@@ -197,6 +197,32 @@ test('the model rule is exact: every near-miss spelling is rejected from every s
           `${source} model=${JSON.stringify(model)} allow_fallback=${allowFallback}`,
         );
       }
+    }
+  }
+});
+
+test('grok capability aliases and shipped integration docs share the authorized model', async () => {
+  const [{ buildCapabilities }, { MODEL_TIERS }, { GROK_AUTHORIZED_MODEL }, { readFileSync }, { execFileSync }] = await Promise.all([
+    import(registryUrl), import(taxonomyUrl),
+    import(pathToFileURL(path.join(root, 'hooks/scripts/lib/grok-authorization.mjs')).href),
+    import('node:fs'), import('node:child_process'),
+  ]);
+  const capability = buildCapabilities({
+    detected: { grok_cli: true, grok_cli_path: '/usr/local/bin/grok', grok_compatibility_verified: true },
+    containment: { platform: 'linux', arch: 'x64' },
+  }).find((item) => item.adapter_id === 'grok-cli');
+  assert.equal(capability.model_selection.aliases.length, MODEL_TIERS.length);
+  assert.ok(capability.model_selection.aliases.every((model) => model === GROK_AUTHORIZED_MODEL));
+  const doc = readFileSync(path.join(root, 'skills/deep-review-workflow/references/grok-integration.md'), 'utf8');
+  assert.ok(doc.includes(GROK_AUTHORIZED_MODEL));
+  const tracked = execFileSync('git', ['ls-files', 'hooks', 'skills', 'commands', 'agents'], { cwd: root, encoding: 'utf8' }).trim().split(/\r?\n/u).filter(Boolean);
+  for (const relative of tracked) {
+    let source;
+    try { source = readFileSync(path.join(root, relative), 'utf8'); } catch { continue; }
+    if (source.includes('\uFFFD')) continue;
+    for (const retired of ['grok-4.6', 'grok-4.5']) {
+      const lines = source.split(/\r?\n/u);
+      lines.forEach((line, index) => assert.ok(!line.includes(retired), `${relative}:${index + 1} contains ${retired}`));
     }
   }
 });

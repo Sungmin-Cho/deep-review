@@ -2127,7 +2127,7 @@ test('the Grok bridge child-process entry consumes the transported token instead
       wave: 1,
       required: true,
       selection_reason: 'token transport fixture',
-      resolved: { model: 'grok-4.6', effort: 'medium' },
+      resolved: { model: 'grok-4.7', effort: 'medium' },
       artifact_phase: 'implementation',
       risk: 'low',
       document_review_mode: 'full-readiness',

@@ -263,9 +263,9 @@ function assertZeroSideEffects(run, label) {
 // with each entrypoint's own token vector.
 const CANDIDACY_SOURCES = [
   { id: 'grok-flag', transport: 'argv', argv: ['--grok'] },
-  { id: 'provider-model-override', transport: 'argv', argv: ['--model', 'grok=grok-4.6'] },
+  { id: 'provider-model-override', transport: 'argv', argv: ['--model', 'grok=grok-4.7'] },
   { id: 'provider-effort-override', transport: 'argv', argv: ['--effort', 'grok=high'] },
-  { id: 'reviewer-model-override', transport: 'argv', argv: ['--reviewer-model', 'grok=grok-4.6'] },
+  { id: 'reviewer-model-override', transport: 'argv', argv: ['--reviewer-model', 'grok=grok-4.7'] },
   { id: 'reviewer-effort-override', transport: 'argv', argv: ['--reviewer-effort', 'grok=high'] },
   {
     id: 'enabled-providers',
@@ -479,9 +479,9 @@ test('--no-grok with a Grok-targeting override is ERROR_CONFLICTING_REVIEWER_SEL
   const { parsePublicRoute } = await import(routeUrl);
   const fixture = policyFixture({ project: null, user: null });
   const overrides = [
-    ['--model', 'grok=grok-4.6'],
+    ['--model', 'grok=grok-4.7'],
     ['--effort', 'grok=high'],
-    ['--reviewer-model', 'grok=grok-4.6'],
+    ['--reviewer-model', 'grok=grok-4.7'],
     ['--reviewer-effort', 'grok=high'],
   ];
   for (const override of overrides) {
@@ -510,9 +510,9 @@ test('effectiveGrokCandidacy normalizes every D13 source and is false without on
   const empty = { providers: {}, reviewers: {} };
   const truthy = [
     ['--grok flag', ['--grok'], empty],
-    ['provider model override', [], { providers: { grok: { model: 'grok-4.6' } }, reviewers: {} }],
+    ['provider model override', [], { providers: { grok: { model: 'grok-4.7' } }, reviewers: {} }],
     ['provider effort override', [], { providers: { grok: { effort: 'high' } }, reviewers: {} }],
-    ['reviewer model override', [], { providers: {}, reviewers: { grok: { model: 'grok-4.6' } } }],
+    ['reviewer model override', [], { providers: {}, reviewers: { grok: { model: 'grok-4.7' } } }],
     ['reviewer effort override', [], { providers: {}, reviewers: { grok: { effort: 'high' } } }],
     ['enabled_providers', [], { ...empty, enabled_providers: ['grok'] }],
     ['required_providers', [], { ...empty, required_providers: ['grok'] }],
@@ -618,9 +618,9 @@ test('a Grok-targeting override restores candidacy without forcing selection', a
   const { parsePublicRoute } = await import(routeUrl);
   const fixture = policyFixture({ project: null, user: null });
   const overrides = [
-    ['--model', 'grok=grok-4.6'],
+    ['--model', 'grok=grok-4.7'],
     ['--effort', 'grok=high'],
-    ['--reviewer-model', 'grok=grok-4.6'],
+    ['--reviewer-model', 'grok=grok-4.7'],
     ['--reviewer-effort', 'grok=high'],
   ];
   for (const argv of overrides) {
@@ -707,7 +707,7 @@ function grokCapabilities() {
     },
     {
       protocol_version: '2.0', adapter_id: 'grok-cli', provider: 'grok', available: true, roles: ['standard'],
-      model_selection: { supported: true, aliases: ['grok-4.6', 'grok-4.6', 'grok-4.6', 'grok-4.6'], catalog_complete: true, transport: 'flag:--model' },
+      model_selection: { supported: true, aliases: ['grok-4.7', 'grok-4.7', 'grok-4.7', 'grok-4.7'], catalog_complete: true, transport: 'flag:--model' },
       effort_selection: { supported: true, levels: ['low', 'medium', 'high'], transport: 'flag:--reasoning-effort' },
       structured_output: true, read_only_enforcement: 'permission-mode-plan',
     },
